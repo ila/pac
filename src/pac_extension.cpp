@@ -9,6 +9,23 @@
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
 
+#include <fstream>
+#include <unordered_set>
+
+#include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/types/string_type.hpp"
+#include "duckdb/common/vector_operations/unary_executor.hpp"
+#include "duckdb/common/types.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_search_path.hpp"
+#include "include/pac_optimizer.hpp"
+#include "include/pac_privacy_unit.hpp"
+
+// planner/bound expression headers needed to inspect bind-time constant arguments and bound function info
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+
 namespace duckdb {
 
 inline void PacScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -22,25 +39,41 @@ inline void PacOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state, 
 	auto &name_vector = args.data[0];
 	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
 		return StringVector::AddString(result, "Pac " + name.GetString() + ", my linked OpenSSL version is " +
-		                                           OPENSSL_VERSION_TEXT);
+		                                   OPENSSL_VERSION_TEXT);
 	});
 }
 
+// NOTE: add/remove PAC privacy unit helpers and functions moved to src/include/pac_privacy_unit.hpp and
+// src/pac_privacy_unit.cpp
+
 static void LoadInternal(ExtensionLoader &loader) {
-
-	auto &db_config = duckdb::DBConfig::GetConfig(loader);
-
 	// Register a scalar function
 	auto pac_scalar_function = ScalarFunction("pac", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PacScalarFun);
 	loader.RegisterFunction(pac_scalar_function);
-
-	auto pac_rewrite_rule = duckdb::PACRewriteRule();
-	db_config.optimizer_extensions.push_back(pac_rewrite_rule);
 
 	// Register another scalar function
 	auto pac_openssl_version_scalar_function = ScalarFunction("pac_openssl_version", {LogicalType::VARCHAR},
 	                                                            LogicalType::VARCHAR, PacOpenSSLVersionScalarFun);
 	loader.RegisterFunction(pac_openssl_version_scalar_function);
+
+	// Register add_pac_privacy_unit (implemented in pac_privacy_unit.cpp)
+	auto add_pac_privacy_unit = ScalarFunction(
+		"add_pac_privacy_unit",
+		{LogicalType::VARCHAR},
+		LogicalType::VARCHAR,
+		AddPacPrivacyUnitFun,
+		AddPacPrivacyUnitBind
+	);
+	loader.RegisterFunction(add_pac_privacy_unit);
+	// Register remove_pac_privacy_unit (implemented in pac_privacy_unit.cpp)
+	auto remove_pac_privacy_unit = ScalarFunction(
+		"remove_pac_privacy_unit",
+		{LogicalType::VARCHAR},
+		LogicalType::VARCHAR,
+		RemovePacPrivacyUnitFun,
+		RemovePacPrivacyUnitBind
+	);
+	loader.RegisterFunction(remove_pac_privacy_unit);
 }
 
 void PacExtension::Load(ExtensionLoader &loader) {

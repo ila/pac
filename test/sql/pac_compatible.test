@@ -1,0 +1,107 @@
+# name: test/sql/pac.test
+# description: test pac extension
+# group: [sql]
+
+# --- PAC privacy unit management and compatibility tests ---
+
+# Create a test table
+statement ok
+CREATE TABLE t1(a INTEGER, b INTEGER);
+
+statement ok
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+
+# Try PAC-compatible query before adding to privacy file (should not be PAC compatible)
+# (Assume your optimizer or extension exposes a function or error for non-PAC queries; adjust as needed)
+# Here we just check add/remove and query logic
+
+# Add table to privacy file
+query I
+SELECT add_pac_privacy_unit('t1');
+----
+Added PAC privacy unit: t1
+
+# Add again (should be idempotent)
+query I
+SELECT add_pac_privacy_unit('t1');
+----
+PAC privacy unit already present: t1
+
+# PAC-compatible query: SUM
+query I
+SELECT SUM(b) FROM t1;
+----
+60
+
+# PAC-compatible query: COUNT
+query I
+SELECT COUNT(*) FROM t1;
+----
+3
+
+# PAC-compatible query: AVG
+query I
+SELECT AVG(b) FROM t1;
+----
+20
+
+# PAC-compatible query: GROUP BY
+query I
+SELECT a, SUM(b) FROM t1 GROUP BY a ORDER BY a;
+----
+1|10
+2|20
+3|30
+
+# PAC-compatible query: INNER JOIN
+statement ok
+CREATE TABLE t2(x INTEGER, y INTEGER);
+statement ok
+INSERT INTO t2 VALUES (1, 100), (2, 200);
+query I
+SELECT t1.a, SUM(t2.y) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t1.a ORDER BY t1.a;
+----
+1|100
+2|200
+
+# Not PAC-compatible: MIN (forbidden aggregate)
+statement error
+SELECT MIN(b) FROM t1;
+----
+# Should error or be rejected by PAC rules
+
+# Not PAC-compatible: OUTER JOIN
+statement error
+SELECT * FROM t1 LEFT OUTER JOIN t2 ON t1.a = t2.x;
+----
+# Should error or be rejected by PAC rules
+
+# Not PAC-compatible: DISTINCT
+statement error
+SELECT DISTINCT a FROM t1;
+----
+# Should error or be rejected by PAC rules
+
+# Not PAC-compatible: window function
+statement error
+SELECT a, SUM(b) OVER (PARTITION BY a) FROM t1;
+----
+# Should error or be rejected by PAC rules
+
+# Remove table from privacy file
+query I
+SELECT remove_pac_privacy_unit('t1');
+----
+Removed PAC privacy unit: t1
+
+# Remove again (should be idempotent)
+query I
+SELECT remove_pac_privacy_unit('t1');
+----
+PAC privacy unit not present: t1
+
+# Clean up
+statement ok
+DROP TABLE t1;
+statement ok
+DROP TABLE t2;
