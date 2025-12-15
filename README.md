@@ -1,102 +1,95 @@
-# Pac
+# PAC — DuckDB Privacy-Aware Aggregation Extension
 
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
+PAC (Privacy-Aware-Computed) is a small DuckDB optimizer extension that enforces a set of privacy rules on aggregation queries over designated tables ("PAC tables"). If a query against a PAC table does not satisfy the rules the extension rejects it with a clear ParserException message describing the reason.
 
----
+This README focuses on practical developer workflows: building, running, configuring, and testing the extension.
 
-This extension, Pac, allow you to ... <extension_goal>.
+What PAC enforces
+- The query must scan at least one table listed in the PAC tables file.
+- Allowed aggregates: SUM, COUNT, AVG. Other aggregates (MIN, MAX, custom aggregates) are disallowed.
+- Nested aggregates (an aggregate inside another aggregate) are disallowed.
+- Window functions are disallowed.
+- DISTINCT is disallowed.
+- Only INNER JOIN is allowed. Outer joins, cross products, and set operations (UNION/EXCEPT/INTERSECT) are disallowed.
 
+When a query is rejected the optimizer throws a ParserException with one of the explanatory messages, for example:
+- "Query does not scan any PAC table!"
+- "Query does not contain any allowed aggregation (sum, count, avg)!"
+- "Query contains disallowed aggregates (only sum, count, avg allowed; no nested aggregates)!"
+- "Query contains window functions, which are not allowed in PAC-compatible queries!"
+- "Query contains DISTINCT, which is not allowed in PAC-compatible queries!"
+- "Query contains disallowed joins (only INNER JOIN allowed in PAC-compatible queries)!"
 
-## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
+Repository layout (important parts)
+- `src/`, `include/` — extension source code and headers
+- `test/sql/` — SQL tests exercised by the DuckDB test runner
+- `duckdb/` — vendored DuckDB source used to build the extension
+- `build/` — out-of-tree build output (debug/release)
 
-### Build steps
-Now to build the extension, run:
+Quick build (Makefile shortcut)
+- The repository ships a Makefile target that builds DuckDB + extension. From the repo root:
+
 ```sh
 make
 ```
-The main binaries that will be built are:
+
+This produces artifacts under `build/release/` (or `build/debug` if you configure a debug build): the DuckDB binary, test runner, and the extension library.
+
+Manual build (CMake + Ninja)
+
+```sh
+cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/debug -j$(nproc)
+```
+
+To build Release, switch to `-DCMAKE_BUILD_TYPE=Release` and a different build directory.
+
+Configuration
+- `pac_privacy_file` is a DuckDB setting that points to a newline-separated CSV file listing PAC table names (one name per line). Example:
+
+```sql
+SET pac_privacy_file = 'test/sql/test_pac_tables.csv';
+```
+
+- Runtime PRAGMAs exposed for tests and convenience:
+  - `PRAGMA add_pac_privacy_unit('table_name');`
+  - `PRAGMA remove_pac_privacy_unit('table_name');`
+
+These PRAGMAs are test helpers that modify the CSV file used by the tests.
+
+Running the extension (DuckDB shell)
+
+Start the built DuckDB binary and use SQL normally. The extension validates queries during optimization and will reject incompatible queries with a ParserException printed by the shell.
+
 ```sh
 ./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/pac/pac.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `pac.duckdb_extension` is the loadable binary as it would be distributed.
-
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
-
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `pac()` that takes a string arguments and returns a string:
-```
-D select pac('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Pac Jane 🐥 │
-└───────────────┘
 ```
 
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
+Running tests
+- The SQL tests in `test/sql/` are executed by the DuckDB `unittest` binary.
+
+Convenience (Makefile):
 ```sh
 make test
 ```
 
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
+Run the test runner directly (example for debug build):
 
-CLI:
-```shell
-duckdb -unsigned
+```sh
+build/debug/test/unittest --test-dir ../../.. [sql] -R pac -V
 ```
 
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
+Adjust paths and filters to your build layout and desired test selection.
 
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
+CLion / Debugging tips
+- Open `duckdb/CMakeLists.txt` or the project root in CLion and point the CMake profile to an out-of-tree build directory (for example `build/debug`).
+- Add the extension CMake config if needed: pass `-DDUCKDB_EXTENSION_CONFIGS=<path-to-pac/CMakeLists.txt>` to the DuckDB CMake invocation so the main build knows about the extension.
+- Create a Run/Debug configuration that runs the `unittest` binary and pass program arguments to filter SQL tests (e.g. `--test-dir ../../.. [sql] -R pac`).
+- If CLion's Run/Debug console disappears, check Run -> Edit Configurations -> ensure the correct binary is selected and that the "Show command line afterwards" or similar console options are enabled.
 
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
+Contributing
+- Add SQL tests under `test/sql/` for any behavior changes.
+- Run the tests locally before submitting a patch.
 
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL pac;
-LOAD pac;
-```
-
-## Setting up CLion
-
-### Opening project
-Configuring CLion with this extension requires a little work. Firstly, make sure that the DuckDB submodule is available.
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
-
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`, and CMake Options to which the following flag should be added, with the path to the extension CMakeList:
-
-```
--DDUCKDB_EXTENSION_CONFIGS=<path_to_the_exentension_CMakeLists.txt>
-```
-
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
+License
+- See `LICENSE` in the repository root.

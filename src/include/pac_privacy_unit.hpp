@@ -13,21 +13,11 @@ DUCKDB_API void WritePacTablesFile(const std::string &filename, const std::unord
 // Helper: check if table exists in the current catalog
 DUCKDB_API bool TableExists(ClientContext &context, const std::string &table_name);
 
-// Bind data and functions for add/remove PAC privacy unit scalar functions
-struct PacPrivacyUnitBindData : public FunctionData {
-	std::string table_name;
-	PacPrivacyUnitBindData(std::string table_name);
-	unique_ptr<FunctionData> Copy() const override;
-	bool Equals(const FunctionData &other) const override;
-};
+// Pragma-style helpers: PRAGMA add_privacy_unit(...) and PRAGMA remove_privacy_unit(...)
+DUCKDB_API void AddPrivacyUnitPragma(ClientContext &context, const FunctionParameters &parameters);
+DUCKDB_API void RemovePrivacyUnitPragma(ClientContext &context, const FunctionParameters &parameters);
 
-DUCKDB_API unique_ptr<FunctionData> AddPacPrivacyUnitBind(ClientContext &context, ScalarFunction &function,
-                                                          vector<unique_ptr<Expression>> &arguments);
-DUCKDB_API void AddPacPrivacyUnitFun(DataChunk &args, ExpressionState &state, Vector &result);
-
-DUCKDB_API unique_ptr<FunctionData> RemovePacPrivacyUnitBind(ClientContext &context, ScalarFunction &function,
-                                                             vector<unique_ptr<Expression>> &arguments);
-DUCKDB_API void RemovePacPrivacyUnitFun(DataChunk &args, ExpressionState &state, Vector &result);
+// Helper to delete the privacy unit file (for tests/cleanup)
+DUCKDB_API void DeletePrivacyUnitFileFun(DataChunk &args, ExpressionState &state, Vector &result);
 
 } // namespace duckdb
-

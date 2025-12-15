@@ -16,10 +16,10 @@ public:
 	static void PACRewriteRuleFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
 	// Checks if the query plan is PAC compatible according to the rules.
-	static bool IsPACCompatible(LogicalOperator &plan);
+	// Throws a ParserException with an explanatory message when the plan is not compatible.
+	static void IsPACCompatible(LogicalOperator &plan, ClientContext &context);
 };
 
 } // namespace duckdb
 
 #endif // DUCKDB_OPENPAC_REWRITE_RULE_HPP
-

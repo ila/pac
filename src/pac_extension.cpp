@@ -56,24 +56,38 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                                            LogicalType::VARCHAR, PacOpenSSLVersionScalarFun);
 	loader.RegisterFunction(pac_openssl_version_scalar_function);
 
-	// Register add_pac_privacy_unit (implemented in pac_privacy_unit.cpp)
-	auto add_pac_privacy_unit = ScalarFunction(
-		"add_pac_privacy_unit",
+	// Register add_pac_privacy_unit (1-arg)
+	// NOTE: scalar add/remove functions removed; prefer PRAGMA add_privacy_unit / PRAGMA remove_privacy_unit
+
+	// Register remove_pac_privacy_unit (1-arg)
+	// (removed scalar variants)
+
+	// Register pragma variants so they can be invoked as PRAGMA add_privacy_unit(...) / PRAGMA remove_privacy_unit(...)
+	auto add_privacy_unit_pragma = PragmaFunction::PragmaCall("add_pac_privacy_unit", AddPrivacyUnitPragma,
+	                                                           {LogicalType::VARCHAR});
+	loader.RegisterFunction(add_privacy_unit_pragma);
+	auto remove_privacy_unit_pragma = PragmaFunction::PragmaCall("remove_pac_privacy_unit", RemovePrivacyUnitPragma,
+	                                                              {LogicalType::VARCHAR});
+	loader.RegisterFunction(remove_privacy_unit_pragma);
+
+	// Register scalar helper to delete file (tests use this cleanup helper)
+	auto delete_privacy_unit_file = ScalarFunction(
+		"delete_privacy_unit_file",
 		{LogicalType::VARCHAR},
 		LogicalType::VARCHAR,
-		AddPacPrivacyUnitFun,
-		AddPacPrivacyUnitBind
+		DeletePrivacyUnitFileFun
 	);
-	loader.RegisterFunction(add_pac_privacy_unit);
-	// Register remove_pac_privacy_unit (implemented in pac_privacy_unit.cpp)
-	auto remove_pac_privacy_unit = ScalarFunction(
-		"remove_pac_privacy_unit",
-		{LogicalType::VARCHAR},
-		LogicalType::VARCHAR,
-		RemovePacPrivacyUnitFun,
-		RemovePacPrivacyUnitBind
-	);
-	loader.RegisterFunction(remove_pac_privacy_unit);
+	loader.RegisterFunction(delete_privacy_unit_file);
+
+	auto pac_rewrite_rule = PACRewriteRule();
+	auto &db = loader.GetDatabaseInstance();
+	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
+
+	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
+	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result determinism)
+	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
+
+
 }
 
 void PacExtension::Load(ExtensionLoader &loader) {
