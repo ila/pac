@@ -1,0 +1,79 @@
+# name: test/sql/pac_aggregate.test
+# description: tests for pac_aggregate scalar function
+# group: [sql]
+
+require pac
+
+statement ok
+SET pac_seed = 12345;
+
+statement ok
+SET pac_noise = false;
+
+# deterministic: identical per-sample values -> variance 0 -> delta 0 -> no noise -> returns element value
+query I
+SELECT pac_aggregate(ARRAY[42.0, 42.0, 42.0, 42.0], ARRAY[3,3,3,3], 1.0/128, 3);
+----
+42
+
+# strict null refusal: any NULL in values -> return NULL
+query I
+SELECT pac_aggregate(ARRAY[1.0, NULL, 3.0], ARRAY[3,3,3], 1.0/128, 3);
+----
+NULL
+
+# cardinality refusal: max(counts) < k -> NULL
+query I
+SELECT pac_aggregate(ARRAY[1.0,2.0,3.0], ARRAY[1,1,1], 1.0/128, 3);
+----
+NULL
+
+# Per-sample CTE style tests inspired by the docs single-query pattern
+statement ok
+DROP TABLE IF EXISTS per_sample;
+
+statement ok
+CREATE TABLE per_sample(group_key VARCHAR, sample_id INTEGER, val DOUBLE, cnt INTEGER);
+
+# Group A: consistent values -> deterministic release 10
+statement ok
+INSERT INTO per_sample VALUES
+  ('A', 1, 10.0, 3),
+  ('A', 2, 10.0, 3),
+  ('A', 3, 10.0, 3),
+  ('A', 4, 10.0, 3);
+
+# Group B: consistent but different value -> deterministic release 20
+statement ok
+INSERT INTO per_sample VALUES
+  ('B', 1, 20.0, 3),
+  ('B', 2, 20.0, 3),
+  ('B', 3, 20.0, 3),
+  ('B', 4, 20.0, 3);
+
+# Group C: has a NULL in one sample -> strict-null refusal -> NULL
+statement ok
+INSERT INTO per_sample VALUES
+  ('C', 1, 5.0, 3),
+  ('C', 2, NULL, 3),
+  ('C', 3, 5.0, 3),
+  ('C', 4, 5.0, 3);
+
+# Group D: counts below k => refusal -> NULL (max cnt = 1 < k=3)
+statement ok
+INSERT INTO per_sample VALUES
+  ('D', 1, 7.0, 1),
+  ('D', 2, 7.0, 1),
+  ('D', 3, 7.0, 1),
+  ('D', 4, 7.0, 1);
+
+query I
+SELECT group_key, pac_aggregate(array_agg(val ORDER BY sample_id), array_agg(cnt ORDER BY sample_id), 1.0/128, 3) AS pac_val
+FROM per_sample
+GROUP BY group_key
+ORDER BY group_key;
+----
+A|10
+B|20
+C|NULL
+D|NULL

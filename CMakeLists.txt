@@ -15,7 +15,7 @@ project(${TARGET_NAME})
 include_directories(src/include)
 
 # Extension sources (added pac_privacy_unit and pac_compatibility_check)
-set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_compiler.cpp src/pac_privacy_unit.cpp src/pac_compatibility_check.cpp)
+set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_compiler.cpp src/pac_privacy_unit.cpp src/pac_compatibility_check.cpp src/pac_aggregate.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

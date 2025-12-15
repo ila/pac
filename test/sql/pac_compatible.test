@@ -77,6 +77,13 @@ SELECT t1.a, SUM(t2.y) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t1.a ORDER 
 1	100
 2	200
 
+# PAC-compatible: not a PAC query (table not in privacy file)
+query II
+SELECT * FROM t2;
+----
+1	100
+2	200
+
 # Not PAC-compatible: MIN (no aggregate)
 statement error
 SELECT a FROM t1;

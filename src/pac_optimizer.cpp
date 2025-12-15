@@ -146,9 +146,9 @@ void PACRewriteRule::IsPACCompatible(LogicalOperator &plan, ClientContext &conte
 	}
     // 1. Read PAC tables using the configured filename (default) and also merge test file if present
     auto pac_tables = ReadPacTablesFile(pac_privacy_file);
-    // 2. Must scan a PAC table
+    // 2. If the query does not scan a PAC table, return
     if (!ScanOnPACTable(plan, pac_tables)) {
-	    throw ParserException("Query does not scan any PAC table!");
+	    return;
     }
 	// 3. Must not contain window functions (a WINDOW node can contain aggregates inside)
 	if (ContainsWindowFunction(plan)) {

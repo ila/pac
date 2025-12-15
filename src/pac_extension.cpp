@@ -21,6 +21,7 @@
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "include/pac_optimizer.hpp"
 #include "include/pac_privacy_unit.hpp"
+#include "include/pac_aggregate.hpp"
 
 // planner/bound expression headers needed to inspect bind-time constant arguments and bound function info
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -86,7 +87,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result determinism)
 	db.config.AddExtensionOption("pac_noise", "apply PAC noise", LogicalType::BOOLEAN);
+	// Add option to set deterministic RNG seed for PAC functions (useful for tests)
+	db.config.AddExtensionOption("pac_seed", "deterministic RNG seed for PAC functions", LogicalType::BIGINT);
 
+	// Register pac_aggregate function(s)
+	RegisterPacAggregateFunctions(loader);
 
 }
 
