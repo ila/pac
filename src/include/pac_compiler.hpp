@@ -16,21 +16,31 @@ namespace duckdb {
 DUCKDB_API void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                 const std::string &privacy_unit);
 
+// Overload: Accept pac_idx to allow for incremental compilation updates after pac_sample insertion
+DUCKDB_API void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                const std::string &privacy_unit, idx_t pac_idx);
+
 // Create the sample CTE and write it to a file (void): filename provided by caller
 DUCKDB_API void CreateSampleCTE(ClientContext &context, const std::string &privacy_unit,
                                 const std::string &filename, const std::string &query_normalized);
 
 // Modify the logical query plan to join in the per-sample table (pac_sample) and extend
 // group-by keys / projections as needed. Implemented as an in-place modification of `plan`.
-DUCKDB_API void JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan);
+// Returns the table index assigned to the inserted pac_sample (or INVALID_INDEX on failure).
+DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan);
 
 // Create a pac_sample LogicalGet node for the plan using the next available table index
 DUCKDB_API unique_ptr<LogicalGet> CreatePacSampleGetNode(ClientContext &context, unique_ptr<LogicalOperator> &plan,
                                                          const std::string &privacy_table_name);
 
 // Overload: Accept a prebuilt pac_sample LogicalGet (caller can construct it first and pass via move)
-DUCKDB_API void JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+// Returns the pac table index assigned when inserting the provided pac_get (or INVALID_INDEX).
+DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan,
                                     unique_ptr<LogicalGet> pac_get);
+
+// Overload: Accept a privacy unit name and create/insert the pac_sample get; returns pac_idx or INVALID_INDEX
+DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                    const std::string &privacy_unit);
 
 // Modify aggregate operators to add sample_id as a grouping key where pac_sample participates
 DUCKDB_API void ModifyAggregateForSample(ClientContext &context, unique_ptr<LogicalOperator> &plan, idx_t pac_idx);

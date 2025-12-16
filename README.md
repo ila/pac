@@ -148,6 +148,19 @@ build/debug/test/unittest --test-dir ../../.. [sql] -R pac -V
 
 Adjust paths and filters to your build layout and desired test selection.
 
+Building and running tests with Ninja
+- If you prefer Ninja as the generator you can drive the Makefile with the `GEN=ninja` variable; this repository exposes a convenience Make target for common CMake workflows. Example (Debug build):
+
+```sh
+GEN=ninja make debug
+```
+
+This creates a `build/debug/` directory and compiles the DuckDB binary and test binaries using Ninja. After the build, test binaries live under `build/debug/test/`. To run the updated test executable added in this patch (all tests are contained in `src/test_update_parent_aggregate.cpp`), run:
+
+```sh
+build/debug/test/test_update_parent_aggregate
+```
+
 CLion / Debugging tips
 - Open `duckdb/CMakeLists.txt` or the project root in CLion and point the CMake profile to an out-of-tree build directory (for example `build/debug`).
 - Add the extension CMake config if needed: pass `-DDUCKDB_EXTENSION_CONFIGS=<path-to-pac/CMakeLists.txt>` to the DuckDB CMake invocation so the main build knows about the extension.

@@ -12,6 +12,8 @@
 #include "include/pac_privacy_unit.hpp"
 // Include PAC compiler
 #include "include/pac_compiler.hpp"
+// Include helpers (UpdateParent)
+#include "include/pac_helpers.hpp"
 
 // Include concrete logical operator headers and bound aggregate expression
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -206,9 +208,17 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
         apply_noise = true;
     }
     if (apply_noise) {
-    	// PAC compatible: invoke compiler to produce artifacts (e.g., sample CTE)
-    	CompilePACQuery(input, plan, privacy_unit);
-    }
+        // PAC compatible: invoke compiler to produce artifacts (e.g., sample CTE)
+        // First insert the pac_sample get and join into the plan using JoinWithSampleTable.
+        // JoinWithSampleTable uses UpdateParent internally to ensure bindings are remapped correctly.
+        idx_t pac_idx = JoinWithSampleTable(input.context, plan, privacy_unit);
+        if (pac_idx == DConstants::INVALID_INDEX) {
+            // insertion failed or pac sample unavailable: bail out
+            return;
+        }
+        // Now compile artifacts for the plan that already contains the pac_sample
+        CompilePACQuery(input, plan, privacy_unit, pac_idx);
+     }
 }
 
 } // namespace duckdb

@@ -199,10 +199,12 @@ InsertPacJoinBelowAggregate(ClientContext &context,
         return DConstants::INVALID_INDEX;
     }
 
-
-    *target = CreatePacSampleJoinNode(
+    // Create the join node and insert it using UpdateParent so that bindings are updated correctly
+    auto new_join = CreatePacSampleJoinNode(
         context, std::move(*target), std::move(pac_get),
         base_idx, pac_idx);
+    // Use UpdateParent to replace *target with the new join, propagating binding changes
+    UpdateParent(root, *target, std::move(new_join));
 
     return pac_idx;
 }
@@ -232,28 +234,21 @@ static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
 // Entry point
 // -----------------------------------------------------------------------------
 
-void CompilePACQuery(OptimizerExtensionInput &input,
-                     unique_ptr<LogicalOperator> &plan,
-                     const std::string &privacy_unit) {
-    if (privacy_unit.empty()) {
-        return;
-    }
+// Insert pac_sample into plan using provided pac_get (pac_get.table_index must be set) and return pac_idx
+DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan, unique_ptr<LogicalGet> pac_get) {
+    if (!plan) return DConstants::INVALID_INDEX;
+    if (!pac_get) return DConstants::INVALID_INDEX;
+    idx_t pac_idx = pac_get->table_index;
+    if (pac_idx == DConstants::INVALID_INDEX) return DConstants::INVALID_INDEX;
+    // use existing insertion helper that will call UpdateParent internally
+    InsertPacJoinBelowAggregate(context, plan, std::move(pac_get), pac_idx);
+    return pac_idx;
+}
 
-    string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
-    string hash = HashStringToHex(normalized);
-
-    string path = ".";
-    Value v;
-    if (input.context.TryGetCurrentSetting("pac_compiled_path", v) && !v.IsNull()) {
-        path = v.ToString();
-    }
-    if (!path.empty() && path.back() != '/') {
-        path.push_back('/');
-    }
-
-    string filename = path + privacy_unit + "_" + hash + ".sql";
-    CreateSampleCTE(input.context, privacy_unit, filename, normalized);
-
+// Create pac_get for privacy_unit and insert into plan, returning pac_idx
+DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit) {
+    if (!plan) return DConstants::INVALID_INDEX;
+    // determine target to compute next table index (same logic as earlier)
     auto *agg = FindTopAggregate(plan);
     unique_ptr<LogicalOperator> *target = nullptr;
     if (agg) {
@@ -263,14 +258,60 @@ void CompilePACQuery(OptimizerExtensionInput &input,
         target = &plan;
     }
     idx_t pac_idx = GetNextTableIndex(*target);
-    auto pac_get = CreatePacSampleLogicalGet(input.context, pac_idx, privacy_unit);
-	// todo from here
-    InsertPacJoinBelowAggregate(input.context, plan, std::move(pac_get), pac_idx);
+    if (pac_idx == DConstants::INVALID_INDEX) return DConstants::INVALID_INDEX;
+    auto pac_get = CreatePacSampleLogicalGet(context, pac_idx, privacy_unit);
+    return JoinWithSampleTable(context, plan, std::move(pac_get));
+}
+
+// Compile artifacts for a plan that already contains the pac_sample at pac_idx (skip insertion)
+DUCKDB_API void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                const std::string &privacy_unit, idx_t pac_idx) {
+    if (privacy_unit.empty()) return;
+    // create sample CTE file
+    string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
+    string hash = HashStringToHex(normalized);
+    string path = ".";
+    Value v;
+    if (input.context.TryGetCurrentSetting("pac_compiled_path", v) && !v.IsNull()) {
+        path = v.ToString();
+    }
+    if (!path.empty() && path.back() != '/') path.push_back('/');
+    string filename = path + privacy_unit + "_" + hash + ".sql";
+    CreateSampleCTE(input.context, privacy_unit, filename, normalized);
+
+    // pac_idx already inserted; update aggregates/projections accordingly
+    auto *agg = FindTopAggregate(plan);
     UpdateAggregateGroups(agg, pac_idx);
     auto *proj = FindTopProjection(plan);
     UpdateProjection(proj, pac_idx);
     plan->Verify(input.context);
-	Printer::Print("done");
+    Printer::Print("done");
+}
+
+// Keep the existing 3-arg CompilePACQuery but have it call JoinWithSampleTable then the new overload
+void CompilePACQuery(OptimizerExtensionInput &input,
+                     unique_ptr<LogicalOperator> &plan,
+                     const std::string &privacy_unit) {
+    if (privacy_unit.empty()) return;
+    // create sample CTE file and insert join
+    string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
+    string hash = HashStringToHex(normalized);
+    string path = ".";
+    Value v;
+    if (input.context.TryGetCurrentSetting("pac_compiled_path", v) && !v.IsNull()) {
+        path = v.ToString();
+    }
+    if (!path.empty() && path.back() != '/') path.push_back('/');
+    string filename = path + privacy_unit + "_" + hash + ".sql";
+    CreateSampleCTE(input.context, privacy_unit, filename, normalized);
+
+    // Insert pac_sample join and then update aggregates/projection
+    idx_t pac_idx = JoinWithSampleTable(input.context, plan, privacy_unit);
+    if (pac_idx == DConstants::INVALID_INDEX) return;
+    UpdateAggregateGroups(FindTopAggregate(plan), pac_idx);
+    UpdateProjection(FindTopProjection(plan), pac_idx);
+    plan->Verify(input.context);
+    Printer::Print("done");
 }
 
 } // namespace duckdb
