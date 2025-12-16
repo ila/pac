@@ -135,17 +135,21 @@ void AddPrivacyUnitPragma(ClientContext &context, const FunctionParameters &para
     if (!TableExists(context, internal_name)) {
         // Create the table using the catalog API instead of context.Query to avoid locking/deadlocks.
         try {
-            // Build CreateTableInfo as a temporary table in the TEMP_CATALOG to avoid modifying the main database
-            auto create_info = unique_ptr<CreateTableInfo>(new CreateTableInfo(TEMP_CATALOG, DEFAULT_SCHEMA, internal_name));
-            // Mark as temporary and ignore conflicts if the name already exists
-            create_info->temporary = true;
+            // Build CreateTableInfo in the current default catalog so the helper table persists across restarts
+            string current_catalog = DatabaseManager::GetDefaultDatabase(context);
+            auto create_info = unique_ptr<CreateTableInfo>(new CreateTableInfo(current_catalog, DEFAULT_SCHEMA, internal_name));
+            // Ignore conflicts if the name already exists
             create_info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
             // Define columns: rowid BIGINT, sample_id BIGINT
             create_info->columns.AddColumn(ColumnDefinition("rowid", LogicalType::BIGINT));
             create_info->columns.AddColumn(ColumnDefinition("sample_id", LogicalType::BIGINT));
 
-            // Use the temp catalog to create the table in the current context
-            auto created_entry = Catalog::GetCatalog(context, TEMP_CATALOG).CreateTable(context, std::move(create_info));
+            // Mark the database as modified on the current meta-transaction so creating a catalog entry is allowed
+            Catalog &target_catalog = Catalog::GetCatalog(context, current_catalog);
+            MetaTransaction::Get(context).ModifyDatabase(target_catalog.GetAttached());
+
+            // Use the current catalog to create the table in the current context
+            auto created_entry = target_catalog.CreateTable(context, std::move(create_info));
              if (!created_entry) {
                  throw InvalidInputException(StringUtil::Format("failed to create internal PAC helper table %s: unknown error", internal_name));
              }

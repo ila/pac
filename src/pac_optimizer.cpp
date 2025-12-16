@@ -199,7 +199,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
     // Exactly one privacy unit referenced. Continue with compatibility checks
     IsPACCompatible(*plan, input.context);
-    bool apply_noise = false;
+    bool apply_noise = true;
     Value pac_noise_value;
     input.context.TryGetCurrentSetting("pac_noise", pac_noise_value);
     if (!pac_noise_value.IsNull() && pac_noise_value.GetValue<bool>()) {

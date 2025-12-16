@@ -24,6 +24,17 @@ DUCKDB_API void CreateSampleCTE(ClientContext &context, const std::string &priva
 // group-by keys / projections as needed. Implemented as an in-place modification of `plan`.
 DUCKDB_API void JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan);
 
+// Create a pac_sample LogicalGet node for the plan using the next available table index
+DUCKDB_API unique_ptr<LogicalGet> CreatePacSampleGetNode(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                                         const std::string &privacy_table_name);
+
+// Overload: Accept a prebuilt pac_sample LogicalGet (caller can construct it first and pass via move)
+DUCKDB_API void JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                    unique_ptr<LogicalGet> pac_get);
+
+// Modify aggregate operators to add sample_id as a grouping key where pac_sample participates
+DUCKDB_API void ModifyAggregateForSample(ClientContext &context, unique_ptr<LogicalOperator> &plan, idx_t pac_idx);
+
 } // namespace duckdb
 
 #endif //PAC_COMPILER_HPP
