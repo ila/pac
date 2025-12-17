@@ -6,14 +6,127 @@
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/function/aggregate_function.hpp"
 
 #include <random>
 #include <cmath>
 #include <limits>
+#include <cstring>
 
 // Every argument to pac_aggregate is the output of a query evaluated on a random subsample of the privacy unit
 
 namespace duckdb {
+
+// ============================================================================
+// pac_count aggregate function
+// ============================================================================
+// State: 64 counters, one for each bit position
+// Update: for each input key_hash, increment count[i] if bit i is set
+// Finalize: compute the variance of the 64 counters
+
+struct PacCountState {
+	uint64_t count[64];
+};
+
+// SIMD-friendly mask: extracts bits at positions 0, 8, 16, 24, 32, 40, 48, 56
+#define PAC_COUNT_MASK ((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
+
+// Process 128 key_hash values at once using SIMD-friendly operations
+// This kernel is designed to generate efficient SIMD instructions on good compilers
+static void PacCountOperation128(uint64_t count[64], const uint64_t key_hash[128]) {
+	uint64_t subtotal[8] = {0};
+	for (int row = 0; row < 128; row++) {
+		for (int i = 0; i < 8; i++) {
+			subtotal[i] += (key_hash[row] >> i) & PAC_COUNT_MASK;
+		}
+	}
+	const uint8_t *small = reinterpret_cast<const uint8_t *>(subtotal);
+	for (int i = 0; i < 64; i++) {
+		count[i] += small[i];
+	}
+}
+
+// Process a single key_hash value (fallback for remainder)
+static void PacCountOperation1(uint64_t count[64], uint64_t key_hash) {
+	for (int i = 0; i < 64; i++) {
+		count[i] += (key_hash >> i) & 1ULL;
+	}
+}
+
+static idx_t PacCountStateSize(const AggregateFunction &) {
+	return sizeof(PacCountState);
+}
+
+static void PacCountInitialize(const AggregateFunction &, data_ptr_t state) {
+	auto &s = *reinterpret_cast<PacCountState *>(state);
+	memset(s.count, 0, sizeof(s.count));
+}
+
+static void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state, idx_t count) {
+	D_ASSERT(input_count == 1);
+	auto &input = inputs[0];
+	auto &s = *reinterpret_cast<PacCountState *>(state);
+
+	input.Flatten(count);
+	auto data = FlatVector::GetData<uint64_t>(input);
+	auto &validity = FlatVector::Validity(input);
+
+	if (validity.AllValid()) {
+		// Fast path: no nulls, process in chunks of 128
+		idx_t offset = 0;
+		while (offset + 128 <= count) {
+			PacCountOperation128(s.count, data + offset);
+			offset += 128;
+		}
+		// Handle remainder
+		for (idx_t i = offset; i < count; i++) {
+			PacCountOperation1(s.count, data[i]);
+		}
+	} else {
+		// Slow path: check validity for each row
+		for (idx_t i = 0; i < count; i++) {
+			if (validity.RowIsValid(i)) {
+				PacCountOperation1(s.count, data[i]);
+			}
+		}
+	}
+}
+
+static void PacCountCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
+	auto sdata = FlatVector::GetData<PacCountState>(source);
+	auto tdata = FlatVector::GetData<PacCountState>(target);
+	for (idx_t i = 0; i < count; i++) {
+		for (int j = 0; j < 64; j++) {
+			tdata[i].count[j] += sdata[i].count[j];
+		}
+	}
+}
+
+static void PacCountFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+	auto sdata = FlatVector::GetData<PacCountState>(states);
+	auto rdata = FlatVector::GetData<double>(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto &state = sdata[i];
+
+		// Compute the mean of the 64 counters
+		double sum = 0.0;
+		for (int j = 0; j < 64; j++) {
+			sum += static_cast<double>(state.count[j]);
+		}
+		double mean = sum / 64.0;
+
+		// Compute variance (population variance / second moment)
+		double variance = 0.0;
+		for (int j = 0; j < 64; j++) {
+			double diff = static_cast<double>(state.count[j]) - mean;
+			variance += diff * diff;
+		}
+		variance /= 64.0;
+
+		rdata[offset + i] = variance;
+	}
+}
 
 struct PacAggregateLocalState : public FunctionLocalState {
 	explicit PacAggregateLocalState(uint64_t seed) : gen(seed) {}
@@ -197,6 +310,24 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 
 	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	loader.RegisterFunction(fun);
+
+	// Register pac_count aggregate function
+	// Input: UBIGINT key_hash
+	// Output: DOUBLE (variance of the 64 bit counters)
+	// Uses custom SIMD-friendly update that processes 128 values at a time
+	AggregateFunction pac_count(
+	    "pac_count",
+	    {LogicalType::UBIGINT},
+	    LogicalType::DOUBLE,
+	    PacCountStateSize,
+	    PacCountInitialize,
+	    nullptr,  // update (scatter) - not used, we use simple_update
+	    PacCountCombine,
+	    PacCountFinalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	    PacCountUpdate  // simple_update - processes entire vector at once
+	);
+	loader.RegisterFunction(pac_count);
 }
 
 } // namespace duckdb
