@@ -285,11 +285,10 @@ static int Test_BasicUpdateParent() {
     unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, std::move(proj_exprs));
     root->children.emplace_back(std::move(child));
 
-    // Prepare a new parent projection (must not have children)
-    auto new_parent = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>());
-
-    // Call UpdateParent to insert new_parent above the original child
-    UpdateParent(root, root->children[0], std::move(new_parent));
+    // Prepare a new parent projection that contains its own child (strict replace semantics)
+    auto new_parent = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>() );
+    new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(5));
+    ReplaceNode(root, root->children[0], std::move(new_parent));
 
     // After insertion, validate
     auto inserted_parent = dynamic_cast<LogicalProjection *>(root->children[0].get());
@@ -337,14 +336,16 @@ static int Test_ConsecutiveUpdateParent() {
     root->children.emplace_back(std::move(child));
 
     // First insertion
-    auto new_parent1 = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>());
-    UpdateParent(root, root->children[0], std::move(new_parent1));
+    auto new_parent1 = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>() );
+    new_parent1->children.emplace_back(make_uniq<LogicalDummyScan>(7));
+    ReplaceNode(root, root->children[0], std::move(new_parent1));
 
     // Second insertion above the same original child (now located under the inserted parent)
     // operate on the unique_ptrs directly: pass the parent's unique_ptr and its child unique_ptr
     if (!root->children[0]) return 7;
-    auto new_parent2 = make_uniq<LogicalProjection>(2, vector<unique_ptr<Expression>>());
-    UpdateParent(root->children[0], root->children[0]->children[0], std::move(new_parent2));
+    auto new_parent2 = make_uniq<LogicalProjection>(2, vector<unique_ptr<Expression>>() );
+    new_parent2->children.emplace_back(make_uniq<LogicalDummyScan>(8));
+    ReplaceNode(root->children[0], root->children[0]->children[0], std::move(new_parent2));
 
     // Validate: there should be two projections between root and the DummyScan
     auto first = dynamic_cast<LogicalProjection *>(root->children[0].get());
@@ -391,7 +392,7 @@ static int Test_MultiColumnChildBinding() {
     root->children.emplace_back(std::move(child));
 
     auto new_parent = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>());
-    UpdateParent(root, root->children[0], std::move(new_parent));
+    ReplaceNode(root, root->children[0], std::move(new_parent));
 
     // Verify plan
     try {
@@ -434,9 +435,10 @@ static int Test_InsertJoinBetweenAggregateAndScan() {
     root->expressions.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
     root->children.emplace_back(std::move(agg_child));
 
-    // Insert a LogicalJoin as new parent above the aggregate
+    // Insert a LogicalJoin as new parent above the aggregate (strict replace: provide left child)
     auto new_join = make_uniq<LogicalJoin>(JoinType::INNER);
-    UpdateParent(root, root->children[0], std::move(new_join));
+    new_join->children.emplace_back(make_uniq<LogicalDummyScan>(12));
+    ReplaceNode(root, root->children[0], std::move(new_join));
 
     auto inserted_join = dynamic_cast<LogicalJoin *>(root->children[0].get());
     if (!inserted_join) {
@@ -505,9 +507,10 @@ static int Test_InsertJoinOnTopOfJoin() {
     unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, vector<unique_ptr<Expression>>() );
     root->children.emplace_back(std::move(base_join));
 
-    // Insert a new join above the existing join
+    // Insert a new join above the existing join (provide a left child)
     auto new_join = make_uniq<LogicalJoin>(JoinType::INNER);
-    UpdateParent(root, root->children[0], std::move(new_join));
+    new_join->children.emplace_back(make_uniq<LogicalDummyScan>(14));
+    ReplaceNode(root, root->children[0], std::move(new_join));
 
     auto outer_join = dynamic_cast<LogicalJoin *>(root->children[0].get());
     if (!outer_join) return 22;
@@ -571,7 +574,8 @@ static int Test_InsertFilterParent() {
     root->children.emplace_back(std::move(child));
 
     auto new_filter = make_uniq<LogicalFilter>();
-    UpdateParent(root, root->children[0], std::move(new_filter));
+    new_filter->children.emplace_back(make_uniq<LogicalDummyScan>(16));
+    ReplaceNode(root, root->children[0], std::move(new_filter));
 
     // Verify plan
     try {
@@ -629,7 +633,8 @@ static int Test_PreserveColumnsNoRemap() {
     root->children.emplace_back(std::move(child));
 
     auto new_parent = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>() );
-    UpdateParent(root, root->children[0], std::move(new_parent));
+    new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(17));
+    ReplaceNode(root, root->children[0], std::move(new_parent));
 
     // Verify plan
     try {

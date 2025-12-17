@@ -170,9 +170,9 @@ CreatePacSampleJoinNode(ClientContext &context,
     // Get output bindings for left and right child
     auto left_bindings = base->GetColumnBindings();
     auto right_bindings = pac_get->GetColumnBindings();
-    // The rowid is always the last column added
+    // The rowid is the last column added for the base, and the first column for the pac_get
 	idx_t left_rowid_idx = left_bindings.size() - 1;
-	idx_t right_rowid_idx = right_bindings.size() - 1;
+	idx_t right_rowid_idx = 0;
     JoinCondition cond;
     cond.comparison = ExpressionType::COMPARE_EQUAL;
     cond.left = make_uniq<BoundColumnRefExpression>(
@@ -201,7 +201,7 @@ static void UpdateAggregateGroups(LogicalAggregate *agg, idx_t pac_idx) {
     agg->groups.push_back(
         make_uniq<BoundColumnRefExpression>(
             LogicalType::BIGINT,
-            ColumnBinding(pac_idx, agg->expressions.size() - 1)));
+            ColumnBinding(pac_idx, agg->groups.size() + agg->expressions.size()))); // The bottom projection will have the new column at the end
 }
 
 static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
@@ -211,6 +211,56 @@ static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
             LogicalType::BIGINT,
             ColumnBinding(pac_idx, 1)));
 }
+
+// Add the sample_id column to all the projections above the aggregate
+// We start from the aggregate and go up to the root. The iterative
+// `UpdateProjectionsAboveAggregate` below walks up parent projections
+// from a given starting child and updates table/column indices at each step.
+// (The old recursive implementation was removed because it couldn't update
+// the table index properly while climbing.)
+static void UpdateProjectionsAboveAggregate(unique_ptr<LogicalOperator> &root, LogicalOperator *start_child, idx_t sample_idx) {
+     // Iteratively walk from the start_child up to the root, updating each parent projection.
+     // At each step we add a new projection expression that references the sample column from the child
+     // using the child's table index and column index. We then update the child_table/col to reflect
+     // the parent's output so the next level up will reference the correct indices.
+     if (!start_child) return;
+
+     idx_t child_table_idx = sample_idx; // table index where the sample column originates
+     idx_t child_col_idx = 1; // column index of sample_id in its originating node (sample_id is 1)
+     LogicalOperator *current_child = start_child;
+
+     while (true) {
+         // Find the parent projection of the current child
+         LogicalProjection *parent_proj = FindParentProjection(root, current_child);
+         if (!parent_proj) break;
+
+         // If this parent already exposes the sample column (by binding), skip adding it
+         bool found = false;
+         for (auto &expr : parent_proj->expressions) {
+             if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+                 auto &colref = expr->Cast<BoundColumnRefExpression>();
+                 if (colref.binding.table_index == child_table_idx && colref.binding.column_index == child_col_idx) {
+                     found = true;
+                     break;
+                 }
+             }
+         }
+         if (!found) {
+             // Add sample_id as a new output expression of the parent projection
+             parent_proj->expressions.push_back(
+                 make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(child_table_idx, child_col_idx))
+             );
+         }
+
+         // Update child_table_idx/child_col_idx to refer to the parent's output so that
+         // the next parent up will reference the correct indices.
+         child_table_idx = parent_proj->table_index;
+         child_col_idx = parent_proj->expressions.size() - 1; // index of the newly-added expression
+
+         // Move up one level
+         current_child = parent_proj;
+     }
+ }
 
 
 // -----------------------------------------------------------------------------
@@ -294,23 +344,22 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 	parent_proj_idx = DConstants::INVALID_INDEX;
 	// Now we add the sample_id column to the parent projection if it exists
 	if (parent_proj) {
+		parent_proj_idx = parent_proj->table_index;
 		parent_proj->expressions.push_back(
 			make_uniq<BoundColumnRefExpression>(
 				LogicalType::BIGINT,
-				ColumnBinding(agg->group_index, agg->groups.size() - 1)));
-		parent_proj_idx = parent_proj->table_index;
-	}
+				ColumnBinding(agg->group_index, agg->groups.size() - 1)));}
 
 	// 7. Update the topmost projection if it exists
 	parent_proj = FindParentProjection(plan, parent_proj);
-	parent_proj_idx = DConstants::INVALID_INDEX;
 	// Now we add the sample_id column to the parent projection if it exists
 	if (parent_proj) {
 		parent_proj->expressions.push_back(
 			make_uniq<BoundColumnRefExpression>(
 				LogicalType::BIGINT,
-				ColumnBinding(parent_proj_idx, agg->groups.size() - 1)));
-		parent_proj_idx = parent_proj->table_index;
+				ColumnBinding(parent_proj_idx, parent_proj->expressions.size())));
+				parent_proj_idx = parent_proj->table_index;
+
 	}
 
     plan->Verify(input.context);
