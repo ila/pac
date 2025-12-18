@@ -17,6 +17,7 @@
 
 #include <fstream>
 #include <cctype>
+#include <duckdb/planner/operator/logical_order.hpp>
 
 namespace duckdb {
 
@@ -118,6 +119,7 @@ unique_ptr<LogicalGet>
 CreatePacSampleLogicalGet(ClientContext &context,
                           idx_t table_index,
                           const string &privacy_unit) {
+
     string name = "_pac_internal_sample_" + Sanitize(privacy_unit);
 
     Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
@@ -213,53 +215,68 @@ static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
 }
 
 // Add the sample_id column to all the projections above the aggregate
-// We start from the aggregate and go up to the root. The iterative
-// `UpdateProjectionsAboveAggregate` below walks up parent projections
-// from a given starting child and updates table/column indices at each step.
-// (The old recursive implementation was removed because it couldn't update
-// the table index properly while climbing.)
-static void UpdateProjectionsAboveAggregate(unique_ptr<LogicalOperator> &root, LogicalOperator *start_child, idx_t sample_idx) {
-     // Iteratively walk from the start_child up to the root, updating each parent projection.
-     // At each step we add a new projection expression that references the sample column from the child
-     // using the child's table index and column index. We then update the child_table/col to reflect
-     // the parent's output so the next level up will reference the correct indices.
-     if (!start_child) return;
+// For each node, find the parent projection
+// If the current node is an aggregate, the index of the new column binding is the agg.group_index and col_idx is agg->groups.size() - 1
+// If the current node is a projection, the table index is the current proj->table_index and col_idx is proj->expressions.size()
+// After adding the new column binding, go one level up and update the indexes accordingly
+static void UpdateNodesAboveAggregate(unique_ptr<LogicalOperator> &root, LogicalOperator *start_node) {
+    if (!start_node) {
+        return;
+    }
+    LogicalOperator *search_node = start_node;
+    idx_t table_idx, col_idx;
 
-     idx_t child_table_idx = sample_idx; // table index where the sample column originates
-     idx_t child_col_idx = 1; // column index of sample_id in its originating node (sample_id is 1)
-     LogicalOperator *current_child = start_child;
+    // Determine initial table_idx and col_idx based on node type
+    if (search_node->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+        auto &agg = search_node->Cast<LogicalAggregate>();
+        table_idx = agg.group_index;
+        col_idx = agg.groups.size() - 1;
+    } else if (search_node->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        auto &proj = search_node->Cast<LogicalProjection>();
+        table_idx = proj.table_index;
+        col_idx = proj.expressions.size();
+    } else {
+        throw ParserException("UpdateProjectionsAboveAggregate: unsupported node type");
+    }
 
-     while (true) {
-         // Find the parent projection of the current child
-         LogicalProjection *parent_proj = FindParentProjection(root, current_child);
-         if (!parent_proj) break;
-
-         // If this parent already exposes the sample column (by binding), skip adding it
-         bool found = false;
-         for (auto &expr : parent_proj->expressions) {
-             if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-                 auto &colref = expr->Cast<BoundColumnRefExpression>();
-                 if (colref.binding.table_index == child_table_idx && colref.binding.column_index == child_col_idx) {
-                     found = true;
-                     break;
-                 }
-             }
-         }
-         if (!found) {
-             // Add sample_id as a new output expression of the parent projection
-             parent_proj->expressions.push_back(
-                 make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(child_table_idx, child_col_idx))
-             );
-         }
-
-         // Update child_table_idx/child_col_idx to refer to the parent's output so that
-         // the next parent up will reference the correct indices.
-         child_table_idx = parent_proj->table_index;
-         child_col_idx = parent_proj->expressions.size() - 1; // index of the newly-added expression
-
-         // Move up one level
-         current_child = parent_proj;
-     }
+    while (true) {
+        // Check for parent projection
+        LogicalProjection *parent_proj = FindParentProjection(root, search_node);
+        LogicalOperator *next_node = nullptr;
+        if (parent_proj) {
+            next_node = parent_proj;
+        } else {
+            // Find parent node in tree
+            LogicalOperator *found_parent = nullptr;
+            std::function<void(LogicalOperator*, LogicalOperator*)> find_parent = [&](LogicalOperator *node, LogicalOperator *child) {
+                for (auto &c : node->children) {
+                    if (c.get() == child) {
+                        found_parent = node;
+                        return;
+                    }
+                    find_parent(c.get(), child);
+                    if (found_parent) return;
+                }
+            };
+            find_parent(root.get(), search_node);
+            if (!found_parent) break; // reached the root
+            next_node = found_parent;
+        }
+        search_node = next_node;
+        // Check for projection or ORDER BY at every step
+        if (search_node->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+            auto &proj = search_node->Cast<LogicalProjection>();
+            proj.expressions.push_back(
+                make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(table_idx, col_idx))
+            );
+            table_idx = proj.table_index;
+            col_idx = proj.expressions.size() - 1;
+        } else if (search_node->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+            auto &order_by = search_node->Cast<LogicalOrder>();
+        	order_by.projection_map.push_back(col_idx);
+            // Do NOT update table_idx/col_idx after this step
+        }
+    }
  }
 
 
@@ -283,6 +300,12 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     }
     if (!path.empty() && path.back() != '/') path.push_back('/');
     string filename = path + privacy_unit + "_" + hash + ".sql";
+
+	// TODO - put filter pushdown here
+	// We can apply filter pushdown before creating the sample CTE to reduce its size
+	// However, we can only apply filters which reference ONLY the privacy unit table with simple predicates
+	// Example: WHERE privacy_unit.col = constant
+	// Complex predicates or predicates referencing other tables cannot be pushed down
     CreateSampleCTE(input.context, privacy_unit, filename, normalized);
 
     // 2. Create LogicalGet for sample table
@@ -340,28 +363,9 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     UpdateAggregateGroups(agg, parent_proj_idx);
 
     // 6. Update the projection node to include the sample column
-	parent_proj = FindParentProjection(plan, agg);
-	parent_proj_idx = DConstants::INVALID_INDEX;
-	// Now we add the sample_id column to the parent projection if it exists
-	if (parent_proj) {
-		parent_proj_idx = parent_proj->table_index;
-		parent_proj->expressions.push_back(
-			make_uniq<BoundColumnRefExpression>(
-				LogicalType::BIGINT,
-				ColumnBinding(agg->group_index, agg->groups.size() - 1)));}
+	UpdateNodesAboveAggregate(plan, agg);
 
-	// 7. Update the topmost projection if it exists
-	parent_proj = FindParentProjection(plan, parent_proj);
-	// Now we add the sample_id column to the parent projection if it exists
-	if (parent_proj) {
-		parent_proj->expressions.push_back(
-			make_uniq<BoundColumnRefExpression>(
-				LogicalType::BIGINT,
-				ColumnBinding(parent_proj_idx, parent_proj->expressions.size())));
-				parent_proj_idx = parent_proj->table_index;
-
-	}
-
+	plan->ResolveOperatorTypes();
     plan->Verify(input.context);
     Printer::Print("done");
 }
