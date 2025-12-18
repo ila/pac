@@ -45,6 +45,7 @@ DUCKDB_API idx_t JoinWithSampleTable(ClientContext &context, unique_ptr<LogicalO
 // Modify aggregate operators to add sample_id as a grouping key where pac_sample participates
 DUCKDB_API void ModifyAggregateForSample(ClientContext &context, unique_ptr<LogicalOperator> &plan, idx_t pac_idx);
 
+
 } // namespace duckdb
 
 #endif //PAC_COMPILER_HPP

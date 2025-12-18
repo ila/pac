@@ -81,6 +81,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(delete_privacy_unit_file);
 
 	auto pac_rewrite_rule = PACRewriteRule();
+	// attach PAC-specific optimizer info so the extension can coordinate replan state
+	auto pac_info = make_shared_ptr<PACOptimizerInfo>();
+	pac_rewrite_rule.optimizer_info = pac_info;
 	auto &db = loader.GetDatabaseInstance();
 	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
 
@@ -98,7 +101,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
-
 }
 
 void PacExtension::Load(ExtensionLoader &loader) {

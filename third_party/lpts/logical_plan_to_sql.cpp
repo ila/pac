@@ -25,6 +25,8 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_set_operation.hpp"
 
+#include <duckdb/planner/expression/bound_function_expression.hpp>
+
 namespace {
 
 using duckdb::vector;
@@ -294,6 +296,13 @@ string LogicalPlanToSql::ExpressionToAliasedString(const unique_ptr<Expression> 
 		expr_str << ")";
 		break;
 	}
+	case (ExpressionClass::BOUND_FUNCTION): {
+		const BoundFunctionExpression &expr_cast = expression->Cast<BoundFunctionExpression>();
+		// Simply toString
+		expr_str << expr_cast.ToString();
+		break;
+
+	}
 	default: {
 		throw NotImplementedException("Unsupported expression for ExpressionToAliasedString: %s",
 		                              ExpressionTypeToString(expression->type));
@@ -334,7 +343,13 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 		for (size_t i = 0; i < col_binds.size(); ++i) {
 			// Get using `i`.
 			const idx_t idx = col_ids[i].GetPrimaryIndex();
-			string column_name = plan_as_get.names[idx]; // Using `idx`, see comment above!
+			string column_name;
+			if (idx == 18446744073709551615) {
+				column_name = "rowid"; // Special case for rowid (else it overflows).
+			} else {
+				// Normal case.
+				column_name = plan_as_get.names[idx];
+			}
 			const ColumnBinding &cb = col_binds[i];
 			// Populate stuff.
 			column_names.push_back(column_name);

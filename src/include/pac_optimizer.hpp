@@ -2,8 +2,16 @@
 #define DUCKDB_OPENPAC_REWRITE_RULE_HPP
 
 #include "duckdb.hpp"
+#include <atomic>
 
 namespace duckdb {
+
+// PAC-specific optimizer info used to prevent re-entrant replanning from the extension
+struct PACOptimizerInfo : public OptimizerExtensionInfo {
+    std::atomic<bool> replan_in_progress{false};
+    PACOptimizerInfo() = default;
+    ~PACOptimizerInfo() override = default;
+};
 
 class PACRewriteRule : public OptimizerExtension {
 public:
@@ -17,7 +25,6 @@ public:
 
 	// Checks if the query plan is PAC compatible according to the rules.
 	// Throws a ParserException with an explanatory message when the plan is not compatible.
-	static void IsPACCompatible(LogicalOperator &plan, ClientContext &context);
 };
 
 } // namespace duckdb

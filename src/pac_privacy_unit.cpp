@@ -213,7 +213,10 @@ void RemovePrivacyUnitPragma(ClientContext &context, const FunctionParameters &p
     if (TableExists(context, internal_name)) {
         string drop_sql = "DROP TABLE IF EXISTS " + internal_name + ";";
         try {
-            context.Query(drop_sql, false);
+        	Connection con(*context.db);
+        	con.BeginTransaction();
+            con.Query(drop_sql);
+        	con.Commit();
         } catch (std::exception &ex) {
             // Non-fatal; surface as InvalidInputException
             throw InvalidInputException(StringUtil::Format("failed to drop internal PAC helper table %s: %s", internal_name, ex.what()));

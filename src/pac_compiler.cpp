@@ -12,12 +12,18 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/common/constants.hpp"
-
-#include <fstream>
-#include <cctype>
+#include <duckdb/planner/planner.hpp>
 #include <duckdb/planner/operator/logical_order.hpp>
+#include "duckdb/common/string_util.hpp"
+#include <fstream>
+#include "duckdb/optimizer/optimizer.hpp"
+
+#include <duckdb/parser/parser.hpp>
+#include <include/logical_plan_to_sql.hpp>
+#include "include/pac_optimizer.hpp"
 
 namespace duckdb {
 
@@ -32,6 +38,7 @@ static void AddRowIDColumn(LogicalGet &get) {
 	}
 	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
 	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
+	get.returned_types.push_back(LogicalTypeId::BIGINT);
 	// We also need to add a column binding for rowid
 	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
 }
@@ -203,15 +210,12 @@ static void UpdateAggregateGroups(LogicalAggregate *agg, idx_t pac_idx) {
     agg->groups.push_back(
         make_uniq<BoundColumnRefExpression>(
             LogicalType::BIGINT,
-            ColumnBinding(pac_idx, agg->groups.size() + agg->expressions.size()))); // The bottom projection will have the new column at the end
-}
-
-static void UpdateProjection(LogicalProjection *proj, idx_t pac_idx) {
-    if (!proj) return;
-    proj->expressions.push_back(
-        make_uniq<BoundColumnRefExpression>(
-            LogicalType::BIGINT,
-            ColumnBinding(pac_idx, 1)));
+            ColumnBinding(5, 1))); // The bottom projection will have the new column at the end
+	// We also need to update group_stats
+	// create a unique_ptr<BaseStatistics> and push it into agg->group_stats
+	auto sample_id_stats_ptr = BaseStatistics::CreateUnknown(LogicalType::BIGINT).ToUnique();
+	agg->group_stats.push_back(std::move(sample_id_stats_ptr));
+	agg->types.push_back(LogicalType::BIGINT);
 }
 
 // Add the sample_id column to all the projections above the aggregate
@@ -269,11 +273,13 @@ static void UpdateNodesAboveAggregate(unique_ptr<LogicalOperator> &root, Logical
             proj.expressions.push_back(
                 make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(table_idx, col_idx))
             );
+        	proj.types.push_back(LogicalType::BIGINT);
             table_idx = proj.table_index;
             col_idx = proj.expressions.size() - 1;
         } else if (search_node->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
             auto &order_by = search_node->Cast<LogicalOrder>();
         	order_by.projection_map.push_back(col_idx);
+        	order_by.types.push_back(LogicalType::BIGINT);
             // Do NOT update table_idx/col_idx after this step
         }
     }
@@ -301,12 +307,57 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     if (!path.empty() && path.back() != '/') path.push_back('/');
     string filename = path + privacy_unit + "_" + hash + ".sql";
 
-	// TODO - put filter pushdown here
-	// We can apply filter pushdown before creating the sample CTE to reduce its size
-	// However, we can only apply filters which reference ONLY the privacy unit table with simple predicates
-	// Example: WHERE privacy_unit.col = constant
-	// Complex predicates or predicates referencing other tables cannot be pushed down
-    CreateSampleCTE(input.context, privacy_unit, filename, normalized);
+	// Replan the plan without compressed materialization.
+	// We change the "disabled_optimizers" setting temporarily and re-run the optimizer. Use RAII
+	// to ensure the original setting is always restored.
+	{
+		auto &dbconf = DBConfig::GetConfig(input.context);
+		// If the optimizer extension provided a PACOptimizerInfo, use it to prevent re-entrant replans
+		PACOptimizerInfo *pac_info = nullptr;
+		if (input.info) {
+			pac_info = dynamic_cast<PACOptimizerInfo *>(input.info.get());
+		}
+		// If a replan is already in progress by this extension, skip re-optimizing to avoid recursion
+		if (pac_info && pac_info->replan_in_progress.load(std::memory_order_acquire)) {
+			// skip replan to avoid recursion
+		} else {
+			// set the in-progress flag in RAII manner if pac_info exists
+			struct ReplanGuard {
+				PACOptimizerInfo *info;
+				ReplanGuard(PACOptimizerInfo *i) : info(i) {
+					if (info) info->replan_in_progress.store(true, std::memory_order_release);
+				}
+				~ReplanGuard() {
+					if (info) info->replan_in_progress.store(false, std::memory_order_release);
+				}
+			};
+			ReplanGuard rg(pac_info);
+			Connection con(*input.context.db);
+
+			con.BeginTransaction();
+			// todo: maybe we want to disable more optimizers (internal_optimizer_types)
+			// If column_lifetime is enabled, then the existence of duplicate table indices etc etc is verified.
+			// However, it massively complicates the query tree which is not nice for further usage in OpenIVM.
+			// Therefore, it should be run for verification purposes once in a while (otherwise, turn it off).
+
+			con.Query("SET disabled_optimizers='compressed_materialization, column_lifetime, statistics_propagation, "
+						  "expression_rewriter, filter_pushdown';");
+
+			con.Commit();
+
+			Parser parser;
+			Planner planner(input.context);
+
+			parser.ParseQuery(normalized);
+			auto statement = parser.statements[0].get();
+
+			planner.CreatePlan(statement->Copy());
+
+			Optimizer optimizer(*planner.binder, input.context);
+			plan = optimizer.Optimize(std::move(planner.plan));
+			plan->Print();
+		}
+	}
 
     // 2. Create LogicalGet for sample table
     idx_t sample_idx = GetNextTableIndex(plan);
@@ -367,7 +418,23 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 
 	plan->ResolveOperatorTypes();
     plan->Verify(input.context);
-    Printer::Print("done");
-}
+	plan->Print();
+    Printer::Print("LPTS output plan after PAC compilation:\n");
+	auto lp_to_sql = LogicalPlanToSql(input.context, plan);
+	auto ir = lp_to_sql.LogicalPlanToIR();
+	Printer::Print(ir->ToQuery(true));
+
+	// replace the plan with a dummy plan for now
+	plan = make_uniq_base<LogicalOperator, LogicalDummyScan>(0);
+
+	// todo:
+	// clean up this code
+	// test with/without compressed materialization
+	// feed the query to LPTS
+	// implement the last query
+	// implement filter pushdown
+	// implement pac_sum final step
+	// test everything
+ }
 
 } // namespace duckdb
