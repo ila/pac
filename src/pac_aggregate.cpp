@@ -16,6 +16,9 @@
 // Enable AVX2 vectorization for update functions
 #define AUTOVECTORIZE __attribute__((target("avx2")))
 
+// Define FILTER_WITH_MULT to use multiplication by 0/1 instead of mask approach
+// #define FILTER_WITH_MULT
+
 // Every argument to pac_aggregate is the output of a query evaluated on a random subsample of the privacy unit
 
 namespace duckdb {
@@ -329,8 +332,12 @@ static void PacSumFloatUpdate(Vector inputs[], AggregateInputData &, idx_t input
 		FLOAT_TYPE value = values[value_idx];
 
 		for (int j = 0; j < 64; j++) {
+#ifdef FILTER_WITH_MULT
+			state.sums[j] += value * static_cast<FLOAT_TYPE>((key_hash >> j) & 1ULL);
+#else
 			uint64_t mask = BitToMask((key_hash >> j) & 1ULL);
 			state.sums[j] += MaskValue(value, mask);
+#endif
 		}
 	}
 }
@@ -369,8 +376,12 @@ static void PacSumFloatScatterUpdate(Vector inputs[], AggregateInputData &, idx_
 		FLOAT_TYPE value = values[value_idx];
 
 		for (int j = 0; j < 64; j++) {
+#ifdef FILTER_WITH_MULT
+			state->sums[j] += value * static_cast<FLOAT_TYPE>((key_hash >> j) & 1ULL);
+#else
 			uint64_t mask = BitToMask((key_hash >> j) & 1ULL);
 			state->sums[j] += MaskValue(value, mask);
+#endif
 		}
 	}
 }
@@ -558,8 +569,12 @@ static void PacSumIntegerUpdate(Vector inputs[], AggregateInputData &, idx_t inp
 
 		// Add to small_totals (branchless)
 		for (int j = 0; j < 64; j++) {
+#ifdef FILTER_WITH_MULT
+			state.small_totals[j] += value * static_cast<INPUT_TYPE>((key_hash >> j) & 1ULL);
+#else
 			uint64_t mask = BitToMask((key_hash >> j) & 1ULL);
 			state.small_totals[j] += MaskValue(value, mask);
+#endif
 		}
 
 		// Flush if we've accumulated (1 << B) values or if this was a large value
@@ -608,8 +623,12 @@ static void PacSumIntegerScatterUpdate(Vector inputs[], AggregateInputData &, id
 		}
 
 		for (int j = 0; j < 64; j++) {
+#ifdef FILTER_WITH_MULT
+			state->small_totals[j] += value * static_cast<INPUT_TYPE>((key_hash >> j) & 1ULL);
+#else
 			uint64_t mask = BitToMask((key_hash >> j) & 1ULL);
 			state->small_totals[j] += MaskValue(value, mask);
+#endif
 		}
 
 		if (++state->update_count >= FlushThreshold(INPUT_TYPE()) || is_large) {
