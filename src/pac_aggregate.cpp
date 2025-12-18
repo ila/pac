@@ -23,110 +23,102 @@ namespace duckdb {
 // State: 64 counters, one for each bit position
 // Update: for each input key_hash, increment count[i] if bit i is set
 // Finalize: compute the variance of the 64 counters
+//
+// Uses SIMD-friendly intermediate accumulators (small_totals) that get
+// flushed to the main totals every 256 updates.
 
 struct PacCountState {
-	uint64_t count[64];
+	uint8_t update_count;     // Counts updates, flushes when wraps to 0
+	uint64_t small_totals[8]; // SIMD-friendly intermediate accumulators
+	uint64_t totals[64];      // Final counters
+
+	void Flush() {
+		const uint8_t *small = reinterpret_cast<const uint8_t *>(small_totals);
+		for (int i = 0; i < 64; i++) {
+			totals[i] += small[i];
+		}
+		memset(small_totals, 0, sizeof(small_totals));
+	}
 };
 
 // SIMD-friendly mask: extracts bits at positions 0, 8, 16, 24, 32, 40, 48, 56
-#define PAC_COUNT_MASK ((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
+#define PAC_COUNT_MASK                                                                                                 \
+	((1ULL << 0) | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) |            \
+	 (1ULL << 56))
 
-// Process 128 key_hash values at once using SIMD-friendly operations
-// This kernel is designed to generate efficient SIMD instructions on good compilers
-static void PacCountOperation128(uint64_t count[64], const uint64_t key_hash[128]) {
-	uint64_t subtotal[8] = {0};
-	for (int row = 0; row < 128; row++) {
+struct PacCountOperation {
+	template <class STATE>
+	static void Initialize(STATE &state) {
+		state.update_count = 0;
+		memset(state.small_totals, 0, sizeof(state.small_totals));
+		memset(state.totals, 0, sizeof(state.totals));
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &) {
 		for (int i = 0; i < 8; i++) {
-			subtotal[i] += (key_hash[row] >> i) & PAC_COUNT_MASK;
+			state.small_totals[i] += (input >> i) & PAC_COUNT_MASK;
+		}
+		if (++state.update_count == 0) {
+			// update_count wrapped (256 updates), flush to totals
+			state.Flush();
 		}
 	}
-	const uint8_t *small = reinterpret_cast<const uint8_t *>(subtotal);
-	for (int i = 0; i < 64; i++) {
-		count[i] += small[i];
-	}
-}
 
-// Process a single key_hash value (fallback for remainder)
-static void PacCountOperation1(uint64_t count[64], uint64_t key_hash) {
-	for (int i = 0; i < 64; i++) {
-		count[i] += (key_hash >> i) & 1ULL;
-	}
-}
-
-static idx_t PacCountStateSize(const AggregateFunction &) {
-	return sizeof(PacCountState);
-}
-
-static void PacCountInitialize(const AggregateFunction &, data_ptr_t state) {
-	auto &s = *reinterpret_cast<PacCountState *>(state);
-	memset(s.count, 0, sizeof(s.count));
-}
-
-static void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state, idx_t count) {
-	D_ASSERT(input_count == 1);
-	auto &input = inputs[0];
-	auto &s = *reinterpret_cast<PacCountState *>(state);
-
-	input.Flatten(count);
-	auto data = FlatVector::GetData<uint64_t>(input);
-	auto &validity = FlatVector::Validity(input);
-
-	if (validity.AllValid()) {
-		// Fast path: no nulls, process in chunks of 128
-		idx_t offset = 0;
-		while (offset + 128 <= count) {
-			PacCountOperation128(s.count, data + offset);
-			offset += 128;
-		}
-		// Handle remainder
-		for (idx_t i = offset; i < count; i++) {
-			PacCountOperation1(s.count, data[i]);
-		}
-	} else {
-		// Slow path: check validity for each row
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input,
+	                              idx_t count) {
 		for (idx_t i = 0; i < count; i++) {
-			if (validity.RowIsValid(i)) {
-				PacCountOperation1(s.count, data[i]);
-			}
+			Operation<INPUT_TYPE, STATE, OP>(state, input, unary_input);
 		}
 	}
-}
 
-static void PacCountCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
-	auto sdata = FlatVector::GetData<PacCountState>(source);
-	auto tdata = FlatVector::GetData<PacCountState>(target);
-	for (idx_t i = 0; i < count; i++) {
+	template <class STATE, class OP>
+	static void Combine(const STATE &source, STATE &target, AggregateInputData &) {
+		// Flush any unflushed small_totals from source (need non-const copy)
+		STATE src_copy = source;
+		if (src_copy.update_count != 0) {
+			src_copy.Flush();
+		}
+		if (target.update_count != 0) {
+			target.Flush();
+		}
+		// Combine the totals
 		for (int j = 0; j < 64; j++) {
-			tdata[i].count[j] += sdata[i].count[j];
+			target.totals[j] += src_copy.totals[j];
 		}
 	}
-}
 
-static void PacCountFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
-	auto sdata = FlatVector::GetData<PacCountState>(states);
-	auto rdata = FlatVector::GetData<double>(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto &state = sdata[i];
+	template <class RESULT_TYPE, class STATE>
+	static void Finalize(STATE &state, RESULT_TYPE &result, AggregateFinalizeData &finalize_data) {
+		// Flush any unflushed small_totals
+		if (state.update_count != 0) {
+			state.Flush();
+		}
 
 		// Compute the mean of the 64 counters
 		double sum = 0.0;
 		for (int j = 0; j < 64; j++) {
-			sum += static_cast<double>(state.count[j]);
+			sum += static_cast<double>(state.totals[j]);
 		}
 		double mean = sum / 64.0;
 
 		// Compute variance (population variance / second moment)
 		double variance = 0.0;
 		for (int j = 0; j < 64; j++) {
-			double diff = static_cast<double>(state.count[j]) - mean;
+			double diff = static_cast<double>(state.totals[j]) - mean;
 			variance += diff * diff;
 		}
 		variance /= 64.0;
 
-		rdata[offset + i] = variance;
+		result = variance;
 	}
-}
+
+	static bool IgnoreNull() {
+		return true;
+	}
+};
+
 
 struct PacAggregateLocalState : public FunctionLocalState {
 	explicit PacAggregateLocalState(uint64_t seed) : gen(seed) {}
