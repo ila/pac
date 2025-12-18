@@ -134,31 +134,70 @@ static void PacCountCombine(Vector &source, Vector &target, AggregateInputData &
 	}
 }
 
+// Finalize: compute noisy sample from the 64 counters
+static double PacNoisySampleFrom64Counters(const uint64_t counters[64], double mi, std::mt19937_64 &gen) {
+    constexpr int N = 64;
+    // Compute sum and sum-of-squares in one pass (auto-vectorizable?)
+    double S = 0.0;
+    double Q = 0.0;
+    for (int i = 0; i < N; ++i) {
+        double v = (double)counters[i];
+        S += v;
+        Q += v * v;
+    }
+
+    // Pick random index J in [0, N-1]
+    std::uniform_int_distribution<int> uid(0, N - 1);
+    int J = uid(gen);
+    double yJ = (double)counters[J];
+
+    // Compute leave-one-out sums
+    const double n1 = double(N - 1);           // 63.0
+    double sum_minus = S - yJ;                 // sum excluding yJ
+    double sumsq_minus = Q - yJ * yJ;          // sumsq excluding yJ
+
+    // Leave-one-out population variance (divide by n1)
+    double sigma2 = 0.0;
+    if (n1 > 1.0) {
+        // variance = (sumsq_minus - sum_minus^2 / n1) / n1
+        double tmp = sumsq_minus - (sum_minus * sum_minus) / n1;
+        // Numeric safety: clamp small negative rounding error to zero
+        if (tmp <= 0.0) {
+            sigma2 = 0.0;
+        } else {
+            sigma2 = tmp / n1;
+        }
+    }
+
+    double delta = sigma2 / (2.0 * mi);
+    if (delta <= 0.0 || !std::isfinite(delta)) {
+        return yJ;
+    }
+
+    // Sample normal(0, sqrt(delta)).
+    // this can probably be optimized further
+    std::normal_distribution<double> gauss(0.0, std::sqrt(delta));
+    return yJ + gauss(gen);
+}
+
+
 static void PacCountFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
-	auto sdata = FlatVector::GetData<PacCountState *>(states);
-	auto rdata = FlatVector::GetData<double>(result);
+    auto sdata = FlatVector::GetData<PacCountState *>(states);
+    auto rdata = FlatVector::GetData<double>(result);
 
-	for (idx_t i = 0; i < count; i++) {
-		auto state = sdata[i];
-		if (state->update_count != 0) {
-			state->Flush();
-		}
+    // Default mi (fixme)
+    const double mi_default = 128.0;
+    thread_local std::mt19937_64 gen(std::random_device{}());
 
-		double sum = 0.0;
-		for (int j = 0; j < 64; j++) {
-			sum += static_cast<double>(state->totals[j]);
-		}
-		double mean = sum / 64.0;
-
-		double variance = 0.0;
-		for (int j = 0; j < 64; j++) {
-			double diff = static_cast<double>(state->totals[j]) - mean;
-			variance += diff * diff;
-		}
-		variance /= 64.0;
-
-		rdata[offset + i] = variance;
-	}
+    for (idx_t i = 0; i < count; i++) {
+        auto state = sdata[i];
+        if (state->update_count != 0) {
+            state->Flush();
+        }
+        // Compute noisy sampled result from the 64 counters
+        double res = PacNoisySampleFrom64Counters(state->totals, mi_default, gen);
+        rdata[offset + i] = res;
+    }
 }
 
 // ============================================================================
