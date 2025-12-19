@@ -127,8 +127,9 @@ void CreateQueryJoiningSampleCTE(const std::string &lpts,
 		throw ParserException("PAC: failed to write " + output_filename);
 	}
 
-	ofs << "per sample AS (\n";
-	ofs << "\t" << lpts << "\n";
+	ofs << "per_sample AS (\n";
+	// Strip the last semicolon
+	ofs << "\t" << lpts.substr(0, lpts.size() - 1) << "\n";
 	ofs << ")\n";
 	ofs.close();
 }
