@@ -59,11 +59,6 @@ inline hugeint_t FromDouble<hugeint_t>(double val) {
 	return Hugeint::Convert(static_cast<int64_t>(val));
 }
 
-template <>
-inline uhugeint_t FromDouble<uhugeint_t>(double val) {
-	return Uhugeint::Convert(static_cast<uint64_t>(val));
-}
-
 // Helper to convert any numeric type to double for variance calculation
 template <class T>
 static inline double ToDouble(const T &val) {
@@ -75,10 +70,6 @@ inline double ToDouble<hugeint_t>(const hugeint_t &val) {
 	return Hugeint::Cast<double>(val);
 }
 
-template <>
-inline double ToDouble<uhugeint_t>(const uhugeint_t &val) {
-	return Uhugeint::Cast<double>(val);
-}
 
 // Helper to convert any totals array to double[64]
 template <class T>
@@ -87,52 +78,6 @@ static inline void ToDoubleArray(const T *src, double *dst) {
 		dst[i] = ToDouble(src[i]);
 	}
 }
-
-// =========================
-// Branchless mask helpers
-// =========================
-
-// Convert a bit (0 or 1) to a mask (0x0 or 0xFF...F)
-static inline uint64_t BitToMask(uint64_t bit) {
-	return ~(bit - 1ULL);
-}
-
-// Apply mask to value - generic template for integers
-template <class T>
-static inline T MaskValue(T value, uint64_t mask) {
-	return static_cast<T>(value & static_cast<T>(mask));
-}
-
-// Specialization for float
-template <>
-inline float MaskValue<float>(float value, uint64_t mask) {
-	union { float f; uint32_t u; } v;
-	v.f = value;
-	v.u &= static_cast<uint32_t>(mask);
-	return v.f;
-}
-
-// Specialization for double
-template <>
-inline double MaskValue<double>(double value, uint64_t mask) {
-	union { double d; uint64_t u; } v;
-	v.d = value;
-	v.u &= mask;
-	return v.d;
-}
-
-// Specialization for hugeint_t
-template <>
-inline hugeint_t MaskValue<hugeint_t>(hugeint_t value, uint64_t mask) {
-	return hugeint_t(value.lower & mask, value.upper & static_cast<int64_t>(mask));
-}
-
-// Specialization for uhugeint_t
-template <>
-inline uhugeint_t MaskValue<uhugeint_t>(uhugeint_t value, uint64_t mask) {
-	return uhugeint_t(value.lower & mask, value.upper & mask);
-}
-
 } // namespace duckdb
 
 #endif // PAC_AGGREGATE_HPP
