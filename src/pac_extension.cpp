@@ -22,6 +22,8 @@
 #include "include/pac_optimizer.hpp"
 #include "include/pac_privacy_unit.hpp"
 #include "include/pac_aggregate.hpp"
+#include "include/pac_count.hpp"
+#include "include/pac_sum.hpp"
 
 // planner/bound expression headers needed to inspect bind-time constant arguments and bound function info
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -101,6 +103,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
+	// Register pac_sum aggregate functions (moved to pac_sum.cpp)
+	RegisterPacSumFunctions(loader);
+	RegisterPacCountFunctions(loader);
 }
 
 void PacExtension::Load(ExtensionLoader &loader) {
