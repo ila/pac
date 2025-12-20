@@ -194,11 +194,6 @@ inline double ToDouble<hugeint_t>(const hugeint_t &val) {
 	return Hugeint::Cast<double>(val);
 }
 
-template <>
-inline double ToDouble<uhugeint_t>(const uhugeint_t &val) {
-	return Uhugeint::Cast<double>(val);
-}
-
 // Bind data to store the mi parameter for pac_count and pac_sum
 struct PacBindData : public FunctionData {
 	double mi;
@@ -226,11 +221,6 @@ static inline T FromDouble(double val);
 template <>
 inline hugeint_t FromDouble<hugeint_t>(double val) {
 	return Hugeint::Convert(static_cast<int64_t>(val));
-}
-
-template <>
-inline uhugeint_t FromDouble<uhugeint_t>(double val) {
-	return Uhugeint::Convert(static_cast<uint64_t>(val));
 }
 
 // pac_count finalize - moved here to have access to PacBindData and ToDoubleArray
@@ -261,56 +251,11 @@ static void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vec
 }
 
 // =========================
-// Branchless mask helpers
-// =========================
-
-// Convert a bit (0 or 1) to a mask (0x0 or 0xFF...F)
-static inline uint64_t BitToMask(uint64_t bit) {
-	return ~(bit - 1ULL);
-}
-
-// Apply mask to value - generic template for integers
-template <class T>
-static inline T MaskValue(T value, uint64_t mask) {
-	return static_cast<T>(value & static_cast<T>(mask));
-}
-
-// Specialization for float
-template <>
-inline float MaskValue<float>(float value, uint64_t mask) {
-	union { float f; uint32_t u; } v;
-	v.f = value;
-	v.u &= static_cast<uint32_t>(mask);
-	return v.f;
-}
-
-// Specialization for double
-template <>
-inline double MaskValue<double>(double value, uint64_t mask) {
-	union { double d; uint64_t u; } v;
-	v.d = value;
-	v.u &= mask;
-	return v.d;
-}
-
-// Specialization for hugeint_t
-template <>
-inline hugeint_t MaskValue<hugeint_t>(hugeint_t value, uint64_t mask) {
-	return hugeint_t(value.lower & mask, value.upper & static_cast<int64_t>(mask));
-}
-
-// Specialization for uhugeint_t
-template <>
-inline uhugeint_t MaskValue<uhugeint_t>(uhugeint_t value, uint64_t mask) {
-	return uhugeint_t(value.lower & mask, value.upper & mask);
-}
-
-// =========================
 // Float pac_sum (cascaded float32/float64 accumulation)
 // =========================
 
 // Define PAC_SUM_NONCASCADING to disable cascading for benchmarking purposes
-// #define PAC_SUM_NONCASCADING
+// #define PAC_SUM_NONCASCADING 1
 
 #ifndef PAC_SUM_NONCASCADING
 // Float cascade constants: values with |value| < kFloatMaxForFloat32 use float, otherwise double
@@ -560,88 +505,6 @@ static void PacSumFloatInitialize(const AggregateFunction &, data_ptr_t state_pt
 }
 
 template <class FLOAT_TYPE>
-AUTOVECTORIZE
-static void PacSumFloatUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
-                              idx_t count) {
-	D_ASSERT(input_count == 2);
-	auto &state = *reinterpret_cast<PacSumFloatState<FLOAT_TYPE> *>(state_ptr);
-
-	if (state.seen_null) {
-		return; // Already NULL, skip processing
-	}
-
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto hash_idx = hash_data.sel->get_index(i);
-		auto value_idx = value_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
-			state.seen_null = true;
-			return; // Stop processing after seeing NULL
-		}
-		uint64_t key_hash = hashes[hash_idx];
-		FLOAT_TYPE value = values[value_idx];
-
-		for (int j = 0; j < 64; j++) {
-#ifdef FILTER_WITH_MULT
-			state.sums[j] += value * static_cast<FLOAT_TYPE>((key_hash >> j) & 1ULL);
-#else
-			uint64_t mask = BitToMask((key_hash >> j) & 1ULL);
-			state.sums[j] += MaskValue(value, mask);
-#endif
-		}
-	}
-}
-
-template <class FLOAT_TYPE>
-AUTOVECTORIZE
-static void PacSumFloatScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states,
-                                     idx_t count) {
-	D_ASSERT(input_count == 2);
-
-	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
-
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
-	auto state_ptrs = UnifiedVectorFormat::GetData<PacSumFloatState<FLOAT_TYPE> *>(sdata);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto hash_idx = hash_data.sel->get_index(i);
-		auto value_idx = value_data.sel->get_index(i);
-		auto state_idx = sdata.sel->get_index(i);
-		auto state = state_ptrs[state_idx];
-
-		if (state->seen_null) {
-			continue; // Already NULL for this group
-		}
-
-		if (!hash_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx)) {
-			state->seen_null = true;
-			continue;
-		}
-
-		uint64_t key_hash = hashes[hash_idx];
-		FLOAT_TYPE value = values[value_idx];
-
-		for (int j = 0; j < 64; j++) {
-#ifdef FILTER_WITH_MULT
-			state->sums[j] += value * static_cast<FLOAT_TYPE>((key_hash >> j) & 1ULL);
-#else
-			uint64_t mask = BitToMask((key_hash >> j) & 1ULL);
-			state->sums[j] += MaskValue(value, mask);
-#endif
-		}
-	}
-}
-
-template <class FLOAT_TYPE>
 static void PacSumFloatCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
 	auto sdata = FlatVector::GetData<PacSumFloatState<FLOAT_TYPE> *>(source);
 	auto tdata = FlatVector::GetData<PacSumFloatState<FLOAT_TYPE> *>(target);
@@ -718,11 +581,6 @@ static inline bool HasTopBitsSet32(int64_t value) {
 	uint64_t abs_v = value >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-value);
 	return (abs_v >> (32 - kTopBits32)) != 0;
 }
-static inline bool HasTopBitsSet64(int64_t value) {
-	uint64_t abs_v = value >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-value);
-	return (abs_v >> (64 - kTopBits64)) != 0;
-}
-
 // Unsigned versions - check value directly
 static inline bool HasTopBitsSet8(uint64_t value) {
 	return (value >> (8 - kTopBits8)) != 0;
@@ -733,21 +591,20 @@ static inline bool HasTopBitsSet16(uint64_t value) {
 static inline bool HasTopBitsSet32(uint64_t value) {
 	return (value >> (32 - kTopBits32)) != 0;
 }
-static inline bool HasTopBitsSet64(uint64_t value) {
-	return (value >> (64 - kTopBits64)) != 0;
-}
 #endif
 
 // Signed integer state with cascaded levels
-// Buffer: 1024 (totals128) + 512 (totals64) + 256 (totals32) + 128 (totals16) + 64 (totals8) + 64 (alignment) = 2048 bytes
+// Buffer: 64 (totals8) + 128 (totals16) + 256 (totals32) + 512 (totals64) + 1024 (totals128) + 64 (alignment) = 2048 bytes
 struct PacSumSignedState {
 	char totals_buf[2048];
+#ifndef PAC_SUM_NONCASCADING
+	int8_t *totals8;
+	int16_t *totals16;
+	int32_t *totals32;
+	int64_t *totals64;
+#endif
 	hugeint_t *totals128;
 #ifndef PAC_SUM_NONCASCADING
-	int64_t *totals64;
-	int32_t *totals32;
-	int16_t *totals16;
-	int8_t *totals8;
 	uint32_t count8;
 	uint32_t count16;
 	uint32_t count32;
@@ -809,15 +666,17 @@ struct PacSumSignedState {
 };
 
 // Unsigned integer state with cascaded levels
-// Buffer: 1024 (totals128) + 512 (totals64) + 256 (totals32) + 128 (totals16) + 64 (totals8) + 64 (alignment) = 2048 bytes
+// Buffer: 64 (totals8) + 128 (totals16) + 256 (totals32) + 512 (totals64) + 1024 (totals128) + 64 (alignment) = 2048 bytes
 struct PacSumUnsignedState {
 	char totals_buf[2048];
+#ifndef PAC_SUM_NONCASCADING
+	uint8_t *totals8;
+	uint16_t *totals16;
+	uint32_t *totals32;
+	uint64_t *totals64;
+#endif
 	hugeint_t *totals128;
 #ifndef PAC_SUM_NONCASCADING
-	uint64_t *totals64;
-	uint32_t *totals32;
-	uint16_t *totals16;
-	uint8_t *totals8;
 	uint32_t count8;
 	uint32_t count16;
 	uint32_t count32;
@@ -947,7 +806,8 @@ static inline void AddToTotals64Unsigned(uint64_t *totals, uint64_t value, uint6
 }
 #endif
 
-// Direct to hugeint_t - used when PAC_SUM_NONCASCADING is defined, or for values too large for int64
+#ifdef PAC_SUM_NONCASCADING
+// Direct to hugeint_t - used when PAC_SUM_NONCASCADING is defined
 static inline void AddToTotals128Signed(hugeint_t *totals, int64_t value, uint64_t key_hash) {
 	hugeint_t v(value);
 	for (int j = 0; j < 64; j++) {
@@ -961,23 +821,26 @@ static inline void AddToTotals128Unsigned(hugeint_t *totals, uint64_t value, uin
 		totals[j] += v * hugeint_t((key_hash >> j) & 1ULL);
 	}
 }
+#endif
 
 static void PacSumSignedInitialize(PacSumSignedState &state) {
 	memset(state.totals_buf, 0, sizeof(state.totals_buf));
 
 	// Compute aligned pointers into totals_buf
-	// Layout: totals128 (1024) | totals64 (512) | totals32 (256) | totals16 (128) | totals8 (64)
+	// Layout: totals8 (64) | totals16 (128) | totals32 (256) | totals64 (512) | totals128 (1024)
 	uintptr_t base = AlignTo64(reinterpret_cast<uintptr_t>(state.totals_buf));
-	state.totals128 = reinterpret_cast<hugeint_t *>(base);
 #ifndef PAC_SUM_NONCASCADING
-	state.totals64 = reinterpret_cast<int64_t *>(base + 1024);
-	state.totals32 = reinterpret_cast<int32_t *>(base + 1024 + 512);
-	state.totals16 = reinterpret_cast<int16_t *>(base + 1024 + 512 + 256);
-	state.totals8 = reinterpret_cast<int8_t *>(base + 1024 + 512 + 256 + 128);
+	state.totals8 = reinterpret_cast<int8_t *>(base);
+	state.totals16 = reinterpret_cast<int16_t *>(base + 64);
+	state.totals32 = reinterpret_cast<int32_t *>(base + 64 + 128);
+	state.totals64 = reinterpret_cast<int64_t *>(base + 64 + 128 + 256);
+	state.totals128 = reinterpret_cast<hugeint_t *>(base + 64 + 128 + 256 + 512);
 	state.count8 = 0;
 	state.count16 = 0;
 	state.count32 = 0;
 	state.count64 = 0;
+#else
+	state.totals128 = reinterpret_cast<hugeint_t *>(base);
 #endif
 	state.seen_null = false;
 }
@@ -986,18 +849,20 @@ static void PacSumUnsignedInitialize(PacSumUnsignedState &state) {
 	memset(state.totals_buf, 0, sizeof(state.totals_buf));
 
 	// Compute aligned pointers into totals_buf
-	// Layout: totals128 (1024) | totals64 (512) | totals32 (256) | totals16 (128) | totals8 (64)
+	// Layout: totals8 (64) | totals16 (128) | totals32 (256) | totals64 (512) | totals128 (1024)
 	uintptr_t base = AlignTo64(reinterpret_cast<uintptr_t>(state.totals_buf));
-	state.totals128 = reinterpret_cast<hugeint_t *>(base);
 #ifndef PAC_SUM_NONCASCADING
-	state.totals64 = reinterpret_cast<uint64_t *>(base + 1024);
-	state.totals32 = reinterpret_cast<uint32_t *>(base + 1024 + 512);
-	state.totals16 = reinterpret_cast<uint16_t *>(base + 1024 + 512 + 256);
-	state.totals8 = reinterpret_cast<uint8_t *>(base + 1024 + 512 + 256 + 128);
+	state.totals8 = reinterpret_cast<uint8_t *>(base);
+	state.totals16 = reinterpret_cast<uint16_t *>(base + 64);
+	state.totals32 = reinterpret_cast<uint32_t *>(base + 64 + 128);
+	state.totals64 = reinterpret_cast<uint64_t *>(base + 64 + 128 + 256);
+	state.totals128 = reinterpret_cast<hugeint_t *>(base + 64 + 128 + 256 + 512);
 	state.count8 = 0;
 	state.count16 = 0;
 	state.count32 = 0;
 	state.count64 = 0;
+#else
+	state.totals128 = reinterpret_cast<hugeint_t *>(base);
 #endif
 	state.seen_null = false;
 }
@@ -1262,26 +1127,6 @@ static void PacSumIntegerFinalize(Vector &states, AggregateInputData &aggr_input
 }
 
 // =========================
-// Explicit instantiations for float types
-// =========================
-static void PacSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t input_count, data_ptr_t state,
-                              idx_t count) {
-	PacSumFloatUpdate<float>(inputs, aggr, input_count, state, count);
-}
-static void PacSumUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t input_count, data_ptr_t state,
-                               idx_t count) {
-	PacSumFloatUpdate<double>(inputs, aggr, input_count, state, count);
-}
-static void PacSumScatterFloat(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &states,
-                               idx_t count) {
-	PacSumFloatScatterUpdate<float>(inputs, aggr, input_count, states, count);
-}
-static void PacSumScatterDouble(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &states,
-                                idx_t count) {
-	PacSumFloatScatterUpdate<double>(inputs, aggr, input_count, states, count);
-}
-
-// =========================
 // Explicit instantiations for signed integer types (accumulate to hugeint_t)
 // =========================
 static void PacSumUpdateTinyInt(Vector inputs[], AggregateInputData &aggr, idx_t input_count, data_ptr_t state,
@@ -1344,10 +1189,6 @@ static void PacSumUpdateUBigInt(Vector inputs[], AggregateInputData &aggr, idx_t
                                 idx_t count) {
 	PacSumIntegerUpdate<uint64_t, hugeint_t>(inputs, aggr, input_count, state, count);
 }
-static void PacSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t input_count, data_ptr_t state,
-                                 idx_t count) {
-	PacSumIntegerUpdate<uhugeint_t, hugeint_t>(inputs, aggr, input_count, state, count);
-}
 static void PacSumScatterUTinyInt(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &states,
                                   idx_t count) {
 	PacSumIntegerScatterUpdate<uint8_t, hugeint_t>(inputs, aggr, input_count, states, count);
@@ -1364,11 +1205,6 @@ static void PacSumScatterUBigInt(Vector inputs[], AggregateInputData &aggr, idx_
                                  idx_t count) {
 	PacSumIntegerScatterUpdate<uint64_t, hugeint_t>(inputs, aggr, input_count, states, count);
 }
-static void PacSumScatterUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &states,
-                                  idx_t count) {
-	PacSumIntegerScatterUpdate<uhugeint_t, hugeint_t>(inputs, aggr, input_count, states, count);
-}
-
 // UHUGEINT -> DOUBLE (like DuckDB's SUM): reads uhugeint_t, accumulates as double
 static void PacSumUpdateUHugeIntToDouble(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
                                          idx_t count) {
@@ -1438,9 +1274,6 @@ static void PacSumScatterUHugeIntToDouble(Vector inputs[], AggregateInputData &,
 // =========================
 // Combine and Finalize wrappers
 // =========================
-static void PacSumCombineFloat(Vector &source, Vector &target, AggregateInputData &aggr, idx_t count) {
-	PacSumFloatCombine<float>(source, target, aggr, count);
-}
 static void PacSumCombineDouble(Vector &source, Vector &target, AggregateInputData &aggr, idx_t count) {
 	PacSumFloatCombine<double>(source, target, aggr, count);
 }
@@ -1472,14 +1305,7 @@ static void PacSumCombineUInteger(Vector &source, Vector &target, AggregateInput
 static void PacSumCombineUBigInt(Vector &source, Vector &target, AggregateInputData &aggr, idx_t count) {
 	PacSumIntegerCombine<uint64_t, hugeint_t>(source, target, aggr, count);
 }
-static void PacSumCombineUHugeInt(Vector &source, Vector &target, AggregateInputData &aggr, idx_t count) {
-	PacSumIntegerCombine<uhugeint_t, hugeint_t>(source, target, aggr, count);
-}
-
 // Type-specific finalize functions
-static void PacSumFinalizeFloat(Vector &states, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
-	PacSumFloatFinalize<float>(states, aggr, result, count, offset);
-}
 static void PacSumFinalizeDouble(Vector &states, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
 	PacSumFloatFinalize<double>(states, aggr, result, count, offset);
 }
@@ -1511,10 +1337,6 @@ static void PacSumFinalizeUInteger(Vector &states, AggregateInputData &aggr, Vec
 static void PacSumFinalizeUBigInt(Vector &states, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
 	PacSumIntegerFinalize<uint64_t, hugeint_t>(states, aggr, result, count, offset);
 }
-static void PacSumFinalizeUHugeInt(Vector &states, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
-	PacSumIntegerFinalize<uhugeint_t, hugeint_t>(states, aggr, result, count, offset);
-}
-
 
 struct PacAggregateLocalState : public FunctionLocalState {
 	explicit PacAggregateLocalState(uint64_t seed) : gen(seed) {}
