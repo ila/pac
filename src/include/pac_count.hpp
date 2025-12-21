@@ -15,6 +15,7 @@ struct PacCountState {
 	uint64_t totals8[8];   // SIMD-friendly intermediate accumulators (8 x 8 bytes)
 	uint64_t totals64[64]; // Final counters (64 x 8 bytes)
 	uint8_t update_count;  // Counts updates, flushes when wraps to 0
+	double mi;             // Privacy parameter (default 128.0)
 
 	void Flush();
 };

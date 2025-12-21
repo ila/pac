@@ -28,6 +28,8 @@ idx_t PacCountStateSize(const AggregateFunction &) {
 
 void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 	memset(state_ptr, 0, sizeof(PacCountState));
+	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
+	state.mi = 128.0; // default, may be overwritten in Update from bind_data
 }
 
 // Internal update helper
@@ -46,9 +48,15 @@ PacCountUpdateInternal(const UnifiedVectorFormat &idata, idx_t i, const uint64_t
 	}
 }
 
-void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
+void PacCountUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
 	D_ASSERT(input_count == 1 || input_count == 2);
 	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
+
+	// Store mi from bind_data into state
+	if (aggr_input.bind_data) {
+		state.mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	}
+
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
@@ -58,8 +66,15 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, da
 	}
 }
 
-void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &states, idx_t count) {
+void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, Vector &states, idx_t count) {
 	D_ASSERT(input_count == 1 || input_count == 2);
+
+	// Get mi from bind_data
+	double mi = 128.0;
+	if (aggr_input.bind_data) {
+		mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	}
+
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
@@ -68,7 +83,9 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t input_co
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
 
 	for (idx_t i = 0; i < count; i++) {
-		PacCountUpdateInternal(idata, i, input_data, *state_ptrs[sdata.sel->get_index(i)]);
+		auto state = state_ptrs[sdata.sel->get_index(i)];
+		state->mi = mi;  // Store mi in state
+		PacCountUpdateInternal(idata, i, input_data, *state);
 	}
 }
 
@@ -102,16 +119,10 @@ unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction 
 	return make_uniq<PacBindData>(mi);
 }
 
-// pac_count finalize - moved here to have access to PacBindData and ToDoubleArray
-void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count, idx_t offset) {
+// pac_count finalize - uses mi from state (set during Update from bind_data)
+void PacCountFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
     auto sdata = FlatVector::GetData<PacCountState *>(states);
     auto rdata = FlatVector::GetData<uint64_t>(result);
-
-    // Get mi from bind data, default to 128.0
-    double mi = 128.0;
-    if (aggr_input.bind_data) {
-        mi = aggr_input.bind_data->Cast<PacBindData>().mi;
-    }
     thread_local std::mt19937_64 gen(std::random_device{}());
 
     for (idx_t i = 0; i < count; i++) {
@@ -122,8 +133,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &re
         // Convert uint64_t totals64 to double array
         double counters_d[64];
         ToDoubleArray(state->totals64, counters_d);
-        // Compute noisy sampled result: totals64[0] + noise
-        double noise = PacNoisySampleFrom64Counters(counters_d, mi, gen);
+        // Compute noisy sampled result: totals64[0] + noise (using mi from state)
+        double noise = PacNoisySampleFrom64Counters(counters_d, state->mi, gen);
         uint64_t res = static_cast<uint64_t>(static_cast<double>(state->totals64[0]) + noise);
         rdata[offset + i] = res;
     }

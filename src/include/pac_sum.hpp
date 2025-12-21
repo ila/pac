@@ -38,6 +38,7 @@ struct PacSumFloatCascadeState {
 	uint32_t count32;
 #endif
 	bool seen_null;
+	double mi;  // Privacy parameter (default 128.0)
 
 #ifndef PAC_SUM_NONCASCADING
 	// Declare Flush32 here; define it after the kFloatFlushThreshold constant is declared
