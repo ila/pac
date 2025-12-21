@@ -24,15 +24,8 @@ DUCKDB_API unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &stat
                                                                const BoundFunctionExpression &expr,
                                                                FunctionData *bind_data);
 
-// Scalar function entry point used by the DuckDB runtime. Accepts
-// (LIST<DOUBLE> values, LIST<INT> counts, DOUBLE mi, INT k) -> DOUBLE
-DUCKDB_API void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &result);
-
-// Scalar function entry point for BIGINT inputs. Accepts
-// (LIST<BIGINT> values, LIST<BIGINT> counts, DOUBLE mi, INT k) -> DOUBLE
-// This overload converts bigint elements to the expected internal types
-// and then applies the same PAC algorithm.
-DUCKDB_API void PacAggregateScalarBigint(DataChunk &args, ExpressionState &state, Vector &result);
+// NOTE: PacAggregateScalar and PacAggregateScalarBigint concrete symbols were removed.
+// We now use the templated implementation PacAggregateScalar<T,C> instantiated at registration time.
 
 // Register pac_aggregate scalar function(s) with the extension loader
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
@@ -54,7 +47,9 @@ struct PacBindData : public FunctionData {
 
 // Helper to convert double to accumulator type (used by pac_sum finalizers)
 template <class T>
-static inline T FromDouble(double val);
+static inline T FromDouble(double val) {
+    return static_cast<T>(val);
+}
 
 // Specializations for hugeint_t and uhugeint_t
 template <>
@@ -71,6 +66,12 @@ static inline double ToDouble(const T &val) {
 template <>
 inline double ToDouble<hugeint_t>(const hugeint_t &val) {
 	return Hugeint::Cast<double>(val);
+}
+
+// Specialization for unsigned hugeint (uhugeint_t)
+template <>
+inline double ToDouble<uhugeint_t>(const uhugeint_t &val) {
+	return Uhugeint::Cast<double>(val);
 }
 
 

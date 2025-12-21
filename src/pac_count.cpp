@@ -133,9 +133,9 @@ void PacCountFinalize(Vector &states, AggregateInputData &, Vector &result, idx_
         // Convert uint64_t totals64 to double array
         double counters_d[64];
         ToDoubleArray(state->totals64, counters_d);
-        // Compute noisy sampled result: totals64[0] + noise (using mi from state)
-        double noise = PacNoisySampleFrom64Counters(counters_d, state->mi, gen);
-        uint64_t res = static_cast<uint64_t>(static_cast<double>(state->totals64[0]) + noise);
+        // Compute noisy sampled result using PacNoisySampleFrom64Counters (returns yJ + noise)
+        double noisy = PacNoisySampleFrom64Counters(counters_d, state->mi, gen);
+        uint64_t res = static_cast<uint64_t>(noisy);
         rdata[offset + i] = res;
     }
 }

@@ -148,8 +148,9 @@ static void PacSumFloatCascadeFinalize(Vector &states, AggregateInputData &, Vec
 		state->Flush32(true);
 #endif
 
-		double noise = PacNoisySampleFrom64Counters(state->totals64, state->mi, gen);
-		rdata[offset + i] = state->totals64[0] + noise;
+		// PacNoisySampleFrom64Counters returns the selected counter yJ plus noise.
+		double noisy = PacNoisySampleFrom64Counters(state->totals64, state->mi, gen);
+		rdata[offset + i] = noisy;
 	}
 }
 
@@ -233,9 +234,9 @@ static void PacSumFloatFinalize(Vector &states, AggregateInputData &, Vector &re
 		// Convert sums to double array
 		double sums_d[64];
 		ToDoubleArray(state->sums, sums_d);
-		// Compute noisy sampled result: sums[0] + noise (using mi from state)
-		double noise = PacNoisySampleFrom64Counters(sums_d, state->mi, gen);
-		rdata[offset + i] = static_cast<double>(state->sums[0]) + noise;
+		// PacNoisySampleFrom64Counters returns yJ + noise
+		double noisy = PacNoisySampleFrom64Counters(sums_d, state->mi, gen);
+		rdata[offset + i] = noisy;
 	}
 }
 
@@ -721,11 +722,10 @@ static inline void PacSumUnsignedUpdateInternal(PacSumUnsignedState &state, uint
 			// Convert totals128 to double array
 			double totals_d[64];
 			ToDoubleArray(state->totals128, totals_d);
-			// Compute noisy sampled result: totals128[0] + noise (using mi from state)
-			double noise = PacNoisySampleFrom64Counters(totals_d, state->mi, gen);
-			double result_d = ToDouble(state->totals128[0]) + noise;
-			// Cast back to accumulator type
-			rdata[offset + i] = FromDouble<ACC_TYPE>(result_d);
+			// PacNoisySampleFrom64Counters returns yJ + noise
+			double noisy = PacNoisySampleFrom64Counters(totals_d, state->mi, gen);
+			// Cast back to accumulator type using FromDouble
+			rdata[offset + i] = FromDouble<ACC_TYPE>(noisy);
 		}
 	}
 

@@ -115,6 +115,7 @@ void CreateSampleCTE(ClientContext &context,
     ofs << "  SELECT src.rowid, s.sample_id\n";
     ofs << "  FROM " << privacy_unit << " AS src\n";
     ofs << "  CROSS JOIN generate_series(1," << m_cfg << ") AS s(sample_id)\n";
+	ofs << "  WHERE random() < 0.5\n"; // 50% sampling
     ofs << "),\n";
 
     ofs.close();
