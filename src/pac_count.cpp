@@ -99,8 +99,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &re
 		state[i]->Flush(); // flush any remaining small totals into the big totals
 		double counters_d[64];
 		ToDoubleArray(state[i]->totals64, counters_d); // Convert uint64_t totals64 to double array
-		data[off + i] =
-		    static_cast<uint64_t>(PacNoisySampleFrom64Counters(counters_d, mi, gen)) + state[i]->totals64[42];
+		data[off + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
+		    static_cast<uint64_t>(PacNoisySampleFrom64Counters(counters_d, mi, gen)) + state[i]->totals64[41];
 	}
 }
 
