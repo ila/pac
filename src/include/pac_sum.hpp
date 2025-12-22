@@ -28,51 +28,60 @@
 // We keep sub-totals[64] in multiple data types, from small to large, and try to handle
 // most summing in the smallest possible data-type. Because, we can do the 64 sums with
 // auto-vectorization. (Rather than naive FOR(i=0;i<64;i++) IF (keybit[i]) totals[i]+=val
-// we rewite into SIMD-friendly multiplication FOR(i=0;i<64;i++) totals[i]+=keybit[i]*val),
+// we rewrite into SIMD-friendly multiplication FOR(i=0;i<64;i++) totals[i]+=keybit[i]*val),
 //
 // mimicking what DuckDB's SUM() normally does we have the following cases:
-// 1) integers: PAC_SUM(key_hash, [U](BIG||SMALL|TINY)INT) =-> [U]HUGEINT
+// 1) integers: PAC_SUM(key_hash, [U](BIG||SMALL|TINY)INT) -> [U]HUGEINT
 //              We keep sub-totals8/16/32/64/128 and sum each value in smallest subtotal that fits.
 //				We ensure "things fit" by flushing totalsX into the next wider total every 2^bX
 //	 			additions, and only by allowing values to be added into totalsX if they have the
 //	 			highest bX bits unset, so overflow cannot happen (b8=3, b16=5, b32=6, b64=8).
 //              In combine/finalize, we flush out all totalsX<128 into totals128
 //              In Finalize() the noised result is computed from totals128
-// 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE) -> DOUBLE
+// 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
 //              similar, but with two levels only (float,double), and 16 additions of |val| < 1M
 //              into the float-subtotals. This is a compromise based on some rather rough
 //	            numerical analysis. It should be noted that (e.g. due to parallelism) the outcome
 //              of even standard DuckDB SUM on floating-point numbers is unstable anyway.
-// 3) huge-int: PAC_SUM(key_hash, [U]HUGEINT -> DOUBLE
-//				DuckDB produces DOUBLE outcomes for 128-bits integer sums (avoiding debate here)
-//              so we do as well. This basically uses the DOUBLE
+// 3) huge-int: PAC_SUM(key_hash, [U]HUGEINT) -> DOUBLE
+//				DuckDB produces DOUBLE outcomes for 128-bits integer sums, so we do as well.
+//              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
 
 namespace duckdb {
 
 //#define PAC_SUM_NONCASCADING 1 seems 10x slower on Apple
 
-// this macro controls how we filter the values. Rather than IF (bit_is_set) THEN totals += value
+// This macro controls how we filter the values. Rather than IF (bit_is_set) THEN totals += value
 // we rather set value to 0 if !bit_is_set and always do totals += value. This is SIMD-friendly.
 //
-// but we can came up with two ways to set value to 0 if !bit_is_set, namely using:
-// - AND (value &= (bit_is_set - 1)) or
-// - MULT (value *= bit_is_set)
-// in micro-benchmarks on Apple, it seems MULT is 30% faster, therefore we use that now
-#define PAC_FILTER_MULT 1
-#ifdef PAC_FILTER_MULT
-#define PAC_FILTER(val, tpe, key, pos) (val * static_cast<tpe>((key >> pos) & 1ULL))
-#else
-#define PAC_FILTER(val, tpe, key, pos) (val & static_cast<tpe>(((key >> pos) & 1ULL)) - 1ULL)
-#endif
+// We have two ways to set value to 0 if !bit_is_set:
+// - MULT: value *= bit_is_set
+// - AND:  value &= (bit_is_set - 1)
+// In micro-benchmarks on Apple, MULT is 30% faster.
+// Note: AND only works for integers, not floating point, so DOUBLE always uses MULT.
+#define PAC_FILTER_MULT(val, tpe, key, pos) ((val) * static_cast<tpe>(((key) >> (pos)) & 1ULL))
+#define PAC_FILTER_AND(val, tpe, key, pos) ((val) & (static_cast<tpe>(((key) >> (pos)) & 1ULL) - 1ULL))
+
+// INT filter is configurable (currently MULT, can switch to AND for benchmarking)
+#define PAC_FILTER_INT PAC_FILTER_MULT
+// DOUBLE filter must always be MULT (AND doesn't work for floating point)
+#define PAC_FILTER_DOUBLE PAC_FILTER_MULT
+
+// Filter kind selector for AddToTotals template
+enum class PacFilter { INT, DOUBLE };
 
 // Inner AUTOVECTORIZE function for the 64-element loops
 // This is the hot path that benefits from SIMD
 // Unified template for adding to totals at any accumulator width
-template <typename ACCUM_T, typename VALUE_T>
+template <PacFilter KIND, typename ACCUM_T, typename VALUE_T>
 AUTOVECTORIZE static inline void AddToTotals(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
-		totals[j] += PAC_FILTER(v, ACCUM_T, key_hash, j);
+		if constexpr (KIND == PacFilter::DOUBLE) {
+			totals[j] += PAC_FILTER_DOUBLE(v, ACCUM_T, key_hash, j);
+		} else {
+			totals[j] += PAC_FILTER_INT(v, ACCUM_T, key_hash, j);
+		}
 	}
 }
 
@@ -91,12 +100,12 @@ static constexpr int kTopBits64 = 8;
 #define FLUSH_THRESHOLD_UNSIGNED(X) (1 << kTopBits##X)
 
 // Check whether a value is small, i.e. top-bits are 0
-#define HAS_TOP_BITS_SET_SIGNED(value, bits)                                                                           \
+#define HAS_TOP_BITS_SET_SIGNED(value, bits) \
 	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - kTopBits##bits)) != 0)
 #define HAS_TOP_BITS_SET_UNSIGNED(value, bits) ((static_cast<uint64_t>(value) >> (bits - kTopBits##bits)) != 0)
 
 // Bool parameter version - compiler optimizes away the ternary
-#define HAS_TOP_BITS_SET(value, bits, is_signed)                                                                       \
+#define HAS_TOP_BITS_SET(value, bits, is_signed) \
 	((is_signed) ? HAS_TOP_BITS_SET_SIGNED(value, bits) : HAS_TOP_BITS_SET_UNSIGNED(value, bits))
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
@@ -183,7 +192,7 @@ struct PacSumDoubleState {
 #ifndef PAC_SUM_NONCASCADING
 	uint32_t count32;
 
-	void Flush32(bool force) {
+	AUTOVECTORIZE inline void Flush32(bool force) {
 		if (force || ++count32 >= kDoubleFlushThreshold) {
 			for (int i = 0; i < 64; i++) {
 				totals64[i] += static_cast<double>(totals32[i]);

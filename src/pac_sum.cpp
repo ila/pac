@@ -34,20 +34,20 @@ PacSumIntUpdateInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash,
                         typename std::conditional<SIGNED, int64_t, uint64_t>::type val) {
 #ifndef PAC_SUM_NONCASCADING
 	if (!HAS_TOP_BITS_SET(val, 8, SIGNED)) {
-		AddToTotals(state.totals8, val, key_hash);
+		AddToTotals<PacFilter::INT>(state.totals8, val, key_hash);
 		state.Flush8(false);
 	} else if (!HAS_TOP_BITS_SET(val, 16, SIGNED)) {
-		AddToTotals(state.totals16, val, key_hash);
+		AddToTotals<PacFilter::INT>(state.totals16, val, key_hash);
 		state.Flush16(false);
 	} else if (!HAS_TOP_BITS_SET(val, 32, SIGNED)) {
-		AddToTotals(state.totals32, val, key_hash);
+		AddToTotals<PacFilter::INT>(state.totals32, val, key_hash);
 		state.Flush32(false);
 	} else {
-		AddToTotals(state.totals64, val, key_hash);
+		AddToTotals<PacFilter::INT>(state.totals64, val, key_hash);
 		state.Flush64(false);
 	}
 #else
-	AddToTotals(state.totals128, val, key_hash); // directly add into int128_t (slow..)
+	AddToTotals<PacFilter::INT>(state.totals128, val, key_hash); // directly add into int128_t (slow..)
 #endif
 }
 
@@ -157,11 +157,11 @@ static void PacSumDoubleInitialize(const AggregateFunction &, data_ptr_t state_p
 static inline void PacSumDoubleUpdateInternal(PacSumDoubleState &state, uint64_t key_hash, double val) {
 #ifndef PAC_SUM_NONCASCADING
 	if (AdditionFitsInFloat(val)) {
-		AddToTotals(state.totals32, static_cast<float>(val), key_hash);
+		AddToTotals<PacFilter::DOUBLE>(state.totals32, static_cast<float>(val), key_hash);
 		state.Flush32(false);
 	} else
 #endif
-		AddToTotals(state.totals64, val, key_hash);
+		AddToTotals<PacFilter::DOUBLE>(state.totals64, val, key_hash);
 }
 
 // Double cascade update (ungrouped global aggregate) - also handles hugeint_t/uhugeint_t via ToDouble
