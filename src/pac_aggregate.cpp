@@ -116,6 +116,16 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	auto &local = ExecuteFunctionState::GetFunctionState(state)->Cast<PacAggregateLocalState>();
 	auto &gen = local.gen;
 
+	// --- extract lists ---
+	UnifiedVectorFormat vvals, vcnts;
+	vals.ToUnifiedFormat(count, vvals);
+	cnts.ToUnifiedFormat(count, vcnts);
+
+	// Prepare unified format for k (integer per-row parameter) once per chunk
+	UnifiedVectorFormat kvals;
+	k_vec.ToUnifiedFormat(count, kvals);
+	auto *kdata = UnifiedVectorFormat::GetData<int32_t>(kvals);
+
 	for (idx_t row = 0; row < count; row++) {
 		bool refuse = false;
 
@@ -124,12 +134,8 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 		if (mi <= 0.0) {
 			throw InvalidInputException("pac_aggregate: mi must be > 0");
 		}
-		int k = FlatVector::GetData<int32_t>(k_vec)[row];
-
-		// --- extract lists ---
-		UnifiedVectorFormat vvals, vcnts;
-		vals.ToUnifiedFormat(count, vvals);
-		cnts.ToUnifiedFormat(count, vcnts);
+		idx_t kidx = kvals.sel ? kvals.sel->get_index(row) : row;
+		int k = kdata[kidx];
 
 		idx_t r = vvals.sel ? vvals.sel->get_index(row) : row;
 		if (!vvals.validity.RowIsValid(r) || !vcnts.validity.RowIsValid(r)) {
