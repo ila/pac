@@ -141,8 +141,8 @@ static void PacSumIntFinalize(Vector &states, AggregateInputData &aggr_input, Ve
 #endif
 			double totals_d[64]; // Convert totals128 to double array
 			ToDoubleArray(state[i]->totals128, totals_d);
-			data[off + i] =
-			    FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals128[42];
+			data[off + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
+			    FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals128[41];
 		}
 	}
 }
@@ -251,8 +251,8 @@ static void PacSumDoubleFinalize(Vector &states, AggregateInputData &input, Vect
 #endif
 			double totals_d[64];
 			ToDoubleArray(state[i]->totals64, totals_d);
-			data[off + i] =
-			    FromDouble<double>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals64[42];
+			data[off + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
+			    FromDouble<double>(PacNoisySampleFrom64Counters(totals_d, mi, gen)) + state[i]->totals64[41];
 		}
 	}
 }
