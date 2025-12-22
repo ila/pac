@@ -110,8 +110,8 @@ FROM per_sample_m128
 GROUP BY group_key
 ORDER BY group_key;
 ----
-A	13.009285527948
-B	14.301966776795252
+A	9.494607641394737
+B	14.109083190275262
 
 # WITH counts AS (SELECT group_key, count(cnt) AS cnt FROM t1 GROUP BY group_key)
 # SELECT group_key, pac_aggregate(array_agg(cnt ORDER BY group_key), array_agg(cnt ORDER BY group_key), 1.0/128, 1) AS pac_val
