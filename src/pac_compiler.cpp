@@ -361,6 +361,15 @@ void CompilePACQuery(OptimizerExtensionInput &input,
                      const std::string &privacy_unit) {
 
     if (privacy_unit.empty()) return;
+
+    // Determine PACOptimizerInfo (if provided) — we'll only set its flag in narrowly scoped regions
+    PACOptimizerInfo *pac_info_scope = nullptr;
+    if (input.info) {
+        pac_info_scope = dynamic_cast<PACOptimizerInfo *>(input.info.get());
+    }
+
+    try {
+
     // 1. Create sample CTE file (unchanged)
     string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
     string hash = HashStringToHex(normalized);
@@ -373,34 +382,9 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     string filename = path + privacy_unit + "_" + hash + ".sql";
 	CreateSampleCTE(input.context, privacy_unit, filename, normalized);
 
-	// Replan the plan without compressed materialization.
-	// We change the "disabled_optimizers" setting temporarily and re-run the optimizer. Use RAII
-	// to ensure the original setting is always restored.
-	{
-		auto &dbconf = DBConfig::GetConfig(input.context);
-		// If the optimizer extension provided a PACOptimizerInfo, use it to prevent re-entrant replans
-		PACOptimizerInfo *pac_info = nullptr;
-		if (input.info) {
-			pac_info = dynamic_cast<PACOptimizerInfo *>(input.info.get());
-		}
-		// If a replan is already in progress by this extension, skip re-optimizing to avoid recursion
-		if (pac_info && pac_info->replan_in_progress.load(std::memory_order_acquire)) {
-			// skip replan to avoid recursion
-		} else {
-			// set the in-progress flag in RAII manner if pac_info exists
-			struct ReplanGuard {
-				PACOptimizerInfo *info;
-				ReplanGuard(PACOptimizerInfo *i) : info(i) {
-					if (info) info->replan_in_progress.store(true, std::memory_order_release);
-				}
-				~ReplanGuard() {
-					if (info) info->replan_in_progress.store(false, std::memory_order_release);
-				}
-			};
-			ReplanGuard rg(pac_info);
-			Connection con(*input.context.db);
-
-			con.BeginTransaction();
+	// Replan the plan without compressed materialization
+    	Connection con(*input.context.db);
+    	con.BeginTransaction();
 			// todo: maybe we want to disable more optimizers (internal_optimizer_types)
 			// If column_lifetime is enabled, then the existence of duplicate table indices etc etc is verified.
 			// However, it massively complicates the query tree which is not nice for further usage in OpenIVM.
@@ -422,8 +406,6 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 			Optimizer optimizer(*planner.binder, input.context);
 			plan = optimizer.Optimize(std::move(planner.plan));
 			plan->Print();
-		}
-	}
 
     // 2. Create LogicalGet for sample table
     idx_t sample_idx = GetNextTableIndex(plan);
@@ -507,13 +489,32 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 		                  std::istreambuf_iterator<char>());
 
 		Parser parser;
-    	parser.ParseQuery(query);
-    	auto statement = parser.statements[0].get();
-    	Planner planner(input.context);
-    	planner.CreatePlan(statement->Copy());
-    	Optimizer optimizer(*planner.binder, input.context);
-    	plan = optimizer.Optimize(std::move(planner.plan));
-    	plan->Print();
+	    parser.ParseQuery(query);
+	    auto statement = parser.statements[0].get();
+	    Planner planner(input.context);
+	    planner.CreatePlan(statement->Copy());
+
+		// Ensure optimizer-extension rules (and our PACRewriteRule) don't re-enter while
+		// we optimize the generated query — set the replan flag in a narrow RAII scope.
+		struct ScopedReplanFlag {
+			PACOptimizerInfo *info;
+			bool prev;
+			ScopedReplanFlag(PACOptimizerInfo *i) : info(i), prev(false) {
+				if (info) {
+					prev = info->replan_in_progress.load(std::memory_order_acquire);
+					info->replan_in_progress.store(true, std::memory_order_release);
+				}
+			}
+			~ScopedReplanFlag() {
+				if (info) {
+					info->replan_in_progress.store(prev, std::memory_order_release);
+				}
+			}
+		} scoped_flag(pac_info_scope);
+
+		Optimizer optimizer(*planner.binder, input.context);
+		plan = optimizer.Optimize(std::move(planner.plan));
+		plan->Print();
 	}
 
 	// todo:
@@ -522,10 +523,15 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 	// clean up this code
 	// test more queries
 	// implement filter pushdown
-	// optimize pac_aggregate not to pass the same aray twice (when vals = counts)
+	// optimize pac_aggregate not to pass the same array twice (when vals = counts)
 	// implement pac_sum final step
 	// test everything
 	// check for robustness with null values
- }
+
+	} catch (...) {
+		throw;
+	}
+
+}
 
 } // namespace duckdb

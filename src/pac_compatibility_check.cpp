@@ -1,5 +1,5 @@
 #include "include/pac_compatibility_check.hpp"
-#include "include/pac_privacy_unit.hpp"
+#include "include/pac_helpers.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -66,29 +66,29 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
         return true;
     }
     for (auto &child : op.children) {
-        if (ContainsDisallowedJoin(*child)) return true;
+        if (ContainsDisallowedJoin(*child)) { return true; }
     }
     return false;
 }
 
 static bool ContainsWindowFunction(const LogicalOperator &op) {
-    if (op.type == LogicalOperatorType::LOGICAL_WINDOW) return true;
+    if (op.type == LogicalOperatorType::LOGICAL_WINDOW) { return true; }
     for (auto &child : op.children) {
-        if (ContainsWindowFunction(*child)) return true;
+        if (ContainsWindowFunction(*child)) { return true; }
     }
     return false;
 }
 
 static bool ContainsDistinct(const LogicalOperator &op) {
     // If there's an explicit DISTINCT operator in the logical plan, detect it
-    if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) return true;
+    if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) { return true; }
 
     // Inspect expressions attached to this operator: COUNT(DISTINCT ...), etc.
     for (auto &expr : op.expressions) {
-        if (!expr) continue;
+        if (!expr) { continue; }
         if (expr->IsAggregate()) {
             auto &aggr = expr->Cast<BoundAggregateExpression>();
-            if (aggr.IsDistinct()) return true;
+            if (aggr.IsDistinct()) { return true; }
         }
     }
 
@@ -96,16 +96,16 @@ static bool ContainsDistinct(const LogicalOperator &op) {
     if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
         auto &aggr = op.Cast<LogicalAggregate>();
         for (auto &expr : aggr.expressions) {
-            if (!expr) continue;
+            if (!expr) { continue; }
             if (expr->IsAggregate()) {
                 auto &a = expr->Cast<BoundAggregateExpression>();
-                if (a.IsDistinct()) return true;
+                if (a.IsDistinct()) { return true; }
             }
         }
     }
 
     for (auto &child : op.children) {
-        if (ContainsDistinct(*child)) return true;
+        if (ContainsDistinct(*child)) { return true; }
     }
     return false;
 }
@@ -116,12 +116,12 @@ static bool ContainsAggregation(const LogicalOperator &op) {
         for (auto &expr : aggr.expressions) {
             if (expr && expr->IsAggregate()) {
                 auto &ag = expr->Cast<BoundAggregateExpression>();
-                if (IsAllowedAggregate(ag.function.name)) return true;
+                if (IsAllowedAggregate(ag.function.name)) { return true; }
             }
         }
     }
     for (auto &child : op.children) {
-        if (ContainsAggregation(*child)) return true;
+        if (ContainsAggregation(*child)) { return true; }
     }
     return false;
 }
@@ -144,21 +144,21 @@ static void CountScans(const LogicalOperator &op, std::unordered_map<std::string
     }
 }
 
-bool PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context) {
-    // Determine PAC tables filename from context setting (default pac_tables.csv)
-    std::string pac_privacy_file = "pac_tables.csv";
-    Value pac_privacy_file_value;
-    if (context.TryGetCurrentSetting("pac_privacy_file", pac_privacy_file_value) && !pac_privacy_file_value.IsNull()) {
-        pac_privacy_file = pac_privacy_file_value.ToString();
+PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context, const std::vector<std::string> &pac_tables, bool replan_in_progress) {
+    PACCompatibilityResult result;
+
+    // If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
+    // to avoid re-entrant behavior and infinite loops.
+    if (replan_in_progress) {
+        return result;
     }
-    auto pac_tables = ReadPacTablesFile(pac_privacy_file);
 
 	// Case 1: contains PAC tables?
 	// Then, we check further conditions (aggregation, joins, etc.)
-	// If there are as many sample-CTE scans as PAC table scans, then nothing to do (return false)
-	// If there are only PAC table scans, check the other conditions and return true/false accordingly
+	// If there are as many sample-CTE scans as PAC table scans, then nothing to do (return empty result)
+	// If there are only PAC table scans, check the other conditions and return info accordingly
 	// If some conditions fail, throw an error in the caller
-	// Case 2: no PAC tables? (return false, nothing to do)
+	// Case 2: no PAC tables? (return empty result, nothing to do)
 
     // count all scanned tables/CTEs in the plan
     std::unordered_map<std::string, idx_t> scan_counts;
@@ -167,26 +167,32 @@ bool PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context) {
     // require that at least one PAC table is scanned
     bool any_pac = false;
     for (auto &t : pac_tables) {
+        if (scan_counts[t] > 0) { any_pac = true; break; }
+    }
+    if (!any_pac) return result;
+
+    // Record which configured PAC tables were scanned in this plan. The optimizer
+    // rule will still want to compile queries that directly read from a privacy
+    // unit even when no FK paths or PKs were discovered.
+    for (auto &t : pac_tables) {
         if (scan_counts[t] > 0) {
-            any_pac = true;
-            break;
+            result.scanned_pac_tables.push_back(t);
         }
     }
-    if (!any_pac) return false;
 
     // For each scanned PAC table, require that the corresponding sample-CTE
     // "_pac_internal_sample_<table_name>" is scanned the same number of times.
-    // If all PAC tables have matching sample scans, then nothing to do (return false).
+    // If all PAC tables have matching sample scans, then nothing to do (return empty result).
     // If some tables have PAC scans but zero sample scans, we proceed to check eligibility.
     // If there is a mismatch where both counts are non-zero but unequal, that's an error.
     bool all_matched = true;
     for (auto &t : pac_tables) {
         idx_t pac_count = scan_counts[t];
-        if (pac_count == 0) continue;
+        if (pac_count == 0) { continue; }
         std::string sample_name = std::string("_pac_internal_sample_") + t;
         idx_t sample_count = 0;
         auto it = scan_counts.find(sample_name);
-        if (it != scan_counts.end()) sample_count = it->second;
+        if (it != scan_counts.end()) { sample_count = it->second; }
         if (pac_count != sample_count) {
             all_matched = false;
             if (sample_count == 0) {
@@ -202,7 +208,7 @@ bool PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context) {
     if (all_matched) {
         // All PAC tables already have corresponding sample CTE scans the same number of times.
         // Nothing for the PAC rewriter to do.
-        return false;
+        return result;
     }
 
     // If we reach here, there is at least one PAC table that has PAC scans without matching sample-CTE scans.
@@ -210,12 +216,31 @@ bool PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context) {
 
 	// Only allow CROSS JOIN with GENERATE_SERIES (for random sample expansion)
 	if (ContainsCrossJoinWithGenerateSeries(plan)) {
-		return false;
+		return result;
 	}
 
-    // Require there to be an aggregation (sum/count/avg) somewhere in the plan; otherwise nothing to do
-    // If there's no allowed aggregation but we have PAC tables without matching samples,
-    // this is an invalid query for PAC compilation and should be rejected.
+    // Build a vector of scanned table names to check FK links
+    std::vector<std::string> scanned_tables;
+    for (auto &kv : scan_counts) { scanned_tables.push_back(kv.first); }
+
+    // Compute FK paths from scanned tables to any privacy unit (transitive)
+    auto fk_paths = FindForeignKeyBetween(context, pac_tables, scanned_tables);
+
+    // Populate privacy unit PKs for any discovered privacy units
+    for (auto &kv : fk_paths) {
+        auto &path = kv.second;
+        if (path.empty()) { continue; }
+        std::string target = path.back();
+        if (result.privacy_unit_pks.find(target) == result.privacy_unit_pks.end()) {
+            auto pk = FindPrimaryKey(context, target);
+            if (!pk.empty()) { result.privacy_unit_pks[target] = pk; }
+        }
+    }
+
+    // Attach discovered fk_paths to the result
+    result.fk_paths = std::move(fk_paths);
+
+    // Structural checks (throw when invalid)
 	if (ContainsWindowFunction(plan)) {
 		throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
 	}
@@ -229,8 +254,9 @@ bool PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context) {
         throw InvalidInputException("PAC rewrite: only INNER JOINs are supported for PAC compilation");
     }
 
-    // All checks passed: the plan is eligible for PAC rewriting/compilation
-    return true;
+    // If we reach here, the plan is eligible for rewrite/compilation
+    result.eligible_for_rewrite = true;
+    return result;
 }
 
 } // namespace duckdb

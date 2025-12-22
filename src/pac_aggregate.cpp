@@ -260,7 +260,10 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
     make_and_register(V_LOG, LogicalType::USMALLINT, PacAggregateScalar<V_CPP, uint16_t>); \
     make_and_register(V_LOG, LogicalType::UINTEGER, PacAggregateScalar<V_CPP, uint32_t>); \
     make_and_register(V_LOG, LogicalType::UBIGINT, PacAggregateScalar<V_CPP, uint64_t>); \
-    make_and_register(V_LOG, LogicalType::UHUGEINT, PacAggregateScalar<V_CPP, uhugeint_t>);
+    make_and_register(V_LOG, LogicalType::UHUGEINT, PacAggregateScalar<V_CPP, uhugeint_t>); \
+    /* Also accept floating-point counts arrays (users may accidentally pass DOUBLE[]/FLOAT[]) */ \
+    make_and_register(V_LOG, LogicalType::FLOAT, PacAggregateScalar<V_CPP, float>); \
+    make_and_register(V_LOG, LogicalType::DOUBLE, PacAggregateScalar<V_CPP, double>);
 
     // Register for all common value element types (including floats)
     REG_COUNTS_FOR(LogicalType::BOOLEAN, int8_t)
