@@ -47,4 +47,34 @@ DUCKDB_API vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(C
 DUCKDB_API std::unordered_map<std::string, std::vector<std::string>> FindForeignKeyBetween(
     ClientContext &context, const std::vector<std::string> &privacy_units, const std::vector<std::string> &table_names);
 
+// -----------------------------------------------------------------------------
+// PAC-specific small helpers
+// -----------------------------------------------------------------------------
+
+// RAII guard that sets PACOptimizerInfo::replan_in_progress to true for the lifetime of the guard
+// and restores the previous value on destruction. Construct with nullptr to have no effect.
+struct PACOptimizerInfo; // forward-declare to avoid including pac_optimizer.hpp here
+DUCKDB_API class ReplanGuard {
+public:
+    explicit ReplanGuard(PACOptimizerInfo *info);
+    ~ReplanGuard();
+
+    ReplanGuard(const ReplanGuard &) = delete;
+    ReplanGuard &operator=(const ReplanGuard &) = delete;
+private:
+    PACOptimizerInfo *info;
+    bool prev;
+};
+
+// Configuration helpers that read PAC-related settings from the client's context and
+// return a canonicalized value or a default when not configured.
+DUCKDB_API std::string GetPacPrivacyFile(ClientContext &context, const std::string &default_filename = "pac_tables.csv");
+DUCKDB_API std::string GetPacCompiledPath(ClientContext &context, const std::string &default_path = ".");
+DUCKDB_API int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
+DUCKDB_API bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
+
+// Helper to convert ReadPacTablesFile's unordered_set into a deterministic vector (sorted)
+// so callers don't need to repeat this conversion.
+DUCKDB_API std::vector<std::string> PacTablesSetToVector(const std::unordered_set<std::string> &set);
+
 } // namespace duckdb

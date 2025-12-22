@@ -446,3 +446,76 @@ std::unordered_map<std::string, std::vector<std::string>> FindForeignKeyBetween(
 }
 
 } // namespace duckdb
+
+// Add PAC-specific helpers implementations
+#include "include/pac_optimizer.hpp"
+#include "include/pac_helpers.hpp"
+#include <algorithm>
+
+namespace duckdb {
+
+// ReplanGuard implementation
+ReplanGuard::ReplanGuard(PACOptimizerInfo *info) : info(info), prev(false) {
+    if (info) {
+        prev = info->replan_in_progress.load(std::memory_order_acquire);
+        info->replan_in_progress.store(true, std::memory_order_release);
+    }
+}
+
+ReplanGuard::~ReplanGuard() {
+    if (info) {
+        info->replan_in_progress.store(prev, std::memory_order_release);
+    }
+}
+
+// Configuration helpers
+std::string GetPacPrivacyFile(ClientContext &context, const std::string &default_filename) {
+    Value v;
+    context.TryGetCurrentSetting("pac_privacy_file", v);
+    if (!v.IsNull()) return v.ToString();
+    return default_filename;
+}
+
+std::string GetPacCompiledPath(ClientContext &context, const std::string &default_path) {
+    Value v;
+    context.TryGetCurrentSetting("pac_compiled_path", v);
+    std::string path = v.IsNull() ? default_path : v.ToString();
+    if (!path.empty() && path.back() != '/') path.push_back('/');
+    return path;
+}
+
+int64_t GetPacM(ClientContext &context, int64_t default_m) {
+    Value v;
+    context.TryGetCurrentSetting("pac_m", v);
+    if (!v.IsNull()) {
+        try {
+            int64_t m = v.GetValue<int64_t>();
+            return std::max<int64_t>(1, m);
+        } catch (...) {
+            // fallback to default if conversion fails
+            return default_m;
+        }
+    }
+    return default_m;
+}
+
+bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
+    Value v;
+    context.TryGetCurrentSetting("pac_noise", v);
+    if (v.IsNull()) return default_value;
+    try {
+        return v.GetValue<bool>();
+    } catch (...) {
+        return default_value;
+    }
+}
+
+std::vector<std::string> PacTablesSetToVector(const std::unordered_set<std::string> &set) {
+    std::vector<std::string> out;
+    out.reserve(set.size());
+    for (auto &s : set) out.push_back(s);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+} // namespace duckdb

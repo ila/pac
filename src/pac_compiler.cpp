@@ -95,11 +95,7 @@ void CreateSampleCTE(ClientContext &context,
                      const std::string &privacy_unit,
                      const std::string &filename,
                      const std::string &query_normalized) {
-    int64_t m_cfg = 128;
-    Value m_val;
-    if (context.TryGetCurrentSetting("pac_m", m_val) && !m_val.IsNull()) {
-        m_cfg = MaxValue<int64_t>(1, m_val.GetValue<int64_t>());
-    }
+    int64_t m_cfg = GetPacM(context, 128);
 
 	// Truncate existing file
 	std::ofstream ofs(filename, std::ofstream::trunc);
@@ -373,11 +369,7 @@ void CompilePACQuery(OptimizerExtensionInput &input,
     // 1. Create sample CTE file (unchanged)
     string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
     string hash = HashStringToHex(normalized);
-    string path = ".";
-    Value v;
-    if (input.context.TryGetCurrentSetting("pac_compiled_path", v) && !v.IsNull()) {
-        path = v.ToString();
-    }
+    string path = GetPacCompiledPath(input.context, ".");
     if (!path.empty() && path.back() != '/') path.push_back('/');
     string filename = path + privacy_unit + "_" + hash + ".sql";
 	CreateSampleCTE(input.context, privacy_unit, filename, normalized);
@@ -496,21 +488,7 @@ void CompilePACQuery(OptimizerExtensionInput &input,
 
 		// Ensure optimizer-extension rules (and our PACRewriteRule) don't re-enter while
 		// we optimize the generated query — set the replan flag in a narrow RAII scope.
-		struct ScopedReplanFlag {
-			PACOptimizerInfo *info;
-			bool prev;
-			ScopedReplanFlag(PACOptimizerInfo *i) : info(i), prev(false) {
-				if (info) {
-					prev = info->replan_in_progress.load(std::memory_order_acquire);
-					info->replan_in_progress.store(true, std::memory_order_release);
-				}
-			}
-			~ScopedReplanFlag() {
-				if (info) {
-					info->replan_in_progress.store(prev, std::memory_order_release);
-				}
-			}
-		} scoped_flag(pac_info_scope);
+		ReplanGuard scoped_flag(pac_info_scope);
 
 		Optimizer optimizer(*planner.binder, input.context);
 		plan = optimizer.Optimize(std::move(planner.plan));

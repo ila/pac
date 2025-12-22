@@ -1,4 +1,5 @@
 #include "include/pac_privacy_unit.hpp"
+#include "include/pac_helpers.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -96,14 +97,7 @@ void AddPrivacyUnitPragma(ClientContext &context, const FunctionParameters &para
         throw InvalidInputException("add_privacy_unit pragma requires the table name");
     }
     auto table_name = parameters.values[0].ToString();
-	string pac_privacy_file = "pac_tables.csv";
-	Value pac_privacy_file_value;
-	context.TryGetCurrentSetting("pac_privacy_file", pac_privacy_file_value);
-	if (!pac_privacy_file_value.IsNull()) {
-		// by default, the ivm files path is the database path
-		// however this can be overridden by a setting
-		pac_privacy_file = pac_privacy_file_value.ToString();
-	}
+	std::string pac_privacy_file = GetPacPrivacyFile(context);
     // Ensure the referenced table actually exists before touching the file
     if (!TableExists(context, table_name)) {
         throw InvalidInputException(StringUtil::Format("add_privacy_unit: table does not exist: %s", table_name));
@@ -116,19 +110,7 @@ void AddPrivacyUnitPragma(ClientContext &context, const FunctionParameters &para
 
     // Create a small internal helper table for plan verification/explain.
     // Sanitize the table name into a safe identifier: replace non-alnum with '_'
-    auto SanitizeName = [&](const string &in) {
-        string out;
-        out.reserve(in.size());
-        for (char c : in) {
-            if (std::isalnum((unsigned char)c) || c == '_') {
-                out.push_back(c);
-            } else {
-                out.push_back('_');
-            }
-        }
-        return out;
-    };
-    string sanitized = SanitizeName(table_name);
+    string sanitized = Sanitize(table_name);
     string internal_name = "_pac_internal_sample_" + sanitized;
 
     // If the internal table does not exist, create it and populate with 100 rows
@@ -178,14 +160,7 @@ void RemovePrivacyUnitPragma(ClientContext &context, const FunctionParameters &p
         throw InvalidInputException("remove_privacy_unit pragma requires at least the table name");
     }
     auto table_name = parameters.values[0].ToString();
-	string pac_privacy_file = "pac_tables.csv";
-	Value pac_privacy_file_value;
-	context.TryGetCurrentSetting("pac_privacy_file", pac_privacy_file_value);
-	if (!pac_privacy_file_value.IsNull()) {
-		// by default, the ivm files path is the database path
-		// however this can be overridden by a setting
-		pac_privacy_file = pac_privacy_file_value.ToString();
-	}
+	std::string pac_privacy_file = GetPacPrivacyFile(context);
     if (parameters.values.size() >= 2) {
         pac_privacy_file = parameters.values[1].ToString();
     }
@@ -196,19 +171,7 @@ void RemovePrivacyUnitPragma(ClientContext &context, const FunctionParameters &p
     }
 
     // Also drop the internal helper table if it exists
-    auto SanitizeName = [&](const string &in) {
-        string out;
-        out.reserve(in.size());
-        for (char c : in) {
-            if (std::isalnum((unsigned char)c) || c == '_') {
-                out.push_back(c);
-            } else {
-                out.push_back('_');
-            }
-        }
-        return out;
-    };
-    string sanitized = SanitizeName(table_name);
+    string sanitized = Sanitize(table_name);
     string internal_name = "_pac_internal_sample_" + sanitized;
     if (TableExists(context, internal_name)) {
         string drop_sql = "DROP TABLE IF EXISTS " + internal_name + ";";

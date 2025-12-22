@@ -10,6 +10,7 @@
 
 // Include public helper to access the configured PAC tables filename and read helper
 #include "include/pac_privacy_unit.hpp"
+#include "include/pac_helpers.hpp"
 // Include PAC compiler
 #include "include/pac_compiler.hpp"
 
@@ -44,20 +45,11 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		return;
 	}
     // Load configured PAC tables once
-    string pac_privacy_file = "pac_tables.csv";
-    Value pac_privacy_file_value;
-    input.context.TryGetCurrentSetting("pac_privacy_file", pac_privacy_file_value);
-    if (!pac_privacy_file_value.IsNull()) {
-        pac_privacy_file = pac_privacy_file_value.ToString();
-    }
+    string pac_privacy_file = GetPacPrivacyFile(input.context);
 
 	auto pac_tables = ReadPacTablesFile(pac_privacy_file);
     // convert unordered_set returned by ReadPacTablesFile to a vector for the compatibility check
-    std::vector<std::string> pac_table_list;
-    pac_table_list.reserve(pac_tables.size());
-    for (auto &t : pac_tables) {
-	    pac_table_list.push_back(t);
-    }
+    std::vector<std::string> pac_table_list = PacTablesSetToVector(pac_tables);
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
 	// to PACRewriteQueryCheck. It now returns a PACCompatibilityResult with fk_paths and PKs.
@@ -103,18 +95,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 			Printer::Print("Multiple privacy units detected; compiling for: " + pu);
 
 			// set replan flag for duration of compilation
-			struct ScopedReplanFlag {
-				PACOptimizerInfo *info;
-				bool prev;
-				ScopedReplanFlag(PACOptimizerInfo *i) : info(i), prev(false) {
-					if (info) {
-						prev = info->replan_in_progress.load(std::memory_order_acquire);
-						info->replan_in_progress.store(true, std::memory_order_release);
-					}
-				}
-				~ScopedReplanFlag() { if (info) { info->replan_in_progress.store(prev, std::memory_order_release); } }
-			};
-			ScopedReplanFlag scoped(pac_info);
+			ReplanGuard scoped(pac_info);
 			CompilePACQuery(input, plan, pu);
 		}
 		// After compiling for all discovered privacy units, we stop further processing for this plan
@@ -139,12 +120,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		return;
 	}
 
-	bool apply_noise = true;
-	Value pac_noise_value;
-	input.context.TryGetCurrentSetting("pac_noise", pac_noise_value);
-	if (!pac_noise_value.IsNull() && !pac_noise_value.GetValue<bool>()) {
-		apply_noise = false;
-	}
+	bool apply_noise = IsPacNoiseEnabled(input.context, true);
 	if (apply_noise) {
 		// PAC compatible: invoke compiler to produce artifacts (e.g., sample CTE)
 		// Diagnostics: inform that this query will be compiled by PAC
@@ -152,18 +128,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 			Printer::Print("Query requires PAC Compilation for privacy unit: " + pu);
 
 			// set replan flag for duration of compilation
-			struct ScopedReplanFlag2 {
-				PACOptimizerInfo *info;
-				bool prev;
-				ScopedReplanFlag2(PACOptimizerInfo *i) : info(i), prev(false) {
-					if (info) {
-						prev = info->replan_in_progress.load(std::memory_order_acquire);
-						info->replan_in_progress.store(true, std::memory_order_release);
-					}
-				}
-				~ScopedReplanFlag2() { if (info) { info->replan_in_progress.store(prev, std::memory_order_release); } }
-			};
-			ScopedReplanFlag2 scoped2(pac_info);
+			ReplanGuard scoped2(pac_info);
 			CompilePACQuery(input, plan, pu);
 		}
 	}
