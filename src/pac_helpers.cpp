@@ -19,10 +19,13 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <queue>
 
 // Add include for TableCatalogEntry to access GetPrimaryKey and column APIs
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
+// Add include for ForeignKeyConstraint
+#include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 
 using idx_set = std::unordered_set<idx_t>;
 
@@ -250,6 +253,7 @@ static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_m
 // for the table and returns the first column name of the primary key constraint (if any).
 // Returns empty string when no primary key exists.
 vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &table_name) {
+	Connection con(*context.db);
     Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
     // If schema-qualified name is provided (schema.table), prefer that exact lookup
@@ -301,6 +305,144 @@ vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &ta
     }
 
     return {};
+}
+
+// Find foreign key constraints declared on the given table. Mirrors FindPrimaryKey's lookup logic
+// and returns a vector of (referenced_table_name, fk_column_names) pairs for every FOREIGN KEY
+// constraint defined on the table (i.e., where this table is the foreign-key side).
+vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContext &context, const std::string &table_name) {
+    Connection con(*context.db);
+    Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
+    vector<std::pair<std::string, vector<std::string>>> result;
+
+    auto process_entry = [&](CatalogEntry *entry_ptr) {
+        if (!entry_ptr) return;
+        auto &table_entry = entry_ptr->Cast<TableCatalogEntry>();
+        auto &constraints = table_entry.GetConstraints();
+        for (auto &constraint : constraints) {
+            if (!constraint) continue;
+            if (constraint->type != ConstraintType::FOREIGN_KEY) continue;
+            auto &fk = constraint->Cast<ForeignKeyConstraint>();
+            // We only care about constraints where this table is the foreign-key table (append constraint)
+            if (!fk.info.IsAppendConstraint()) continue;
+            // Build referenced table name (schema.table) if schema present
+            std::string ref_table;
+            if (!fk.info.schema.empty()) ref_table = fk.info.schema + "." + fk.info.table;
+            else ref_table = fk.info.table;
+            // fk.fk_columns contains the column names on THIS table that reference the other
+            result.emplace_back(ref_table, fk.fk_columns);
+        }
+    };
+
+    // If schema-qualified name is provided (schema.table), prefer that exact lookup
+    auto dot_pos = table_name.find('.');
+    if (dot_pos != std::string::npos) {
+        std::string schema = table_name.substr(0, dot_pos);
+        std::string tbl = table_name.substr(dot_pos + 1);
+        auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
+        if (!entry) return {};
+        process_entry(entry.get());
+        return result;
+    }
+
+    // Non-qualified name: walk the search path
+    CatalogSearchPath path(context);
+    for (auto &entry_path : path.Get()) {
+        auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
+                                      OnEntryNotFound::RETURN_NULL);
+        if (!entry) continue;
+        process_entry(entry.get());
+    }
+
+    return result;
+}
+
+// Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
+// This function resolves table names using the client's catalog search path, then performs a
+// BFS over outgoing FK edges (A -> referenced_table) to find the shortest path from each start
+// table to any privacy unit. Returns a map from the original start table string to the path
+// (vector of qualified table names from start to privacy unit inclusive).
+std::unordered_map<std::string, std::vector<std::string>> FindForeignKeyBetween(
+    ClientContext &context, const std::vector<std::string> &privacy_units, const std::vector<std::string> &table_names) {
+    Connection con(*context.db);
+    Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
+
+    auto ResolveQualified = [&](const std::string &tbl_name) -> std::string {
+        auto dot_pos = tbl_name.find('.');
+        if (dot_pos != std::string::npos) {
+            std::string schema = tbl_name.substr(0, dot_pos);
+            std::string tbl = tbl_name.substr(dot_pos + 1);
+            auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
+            if (entry) return schema + "." + tbl;
+            return tbl_name;
+        }
+        CatalogSearchPath path(context);
+        for (auto &entry_path : path.Get()) {
+            auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, tbl_name,
+                                          OnEntryNotFound::RETURN_NULL);
+            if (entry) return entry_path.schema + "." + tbl_name;
+        }
+        return tbl_name; // fallback: return as-is if not found
+    };
+
+    // canonicalize privacy units
+    std::unordered_set<std::string> privacy_set;
+    for (auto &pu : privacy_units) {
+        privacy_set.insert(ResolveQualified(pu));
+    }
+
+    std::unordered_map<std::string, std::vector<std::string>> result;
+
+    for (auto &start : table_names) {
+        std::string start_qual = ResolveQualified(start);
+        // BFS queue of qualified table names
+        std::queue<std::string> q;
+        std::unordered_set<std::string> visited;
+        std::unordered_map<std::string, std::string> parent;
+
+        visited.insert(start_qual);
+        q.push(start_qual);
+
+        bool found = false;
+        std::string found_target;
+
+        while (!q.empty() && !found) {
+            std::string cur = q.front();
+            q.pop();
+            // Find outgoing FK edges from cur
+            auto fks = FindForeignKeys(context, cur);
+            for (auto &p : fks) {
+                std::string neighbor = p.first; // referenced table name (may be qualified or not)
+                std::string neighbor_qual = ResolveQualified(neighbor);
+                if (visited.find(neighbor_qual) != visited.end()) continue;
+                visited.insert(neighbor_qual);
+                parent[neighbor_qual] = cur;
+                if (privacy_set.find(neighbor_qual) != privacy_set.end()) {
+                    found = true;
+                    found_target = neighbor_qual;
+                    break;
+                }
+                q.push(neighbor_qual);
+            }
+        }
+
+        if (found) {
+            // reconstruct path from start_qual to found_target
+            std::vector<std::string> path;
+            std::string cur = found_target;
+            while (true) {
+                path.push_back(cur);
+                if (cur == start_qual) break;
+                auto it = parent.find(cur);
+                if (it == parent.end()) break; // safety
+                cur = it->second;
+            }
+            std::reverse(path.begin(), path.end());
+            result[start] = std::move(path);
+        }
+    }
+
+    return result;
 }
 
 } // namespace duckdb

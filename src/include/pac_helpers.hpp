@@ -3,6 +3,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/planner/logical_operator.hpp"
+#include <utility>
 
 namespace duckdb {
 
@@ -35,5 +36,15 @@ DUCKDB_API void ReplaceNode(unique_ptr<LogicalOperator> &root,
 // Find the primary key column names for the given table (searching the client's catalog search path).
 // Returns a vector with the primary key column names in order; empty vector if there is no PK.
 DUCKDB_API vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &table_name);
+
+// Find foreign keys declared on the given table (searching the client's catalog search path).
+// Returns a vector of pairs: (referenced_table_name, list_of_fk_column_names) for each FK constraint.
+DUCKDB_API vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContext &context, const std::string &table_name);
+
+// Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
+// Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit, inclusive).
+// If no path exists for a start table, it will not appear in the returned map.
+DUCKDB_API std::unordered_map<std::string, std::vector<std::string>> FindForeignKeyBetween(
+    ClientContext &context, const std::vector<std::string> &privacy_units, const std::vector<std::string> &table_names);
 
 } // namespace duckdb
