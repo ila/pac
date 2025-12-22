@@ -12,8 +12,8 @@
 
 namespace duckdb {
 
-unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction &,
-                                      vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction &,
+                                             vector<unique_ptr<Expression>> &arguments) {
 	double mi = 128.0; // default
 	if (arguments.size() >= 2) {
 		if (!arguments[1]->IsFoldable()) {
@@ -27,11 +27,11 @@ unique_ptr<FunctionData> PacCountBind(ClientContext &context, AggregateFunction 
 	return make_uniq<PacBindData>(mi);
 }
 
-idx_t PacCountStateSize(const AggregateFunction &) {
+static idx_t PacCountStateSize(const AggregateFunction &) {
 	return sizeof(PacCountState);
 }
 
-void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
+static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 	memset(state_ptr, 0, sizeof(PacCountState));
 }
 
@@ -51,7 +51,8 @@ AUTOVECTORIZE static inline void PacCountUpdateInternal(const UnifiedVectorForma
 	}
 }
 
-void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
+static void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr,
+                           idx_t count) {
 	D_ASSERT(input_count == 1 || input_count == 2); // optional mi param (unused here) can make it 2
 	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
 
@@ -63,7 +64,7 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, da
 	}
 }
 
-void PacCountScatterUpdate(Vector param[], AggregateInputData &, idx_t np, Vector &states, idx_t cnt) {
+static void PacCountScatterUpdate(Vector param[], AggregateInputData &, idx_t np, Vector &states, idx_t cnt) {
 	D_ASSERT(np == 1 || np == 2); // optional mi param (unused here) can make it 2
 
 	UnifiedVectorFormat idata;
@@ -78,7 +79,7 @@ void PacCountScatterUpdate(Vector param[], AggregateInputData &, idx_t np, Vecto
 	}
 }
 
-AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t cnt) {
+AUTOVECTORIZE static inline void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t cnt) {
 	auto src_state = FlatVector::GetData<PacCountState *>(src);
 	auto dst_state = FlatVector::GetData<PacCountState *>(dst);
 	for (idx_t i = 0; i < cnt; i++) {
@@ -89,11 +90,11 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 	}
 }
 
-void PacCountFinalize(Vector &states, AggregateInputData &aggr_input, Vector &res, idx_t cnt, idx_t off) {
+static void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &res, idx_t cnt, idx_t off) {
 	auto state = FlatVector::GetData<PacCountState *>(states);
 	auto data = FlatVector::GetData<uint64_t>(res);
 	thread_local std::mt19937_64 gen(std::random_device {}());
-	double mi = aggr_input.bind_data->Cast<PacBindData>().mi;
+	double mi = input.bind_data->Cast<PacBindData>().mi;
 
 	for (idx_t i = 0; i < cnt; i++) {
 		state[i]->Flush(); // flush any remaining small totals into the big totals

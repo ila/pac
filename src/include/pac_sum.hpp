@@ -67,23 +67,19 @@ namespace duckdb {
 // DOUBLE filter must always be MULT (AND doesn't work for floating point)
 #define PAC_FILTER_DOUBLE PAC_FILTER_MULT
 
-// Filter kind selector for AddToTotals template
-enum class PacFilter { INT, DOUBLE };
-
-// Inner AUTOVECTORIZE function for the 64-element loops
+// Inner AUTOVECTORIZE function for the 64-element loops - generated via macro
 // This is the hot path that benefits from SIMD
-// Unified template for adding to totals at any accumulator width
-template <PacFilter KIND, typename ACCUM_T, typename VALUE_T>
-AUTOVECTORIZE static inline void AddToTotals(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {
-	ACCUM_T v = static_cast<ACCUM_T>(value);
-	for (int j = 0; j < 64; j++) {
-		if constexpr (KIND == PacFilter::DOUBLE) {
-			totals[j] += PAC_FILTER_DOUBLE(v, ACCUM_T, key_hash, j);
-		} else {
-			totals[j] += PAC_FILTER_INT(v, ACCUM_T, key_hash, j);
-		}
+#define DEFINE_ADD_TO_TOTALS(KIND)                                                                                     \
+	template <typename ACCUM_T, typename VALUE_T>                                                                      \
+	AUTOVECTORIZE static inline void AddToTotals##KIND(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {            \
+		ACCUM_T v = static_cast<ACCUM_T>(value);                                                                       \
+		for (int j = 0; j < 64; j++) {                                                                                 \
+			totals[j] += PAC_FILTER_##KIND(v, ACCUM_T, key_hash, j);                                                   \
+		}                                                                                                              \
 	}
-}
+
+DEFINE_ADD_TO_TOTALS(INT)
+DEFINE_ADD_TO_TOTALS(DOUBLE)
 
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
@@ -99,14 +95,10 @@ static constexpr int kTopBits64 = 8;
 #define FLUSH_THRESHOLD_SIGNED(X)   (1 << (kTopBits##X - 1))
 #define FLUSH_THRESHOLD_UNSIGNED(X) (1 << kTopBits##X)
 
-// Check whether a value is small, i.e. top-bits are 0
-#define HAS_TOP_BITS_SET_SIGNED(value, bits)                                                                           \
-	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - kTopBits##bits)) != 0)
-#define HAS_TOP_BITS_SET_UNSIGNED(value, bits) ((static_cast<uint64_t>(value) >> (bits - kTopBits##bits)) != 0)
-
-// Bool parameter version - compiler optimizes away the ternary
-#define HAS_TOP_BITS_SET(value, bits, is_signed)                                                                       \
-	((is_signed) ? HAS_TOP_BITS_SET_SIGNED(value, bits) : HAS_TOP_BITS_SET_UNSIGNED(value, bits))
+// Check whether a value fits in the given bit width (top bits are 0)
+#define VALUE_FITS_SIGNED(value, bits)                                                                                 \
+	((((value) >= 0 ? static_cast<uint64_t>(value) : static_cast<uint64_t>(-(value))) >> (bits - kTopBits##bits)) == 0)
+#define VALUE_FITS_UNSIGNED(value, bits) ((static_cast<uint64_t>(value) >> (bits - kTopBits##bits)) == 0)
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 template <bool SIGNED>
