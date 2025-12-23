@@ -74,7 +74,7 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 
 void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state = FlatVector::GetData<PacCountState *>(states);
-	auto data = FlatVector::GetData<uint64_t>(result);
+	auto data = FlatVector::GetData<int64_t>(result);
 	thread_local std::mt19937_64 gen(std::random_device {}());
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 
@@ -83,19 +83,19 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 		double buf[64];
 		ToDoubleArray(state[i]->probabilistic_totals, buf); // Convert uint64_t totals64 to double array
 		data[offset + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
-		    static_cast<uint64_t>(PacNoisySampleFrom64Counters(buf, mi, gen)) + state[i]->probabilistic_totals[41];
+		    static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen)) + state[i]->probabilistic_totals[41];
 	}
 }
 
 void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	AggregateFunctionSet fcn_set("pac_count");
 
-	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacCountStateSize,
+	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT}, LogicalType::BIGINT, PacCountStateSize,
 	                                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
 
 	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
-	                                      LogicalType::UBIGINT, PacCountStateSize, PacCountInitialize,
+	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
 	                                      PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
 
