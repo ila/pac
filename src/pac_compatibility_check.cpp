@@ -1,7 +1,6 @@
 #include "include/pac_compatibility_check.hpp"
 #include "include/pac_helpers.hpp"
 
-#include "duckdb.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"

@@ -5,8 +5,8 @@ namespace duckdb {
 static unique_ptr<FunctionData> // Bind function for pac_count with optional mi parameter (must be constant)
 PacCountBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args) {
 	double mi = 128.0; // default
-	if (args.size() >= 2) {
-		if (!args[1]->IsFoldable()) {
+	if (args.size() >= 3) {
+		if (!args[2]->IsFoldable()) {
 			throw InvalidInputException("pac_count: mi parameter must be a constant");
 		}
 		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[1]);

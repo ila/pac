@@ -24,39 +24,14 @@
 #include <duckdb/parser/parser.hpp>
 #include <include/logical_plan_to_sql.hpp>
 #include "include/pac_optimizer.hpp"
+#include "include/pac_compiler_helpers.hpp"
+#include <iterator>
 
 namespace duckdb {
 
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
-
-// Helper to ensure rowid is present in the output columns of a LogicalGet
-static void AddRowIDColumn(LogicalGet &get) {
-	if (get.virtual_columns.find(COLUMN_IDENTIFIER_ROW_ID) != get.virtual_columns.end()) {
-		get.virtual_columns[COLUMN_IDENTIFIER_ROW_ID] = TableColumn("rowid", LogicalTypeId::BIGINT);
-	}
-	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
-	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
-	get.returned_types.push_back(LogicalTypeId::BIGINT);
-	// We also need to add a column binding for rowid
-	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
-}
-
-static LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
-	if (!op) {
-		return nullptr;
-	}
-	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		return &op->Cast<LogicalAggregate>();
-	}
-	for (auto &child : op->children) {
-		if (auto *agg = FindTopAggregate(child)) {
-			return agg;
-		}
-	}
-	return nullptr;
-}
 
 static LogicalProjection *FindTopProjection(unique_ptr<LogicalOperator> &op) {
 	if (!op) {
@@ -357,150 +332,101 @@ void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator>
 		pac_info_scope = dynamic_cast<PACOptimizerInfo *>(input.info.get());
 	}
 
-	try {
+	// 1. Create sample CTE file (unchanged)
+	string path = GetPacCompiledPath(input.context, ".");
+	if (!path.empty() && path.back() != '/') {
+		path.push_back('/');
+	}
+	string filename = path + privacy_unit + "_" + query_hash + "_standard.sql";
+	CreateSampleCTE(input.context, privacy_unit, filename, query);
 
-		// 1. Create sample CTE file (unchanged)
-		string path = GetPacCompiledPath(input.context, ".");
-		if (!path.empty() && path.back() != '/') {
-			path.push_back('/');
+	// Replan the provided query with a subset of optimizers disabled to simplify the tree
+	ReplanWithoutOptimizers(input.context, query, plan);
+
+	// 2. Create LogicalGet for sample table
+	idx_t sample_idx = GetNextTableIndex(plan);
+	auto sample_get = CreatePacSampleLogicalGet(input.context, sample_idx, privacy_unit);
+	// 3. Find the scan (LogicalGet) of the privacy unit table in the plan
+	auto pac_scan_ptr = FindPrivacyUnitGetNode(plan);
+	auto pac_table_idx = pac_scan_ptr->get()->Cast<LogicalGet>().table_index;
+	// Ensure rowid is present in both scans before join construction
+	AddRowIDColumn(pac_scan_ptr->get()->Cast<LogicalGet>()); // PAC scan
+	// The sample get already has rowid added in its creation function
+
+	// 4. Create the join node using a copy of the PAC scan and the sample table scan
+	auto pac_scan = (*pac_scan_ptr)->Copy(input.context);
+	auto join =
+	    CreatePacSampleJoinNode(input.context, std::move(pac_scan), std::move(sample_get), pac_table_idx, sample_idx);
+	LogicalOperator *join_ptr = join.get();
+	ReplaceNode(plan, *pac_scan_ptr, join);
+
+	// Find the parent projection of the join we just inserted
+	LogicalProjection *parent_proj = FindParentProjection(plan, join_ptr);
+	auto parent_proj_idx = DConstants::INVALID_INDEX;
+	// Now we add the sample_id column to the parent projection if it exists
+	if (parent_proj) {
+		parent_proj->expressions.push_back(
+		    make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(sample_idx, 1)));
+		parent_proj_idx = parent_proj->table_index;
+	}
+
+	// 5. Update the aggregate node to include the sample column
+	auto *agg = FindTopAggregate(plan);
+	// Before updating the aggrgate node, we fetch the group and aggregate names
+	vector<string> group_names;
+	vector<string> aggregate_names;
+	UpdateAggregateGroups(agg, parent_proj_idx);
+
+	// 6. Update the projection node to include the sample column
+	UpdateNodesAboveAggregate(plan, agg);
+
+	plan->ResolveOperatorTypes();
+	plan->Verify(input.context);
+	plan->Print();
+	Printer::Print("LPTS output plan after PAC compilation:\n");
+	auto lp_to_sql = LogicalPlanToSql(input.context, plan);
+	auto ir = lp_to_sql.LogicalPlanToIR();
+	Printer::Print(ir->ToQuery(true));
+	CreateQueryJoiningSampleCTE(ir->ToQuery(true), filename);
+	group_names.emplace_back("group_key");       // hardcoded for now
+	aggregate_names.emplace_back("aggregate_0"); // hardcoded for now
+	CreatePacAggregateQuery(filename, group_names, aggregate_names);
+
+	// Now read, plan and execute the query from the file
+	{
+		std::ifstream ifs(filename);
+		if (!ifs) {
+			throw ParserException("PAC: failed to read " + filename);
 		}
-		string filename = path + privacy_unit + "_" + query_hash + "_standard.sql";
-		CreateSampleCTE(input.context, privacy_unit, filename, query);
-
-		// Replan the plan without compressed materialization
-		Connection con(*input.context.db);
-		con.BeginTransaction();
-		// todo: maybe we want to disable more optimizers (internal_optimizer_types)
-		// If column_lifetime is enabled, then the existence of duplicate table indices etc etc is verified.
-		// However, it massively complicates the query tree which is not nice for further usage in OpenIVM.
-		// Therefore, it should be run for verification purposes once in a while (otherwise, turn it off).
-
-		con.Query("SET disabled_optimizers='compressed_materialization, column_lifetime, statistics_propagation, "
-		          "expression_rewriter, filter_pushdown';");
-
-		con.Commit();
+		std::string file_query((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
 		Parser parser;
-		Planner planner(input.context);
+		SQLStatement *statement;
 
-		parser.ParseQuery(query);
-		auto statement = parser.statements[0].get();
+		parser.ParseQuery(file_query);
+		statement = parser.statements[0].get();
+		Planner new_planner(input.context); // reinitializing to avoid binder errors
+		new_planner.CreatePlan(statement->Copy());
 
-		planner.CreatePlan(statement->Copy());
+		// Ensure optimizer-extension rules (and our PACRewriteRule) don't re-enter while
+		// we optimize the generated query — set the replan flag in a narrow RAII scope.
+		ReplanGuard scoped_flag(pac_info_scope);
 
-		Optimizer optimizer(*planner.binder, input.context);
-		plan = optimizer.Optimize(std::move(planner.plan));
+		Optimizer new_optimizer(*new_planner.binder, input.context);
+		plan = new_optimizer.Optimize(std::move(new_planner.plan));
 		plan->Print();
-
-		// 2. Create LogicalGet for sample table
-		idx_t sample_idx = GetNextTableIndex(plan);
-		auto sample_get = CreatePacSampleLogicalGet(input.context, sample_idx, privacy_unit);
-		// 3. Find the scan (LogicalGet) of the PAC table in the plan
-		unique_ptr<LogicalOperator> *pac_scan_ptr = nullptr;
-		idx_t pac_table_idx = DConstants::INVALID_INDEX;
-		{
-			vector<unique_ptr<LogicalOperator> *> stack;
-			stack.push_back(&plan);
-			while (!stack.empty()) {
-				auto cur_ptr = stack.back();
-				stack.pop_back();
-				auto &cur = *cur_ptr;
-				if (!cur) {
-					continue;
-				}
-				if (cur->type == LogicalOperatorType::LOGICAL_GET) {
-					pac_scan_ptr = cur_ptr;
-					pac_table_idx = cur->Cast<LogicalGet>().table_index;
-					break;
-				}
-				for (auto &c : cur->children) {
-					stack.push_back(&c);
-				}
-			}
-		}
-		if (!pac_scan_ptr || pac_table_idx == DConstants::INVALID_INDEX) {
-			// Could not find PAC scan
-			return;
-		}
-		// Ensure rowid is present in both scans before join construction
-		AddRowIDColumn(pac_scan_ptr->get()->Cast<LogicalGet>()); // PAC scan
-		// The sample get already has rowid added in its creation function
-
-		// 4. Create the join node using a copy of the PAC scan and the sample table scan
-		auto pac_scan = (*pac_scan_ptr)->Copy(input.context);
-		auto join = CreatePacSampleJoinNode(input.context, std::move(pac_scan), std::move(sample_get), pac_table_idx,
-		                                    sample_idx);
-		LogicalOperator *join_ptr = join.get();
-		ReplaceNode(plan, *pac_scan_ptr, join);
-
-		// Find the parent projection of the join we just inserted
-		LogicalProjection *parent_proj = FindParentProjection(plan, join_ptr);
-		auto parent_proj_idx = DConstants::INVALID_INDEX;
-		// Now we add the sample_id column to the parent projection if it exists
-		if (parent_proj) {
-			parent_proj->expressions.push_back(
-			    make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(sample_idx, 1)));
-			parent_proj_idx = parent_proj->table_index;
-		}
-
-		// 5. Update the aggregate node to include the sample column
-		auto *agg = FindTopAggregate(plan);
-		// Before updating the aggrgate node, we fetch the group and aggregate names
-		vector<string> group_names;
-		vector<string> aggregate_names;
-		UpdateAggregateGroups(agg, parent_proj_idx);
-
-		// 6. Update the projection node to include the sample column
-		UpdateNodesAboveAggregate(plan, agg);
-
-		plan->ResolveOperatorTypes();
-		plan->Verify(input.context);
-		plan->Print();
-		Printer::Print("LPTS output plan after PAC compilation:\n");
-		auto lp_to_sql = LogicalPlanToSql(input.context, plan);
-		auto ir = lp_to_sql.LogicalPlanToIR();
-		Printer::Print(ir->ToQuery(true));
-		CreateQueryJoiningSampleCTE(ir->ToQuery(true), filename);
-		group_names.emplace_back("group_key");       // hardcoded for now
-		aggregate_names.emplace_back("aggregate_0"); // hardcoded for now
-		CreatePacAggregateQuery(filename, group_names, aggregate_names);
-
-		// Now read, plan and execute the query from the file
-		{
-			std::ifstream ifs(filename);
-			if (!ifs) {
-				throw ParserException("PAC: failed to read " + filename);
-			}
-			std::string file_query((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-
-			parser.ParseQuery(file_query);
-			statement = parser.statements[0].get();
-			Planner new_planner(input.context); // reinitializing to avoid binder errors
-			new_planner.CreatePlan(statement->Copy());
-
-			// Ensure optimizer-extension rules (and our PACRewriteRule) don't re-enter while
-			// we optimize the generated query — set the replan flag in a narrow RAII scope.
-			ReplanGuard scoped_flag(pac_info_scope);
-
-			Optimizer new_optimizer(*new_planner.binder, input.context);
-			plan = new_optimizer.Optimize(std::move(new_planner.plan));
-			plan->Print();
-		}
-
-		// todo:
-		// figure out how to get aggregate names
-		// run string replace from the internal table
-		// clean up this code
-		// test more queries
-		// implement filter pushdown
-		// optimize pac_aggregate not to pass the same array twice (when vals = counts)
-		// implement pac_sum final step
-		// test everything
-		// check for robustness with null values
-
-	} catch (...) {
-		throw;
 	}
+
+	// todo:
+	// figure out how to get aggregate names
+	// run string replace from the internal table
+	// clean up this code
+	// test more queries
+	// implement filter pushdown
+	// optimize pac_aggregate not to pass the same array twice (when vals = counts)
+	// implement pac_sum final step
+	// test everything
+	// check for robustness with null values
 }
 
 } // namespace duckdb

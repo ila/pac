@@ -94,8 +94,60 @@ int main() {
 			std::cerr << "PASS: myschema.t_schema_pk PK==[x]\n";
 		}
 
+		// Test 5: string (TEXT) primary key should be ignored (we only accept numeric PKs)
+		con.Query("CREATE TABLE IF NOT EXISTS t_string_pk(id TEXT PRIMARY KEY, val INTEGER);");
+		auto pk5 = FindPrimaryKey(*con.context, "t_string_pk");
+		if (!pk5.empty()) {
+			std::cerr << "FAIL: expected no PK for t_string_pk (TEXT PK should be ignored), got:";
+			for (auto &c : pk5)
+				std::cerr << " '" << c << "'";
+			std::cerr << std::endl;
+			failures++;
+		} else {
+			std::cerr << "PASS: t_string_pk TEXT PK correctly ignored\n";
+		}
+
+		// Test 6: composite primary key with mixed types (one TEXT) should be treated as no PK
+		con.Query("CREATE TABLE IF NOT EXISTS t_mixed_pk(a INTEGER, b TEXT, PRIMARY KEY(a, b));");
+		auto pk6 = FindPrimaryKey(*con.context, "t_mixed_pk");
+		if (!pk6.empty()) {
+			std::cerr << "FAIL: expected no PK for t_mixed_pk (composite with TEXT member should be ignored), got:";
+			for (auto &c : pk6)
+				std::cerr << " '" << c << "'";
+			std::cerr << std::endl;
+			failures++;
+		} else {
+			std::cerr << "PASS: t_mixed_pk composite mixed-type PK correctly treated as no PK\n";
+		}
+
+		// New Test 7: BOOLEAN primary key should be ignored (non-numeric)
+		con.Query("CREATE TABLE IF NOT EXISTS t_bool_pk(id BOOLEAN PRIMARY KEY, val INTEGER);");
+		auto pk_bool = FindPrimaryKey(*con.context, "t_bool_pk");
+		if (!pk_bool.empty()) {
+			std::cerr << "FAIL: expected no PK for t_bool_pk (BOOLEAN PK should be ignored), got:";
+			for (auto &c : pk_bool)
+				std::cerr << " '" << c << "'";
+			std::cerr << std::endl;
+			failures++;
+		} else {
+			std::cerr << "PASS: t_bool_pk BOOLEAN PK correctly ignored\n";
+		}
+
+		// New Test 8: TIMESTAMP primary key should be ignored (non-numeric)
+		con.Query("CREATE TABLE IF NOT EXISTS t_ts_pk(id TIMESTAMP PRIMARY KEY, val INTEGER);");
+		auto pk_ts = FindPrimaryKey(*con.context, "t_ts_pk");
+		if (!pk_ts.empty()) {
+			std::cerr << "FAIL: expected no PK for t_ts_pk (TIMESTAMP PK should be ignored), got:";
+			for (auto &c : pk_ts)
+				std::cerr << " '" << c << "'";
+			std::cerr << std::endl;
+			failures++;
+		} else {
+			std::cerr << "PASS: t_ts_pk TIMESTAMP PK correctly ignored\n";
+		}
+
 		// --- New FK transitive tests start here ---
-		// Test 5: transitive FK detection (t_a -> t_b -> t_c)
+		// Test 9: transitive FK detection (t_a -> t_b -> t_c)
 		con.Query("CREATE TABLE IF NOT EXISTS t_c(id INTEGER PRIMARY KEY, val INTEGER);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_b(id INTEGER PRIMARY KEY, cid INTEGER, FOREIGN KEY(cid) REFERENCES "
 		          "t_c(id));");
@@ -163,7 +215,7 @@ int main() {
 		}
 		// --- FK transitive tests end here ---
 
-		// Test 6: very long transitive FK chain (t_long_0 -> ... -> t_long_11 -> t_c_long)
+		// Test 10: very long transitive FK chain (t_long_0 -> ... -> t_long_11 -> t_c_long)
 		con.Query("CREATE TABLE IF NOT EXISTS t_c_long(id INTEGER PRIMARY KEY);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_long_11(id INTEGER PRIMARY KEY, cid INTEGER, FOREIGN KEY(cid) "
 		          "REFERENCES t_c_long(id));");
@@ -227,7 +279,7 @@ int main() {
 			}
 		}
 
-		// Test 7: additional unrelated-table test
+		// Test 11: additional unrelated-table test
 		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated_base(id INTEGER PRIMARY KEY);");
 		con.Query("CREATE TABLE IF NOT EXISTS t_unrelated2(id INTEGER PRIMARY KEY, bid INTEGER, FOREIGN KEY(bid) "
 		          "REFERENCES t_unrelated_base(id));");
