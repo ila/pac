@@ -12,7 +12,13 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include <duckdb/optimizer/optimizer.hpp>
 #include <duckdb/parser/parser.hpp>
+#include <duckdb/parser/expression/function_expression.hpp>
 #include <duckdb/planner/planner.hpp>
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/function/function_binder.hpp"
+#include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
+#include "duckdb/catalog/catalog.hpp"
 
 namespace duckdb {
 
@@ -61,28 +67,97 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
 	if (use_rowid) {
 		AddRowIDColumn(get);
-	} else {
-		// There are PK columns: check whether they are present in the scan; if not, add them
-		for (auto &pk : pks) {
-			bool found = false;
-			for (idx_t i = 0; i < get.names.size(); i++) {
-				if (get.names[i] == pk) {
-					found = true;
-				}
-			}
-			if (!found) {
-				get.AddColumnId(0); // todo
-				get.projection_ids.push_back(get.GetColumnIds().size() - 1);
-				get.returned_types.push_back(LogicalTypeId::BIGINT); // todo
-				// We also need to add a column binding
-				get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
-			}
-		}
 	}
+	// todo
+	// else {
+	// 	// There are PK columns: check whether they are present in the scan; if not, add them
+	// 	for (auto &pk : pks) {
+	// 		bool found = false;
+	// 		for (idx_t i = 0; i < get.names.size(); i++) {
+	// 			if (get.names[i] == pk) {
+	// 				found = true;
+	// 			}
+	// 		}
+	// 		if (!found) {
+	// 			get.AddColumnId(0);
+	// 			get.projection_ids.push_back(get.GetColumnIds().size() - 1);
+	// 			get.returned_types.push_back(LogicalTypeId::BIGINT); // todo
+	// 			// We also need to add a column binding
+	// 			get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
+	// 		}
+	// 	}
+	// }
 	// TODO - case B
+
+	// Now we need to edit the aggregate node to use pac_sum
+	auto *agg = FindTopAggregate(plan);
+	if (agg->expressions.size() > 1) {
+		throw NotImplementedException("PacBitsliceQuery does not support multiple aggregations!");
+	}
+
+	// We create a hash expression over the row id
+	// Return type is double
+	if (use_rowid) {
+		// rowid is the last column added
+		auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
+		auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
+
+		// Bind the scalar hash(...) function on the rowid column using the optimizer helper
+		// This returns a bound scalar expression (BoundFunctionExpression)
+		auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
+
+		// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
+		unique_ptr<Expression> value_child;
+		if (agg->expressions[0]->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
+			auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
+			if (old_aggr.children.empty()) {
+				throw InternalException("PAC compiler: expected aggregate to have a child expression");
+			}
+			value_child = old_aggr.children[0]->Copy();
+		} else {
+			// Fallback: copy whatever expression is present (best-effort)
+			value_child = agg->expressions[0]->Copy();
+		}
+
+		// Now bind the pac_sum aggregate function with the arguments (hash, value)
+		FunctionBinder function_binder(input.context);
+		ErrorData error;
+		vector<LogicalType> arg_types;
+		arg_types.push_back(bound_hash->return_type);
+		arg_types.push_back(value_child->return_type);
+
+		// Lookup the pac_sum aggregate in the system catalog
+		auto &entry = Catalog::GetSystemCatalog(input.context).GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "pac_sum");
+		auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
+
+		auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
+		if (!best.IsValid()) {
+			throw InternalException("PAC compiler: failed to bind pac_sum for given argument types");
+		}
+		auto bound_aggr_func = aggr_catalog.functions.GetFunctionByOffset(best.GetIndex());
+
+		vector<unique_ptr<Expression>> aggr_children;
+		aggr_children.push_back(std::move(bound_hash));
+		aggr_children.push_back(std::move(value_child));
+
+		auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
+		                                                     AggregateType::NON_DISTINCT);
+
+		// Replace the aggregate expression with the newly bound pac_sum aggregate
+		agg->expressions[0] = std::move(new_aggr);
+		agg->ResolveOperatorTypes();
+	} else {
+		// TODO - multiple PKs
+		throw NotImplementedException("PacBitsliceQuery does not support multiple PKs yet!");
+	}
+
+
+
+
 	plan->ResolveOperatorTypes();
 	plan->Verify(input.context);
-	Printer::Print("ok");
+	//plan->Print();
+	//Printer::Print("ok");
 }
 
 } // namespace duckdb

@@ -10,6 +10,7 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/common/constants.hpp"
 
 #include <vector>
@@ -36,9 +37,6 @@ void ReplanWithoutOptimizers(ClientContext &context, const std::string &query, u
 
 	Optimizer optimizer(*planner.binder, context);
 	plan = optimizer.Optimize(std::move(planner.plan));
-	if (plan) {
-		plan->Print();
-	}
 }
 
 unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> &plan) {
@@ -82,6 +80,21 @@ void AddRowIDColumn(LogicalGet &get) {
 	get.returned_types.push_back(LogicalTypeId::BIGINT);
 	// We also need to add a column binding for rowid
 	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
+}
+
+LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
+	if (!op) {
+		throw InternalException("PAC Compiler: could not find LogicalAggregate node in plan");
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return &op->Cast<LogicalAggregate>();
+	}
+	for (auto &child : op->children) {
+		if (auto *agg = FindTopAggregate(child)) {
+			return agg;
+		}
+	}
+	throw InternalException("PAC Compiler: could not find LogicalAggregate node in plan");
 }
 
 } // namespace duckdb

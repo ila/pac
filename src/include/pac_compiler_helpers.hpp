@@ -22,6 +22,8 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 
 void AddRowIDColumn(LogicalGet &get);
 
+LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op);
+
 } // namespace duckdb
 
 #endif // PAC_COMPILER_HELPERS_HPP

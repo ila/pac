@@ -33,21 +33,6 @@ namespace duckdb {
 // Utilities
 // -----------------------------------------------------------------------------
 
-static LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
-	if (!op) {
-		return nullptr;
-	}
-	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		return &op->Cast<LogicalAggregate>();
-	}
-	for (auto &child : op->children) {
-		if (auto *agg = FindTopAggregate(child)) {
-			return agg;
-		}
-	}
-	return nullptr;
-}
-
 static LogicalProjection *FindTopProjection(unique_ptr<LogicalOperator> &op) {
 	if (!op) {
 		return nullptr;
