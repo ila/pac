@@ -58,7 +58,7 @@ static inline T FromDouble(double val) {
 // Specializations for hugeint_t and uhugeint_t
 template <>
 inline hugeint_t FromDouble<hugeint_t>(double val) {
-	return Hugeint::Convert(static_cast<int64_t>(val));
+	return Hugeint::Convert(val); // Use direct double-to-hugeint conversion (handles values > INT64_MAX)
 }
 
 // Helper to convert any numeric type to double for variance calculation

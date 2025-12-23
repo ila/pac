@@ -42,6 +42,16 @@ PacSumUpdateOne(PacSumDoubleState &state, uint64_t key_hash, double value) {
 	AddToTotalsSimple(state.probabilistic_totals, value, key_hash);
 }
 
+// Overload for HUGEINT input - adds directly to hugeint_t totals (no cascading since values don't fit in subtotals)
+template <bool SIGNED>
+AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value) {
+	for (int j = 0; j < 64; j++) {
+		if ((key_hash >> j) & 1ULL) {
+			state.probabilistic_totals[j] += value;
+		}
+	}
+}
+
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<State *>(state_p);
@@ -146,7 +156,7 @@ void PacSumUpdateBigInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t
 	PacSumUpdate<PacSumIntState<true>, true, int64_t, int64_t>(inputs, state_p, count);
 }
 void PacSumUpdateHugeInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
-	PacSumUpdate<PacSumDoubleState, true, double, hugeint_t>(inputs, state_p, count);
+	PacSumUpdate<PacSumIntState<true>, true, hugeint_t, hugeint_t>(inputs, state_p, count);
 }
 void PacSumUpdateUTinyInt(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
 	PacSumUpdate<PacSumIntState<false>, false, uint64_t, uint8_t>(inputs, state_p, count);
@@ -184,7 +194,7 @@ void PacSumScatterUpdateBigInt(Vector inputs[], AggregateInputData &, idx_t, Vec
 	PacSumScatterUpdate<PacSumIntState<true>, true, int64_t, int64_t>(inputs, states, count);
 }
 void PacSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
-	PacSumScatterUpdate<PacSumDoubleState, true, double, hugeint_t>(inputs, states, count);
+	PacSumScatterUpdate<PacSumIntState<true>, true, hugeint_t, hugeint_t>(inputs, states, count);
 }
 void PacSumScatterUpdateUTinyInt(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
 	PacSumScatterUpdate<PacSumIntState<false>, false, uint64_t, uint8_t>(inputs, states, count);
@@ -298,9 +308,10 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	AddFcn(fcn_set, LogicalType::UBIGINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	       PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUBigInt);
 
-	// [u]hugeint_t converts during the [scatter]update to double, and otherwise just uses the double logic
-	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	       PacSumScatterUpdateHugeInt, PacSumCombineDouble, PacSumFinalizeDouble, PacSumUpdateHugeInt);
+	// HUGEINT: use int state, return HUGEINT (matches DuckDB's sum behavior)
+	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
+	       PacSumScatterUpdateHugeInt, PacSumCombineSigned, PacSumFinalizeSigned, PacSumUpdateHugeInt);
+	// UHUGEINT: DuckDB's sum returns DOUBLE for uhugeint, so we do too
 	AddFcn(fcn_set, LogicalType::UHUGEINT, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	       PacSumScatterUpdateUHugeInt, PacSumCombineDouble, PacSumFinalizeDouble, PacSumUpdateUHugeInt);
 

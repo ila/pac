@@ -58,13 +58,12 @@ AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *totals, VALUE_T valu
 // - totals[i] holds counters for bit positions i, i+8, i+16, i+24, i+32, i+40, i+48, i+56
 // - 8 iterations instead of 64
 //
-// Note that PAC_COUNT() ffectively also used SWAR
+// Note that PAC_COUNT() effectively also used SWAR
 //
 // PAC_SUM() uses SWAR (SIMD Within A Register) for all integer bit widths
 // - BITS=8:  8 values packed per uint64_t, totals[8],  8 iterations
 // - BITS=16: 4 values packed per uint64_t, totals[16], 16 iterations
 // - BITS=32: 2 values packed per uint64_t, totals[32], 32 iterations
-// - BITS=64: 1 value per uint64_t,         totals[64], 64 iterations
 
 // SWAR accumulation: pack multiple counters into uint64_t registers (for 8/16/32-bit elements)
 // SIGNED_T/UNSIGNED_T: types for the packed elements (e.g., int8_t/uint8_t)
@@ -111,15 +110,17 @@ struct PacSumIntState {
 	hugeint_t probabilistic_totals[64]; // final totals, want last for sequential cache access
 #ifndef PAC_SUM_NONCASCADING
 	// these hold the exact subtotal of each aggregation level, we flush once we see this overflow
-	int64_t exact_subtotal8, exact_subtotal16, exact_subtotal32, exact_subtotal64;
+	// Use T64 for exact_subtotal64 to handle unsigned values correctly
+	int64_t exact_subtotal8, exact_subtotal16, exact_subtotal32;
+	T64 exact_subtotal64;
 
-	AUTOVECTORIZE inline void Flush64(int64_t value, bool force = false) {
-		uint64_t new_total = value + exact_subtotal64;
+	AUTOVECTORIZE inline void Flush64(T64 value, bool force = false) {
+		T64 new_total = value + exact_subtotal64;
 		bool would_overflow = ((SIGNED && value < 0) ? (new_total > exact_subtotal64) : (new_total < exact_subtotal64));
 		if (would_overflow || force) {
 			const T64 *src = reinterpret_cast<const T64 *>(subtotals64);
 			for (int i = 0; i < 64; i++) {
-				probabilistic_totals[i] += src[i];
+				probabilistic_totals[i] += Hugeint::Convert(src[i]); // Use Convert for correct uint64_t handling
 			}
 			memset(subtotals64, 0, sizeof(subtotals64));
 			exact_subtotal64 = value;
