@@ -94,10 +94,10 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	                                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
 
-	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
-	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
-	                                      PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
+	fcn_set.AddFunction(AggregateFunction("pac_count", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::BIGINT,
+	                                      PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                                      PacCountFinalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate,
+	                                      PacCountBind));
 
 	loader.RegisterFunction(fcn_set);
 }

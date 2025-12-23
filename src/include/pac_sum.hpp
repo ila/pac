@@ -42,21 +42,29 @@ void RegisterPacSumFunctions(ExtensionLoader &loader);
 
 //#define PAC_SUM_NONCASCADING 1 // seems 10x slower on Apple
 
-// Inner AUTOVECTORIZE functions for the 64-element accumulation
-// This is the hot path that benefits from SIMD
+// Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
+// This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
+template <typename ACCUM_T, typename VALUE_T>
+AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {
+	ACCUM_T v = static_cast<ACCUM_T>(value);
+	for (int j = 0; j < 64; j++) {
+		totals[j] += v * static_cast<ACCUM_T>((key_hash >> j) & 1ULL);
+	}
+}
+// For the 8-bits, 16-bits and 32-bits PAC_SUM() SIMD-benefits are greatest, but achieving these is harder
 //
-// SWAR (SIMD Within A Register) idea in case of int8_t:
+// We need SWAR (SIMD Within A Register). The idea in case of int8_t:
 // - Pack 8 int8_t counters into each uint64_t (totals[8] instead of totals[64])
 // - totals[i] holds counters for bit positions i, i+8, i+16, i+24, i+32, i+40, i+48, i+56
 // - 8 iterations instead of 64
 //
-// Unified SWAR (SIMD Within A Register) for all integer bit widths
+// Note that PAC_COUNT() ffectively also used SWAR
+//
+// PAC_SUM() uses SWAR (SIMD Within A Register) for all integer bit widths
 // - BITS=8:  8 values packed per uint64_t, totals[8],  8 iterations
 // - BITS=16: 4 values packed per uint64_t, totals[16], 16 iterations
 // - BITS=32: 2 values packed per uint64_t, totals[32], 32 iterations
 // - BITS=64: 1 value per uint64_t,         totals[64], 64 iterations
-//
-// totals[i] holds counters for bits i, i+BITS, i+2*BITS, ... (interleaved layout)
 
 // SWAR accumulation: pack multiple counters into uint64_t registers (for 8/16/32-bit elements)
 // SIGNED_T/UNSIGNED_T: types for the packed elements (e.g., int8_t/uint8_t)
@@ -71,15 +79,6 @@ AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *totals, VALUE_T value
 		uint64_t bits = (key_hash >> i) & MASK;
 		uint64_t expanded = (bits << BITS) - bits; // 0x01 -> 0xFF, 0x0001 -> 0xFFFF, etc.
 		totals[i] += val_packed & expanded;
-	}
-}
-
-// Simple version for double/hugeint (uses multiplication for conditional add)
-template <typename ACCUM_T, typename VALUE_T>
-AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {
-	ACCUM_T v = static_cast<ACCUM_T>(value);
-	for (int j = 0; j < 64; j++) {
-		totals[j] += v * static_cast<ACCUM_T>((key_hash >> j) & 1ULL);
 	}
 }
 
@@ -134,7 +133,7 @@ struct PacSumIntState {
 		if (would_overflow || force) {
 			const T32 *src = reinterpret_cast<const T32 *>(subtotals32);
 			T64 *dst = reinterpret_cast<T64 *>(subtotals64);
-			for (int bit = 0; bit < 64; bit++) {
+			for (int bit = 0; bit < 64; bit++) { // convert between SWAR orders
 				dst[bit] += src[(bit % 32) * 2 + (bit / 32)];
 			}
 			memset(subtotals32, 0, sizeof(subtotals32));
@@ -150,7 +149,7 @@ struct PacSumIntState {
 		if (would_overflow || force) {
 			const T16 *src = reinterpret_cast<const T16 *>(subtotals16);
 			T32 *dst = reinterpret_cast<T32 *>(subtotals32);
-			for (int bit = 0; bit < 64; bit++) {
+			for (int bit = 0; bit < 64; bit++) { // convert between SWAR orders
 				int dst_idx = (bit % 32) * 2 + (bit / 32);
 				int src_idx = (bit % 16) * 4 + (bit / 16);
 				dst[dst_idx] += src[src_idx];
@@ -168,7 +167,7 @@ struct PacSumIntState {
 		if (would_overflow || force) {
 			const T8 *src = reinterpret_cast<const T8 *>(subtotals8);
 			T16 *dst = reinterpret_cast<T16 *>(subtotals16);
-			for (int bit = 0; bit < 64; bit++) {
+			for (int bit = 0; bit < 64; bit++) { // convert between SWAR orders
 				int dst_idx = (bit % 16) * 4 + (bit / 16);
 				int src_idx = (bit % 8) * 8 + (bit / 8);
 				dst[dst_idx] += src[src_idx];
