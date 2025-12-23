@@ -118,8 +118,9 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
+			compile_method = "bitslice"; // for debugging
 			if (compile_method == "bitslice") {
-				CompilePacBitsliceQuery(check, input, plan, pu, query_hash);
+				CompilePacBitsliceQuery(check, input, plan, pu, normalized, query_hash);
 			} else {
 				CompilePACQuery(input, plan, pu, normalized, query_hash);
 			}
