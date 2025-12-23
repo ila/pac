@@ -308,6 +308,31 @@ vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &ta
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
+	// Helper that checks a vector of column names exist and are numeric; returns the vector if valid,
+	// otherwise returns empty vector.
+	auto check_and_return_numeric_columns = [&](TableCatalogEntry &table_entry,
+	                                            const vector<string> &cols) -> vector<string> {
+		vector<string> out;
+		out.reserve(cols.size());
+		for (auto &col_name : cols) {
+			// TableCatalogEntry::GetColumnIndex expects a non-const string reference
+			string tmp = col_name;
+			// If column not found, treat as no PK
+			try {
+				auto col_idx = table_entry.GetColumnIndex(tmp);
+				auto &col = table_entry.GetColumn(col_idx);
+				if (!col.Type().IsNumeric()) {
+					// found a non-numeric PK column — treat as no primary key
+					return {};
+				}
+				out.push_back(col.GetName());
+			} catch (...) {
+				return {};
+			}
+		}
+		return out;
+	};
+
 	// If schema-qualified name is provided (schema.table), prefer that exact lookup
 	auto dot_pos = table_name.find('.');
 	if (dot_pos != std::string::npos) {
@@ -322,14 +347,18 @@ vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &ta
 			return {};
 		if (pk->type == ConstraintType::UNIQUE) {
 			auto &unique = pk->Cast<UniqueConstraint>();
-			// Prefer explicit column names if present
+			// If explicit column names present, validate all are numeric
 			if (!unique.GetColumnNames().empty()) {
-				return unique.GetColumnNames();
+				auto cols = unique.GetColumnNames();
+				auto validated = check_and_return_numeric_columns(table_entry, cols);
+				return validated; // either the validated column list or empty
 			}
 			// Otherwise fall back to index-based single-column PK
 			if (unique.HasIndex()) {
 				auto idx = unique.GetIndex();
 				auto &col = table_entry.GetColumn(idx);
+				if (!col.Type().IsNumeric())
+					return {};
 				return {col.GetName()};
 			}
 		}
@@ -350,11 +379,17 @@ vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &ta
 		if (pk->type == ConstraintType::UNIQUE) {
 			auto &unique = pk->Cast<UniqueConstraint>();
 			if (!unique.GetColumnNames().empty()) {
-				return unique.GetColumnNames();
+				auto cols = unique.GetColumnNames();
+				auto validated = check_and_return_numeric_columns(table_entry, cols);
+				if (!validated.empty())
+					return validated;
+				// otherwise continue searching other schemas
 			}
 			if (unique.HasIndex()) {
 				auto idx = unique.GetIndex();
 				auto &col = table_entry.GetColumn(idx);
+				if (!col.Type().IsNumeric())
+					continue;
 				return {col.GetName()};
 			}
 		}
@@ -373,25 +408,30 @@ vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContex
 	vector<std::pair<std::string, vector<std::string>>> result;
 
 	auto process_entry = [&](CatalogEntry *entry_ptr) {
-		if (!entry_ptr)
+		if (!entry_ptr) {
 			return;
+		}
 		auto &table_entry = entry_ptr->Cast<TableCatalogEntry>();
 		auto &constraints = table_entry.GetConstraints();
 		for (auto &constraint : constraints) {
-			if (!constraint)
+			if (!constraint) {
 				continue;
-			if (constraint->type != ConstraintType::FOREIGN_KEY)
+			}
+			if (constraint->type != ConstraintType::FOREIGN_KEY) {
 				continue;
+			}
 			auto &fk = constraint->Cast<ForeignKeyConstraint>();
 			// We only care about constraints where this table is the foreign-key table (append constraint)
-			if (!fk.info.IsAppendConstraint())
+			if (!fk.info.IsAppendConstraint()) {
 				continue;
+			}
 			// Build referenced table name (schema.table) if schema present
 			std::string ref_table;
-			if (!fk.info.schema.empty())
+			if (!fk.info.schema.empty()) {
 				ref_table = fk.info.schema + "." + fk.info.table;
-			else
+			} else {
 				ref_table = fk.info.table;
+			}
 			// fk.fk_columns contains the column names on THIS table that reference the other
 			result.emplace_back(ref_table, fk.fk_columns);
 		}
@@ -414,8 +454,9 @@ vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContex
 	for (auto &entry_path : path.Get()) {
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
 		                              OnEntryNotFound::RETURN_NULL);
-		if (!entry)
+		if (!entry) {
 			continue;
+		}
 		process_entry(entry.get());
 	}
 

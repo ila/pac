@@ -33,18 +33,6 @@ namespace duckdb {
 // Utilities
 // -----------------------------------------------------------------------------
 
-// Helper to ensure rowid is present in the output columns of a LogicalGet
-static void AddRowIDColumn(LogicalGet &get) {
-	if (get.virtual_columns.find(COLUMN_IDENTIFIER_ROW_ID) != get.virtual_columns.end()) {
-		get.virtual_columns[COLUMN_IDENTIFIER_ROW_ID] = TableColumn("rowid", LogicalTypeId::BIGINT);
-	}
-	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
-	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
-	get.returned_types.push_back(LogicalTypeId::BIGINT);
-	// We also need to add a column binding for rowid
-	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
-}
-
 static LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
 	if (!op) {
 		return nullptr;

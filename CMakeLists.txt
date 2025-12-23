@@ -27,10 +27,9 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
-# Add a small test runner that lives inside the pac project (does not modify duckdb sources)
-# Temporarily disabled due to ReplaceNode API changes
-#add_executable(test_update_parent_runner src/test_update_parent_runner.cpp)
-#target_link_libraries(test_update_parent_runner ${EXTENSION_NAME})
+# Test runners
+add_executable(test_update_parent_runner src/test_update_parent_runner.cpp)
+target_link_libraries(test_update_parent_runner ${EXTENSION_NAME})
 
-#add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
-#target_link_libraries(test_pac_privacy_columns ${EXTENSION_NAME})
+add_executable(test_pac_privacy_columns src/test_pac_privacy_columns.cpp)
+target_link_libraries(test_pac_privacy_columns ${EXTENSION_NAME})

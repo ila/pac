@@ -72,4 +72,16 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 	return found_ptr;
 }
 
+// Helper to ensure rowid is present in the output columns of a LogicalGet
+void AddRowIDColumn(LogicalGet &get) {
+	if (get.virtual_columns.find(COLUMN_IDENTIFIER_ROW_ID) != get.virtual_columns.end()) {
+		get.virtual_columns[COLUMN_IDENTIFIER_ROW_ID] = TableColumn("rowid", LogicalTypeId::BIGINT);
+	}
+	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
+	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
+	get.returned_types.push_back(LogicalTypeId::BIGINT);
+	// We also need to add a column binding for rowid
+	get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
+}
+
 } // namespace duckdb

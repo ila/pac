@@ -57,8 +57,31 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// Now we need to find the PAC scan node
 	// Replan the plan without compressed materialization
 	ReplanWithoutOptimizers(input.context, query, plan);
-	auto pac_scan_ptr = FindPrivacyUnitGetNode(plan);
-	auto &pac_get = pac_scan_ptr->get()->Cast<LogicalGet>();
+	auto pu_scan_ptr = FindPrivacyUnitGetNode(plan);
+	auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
+	if (use_rowid) {
+		AddRowIDColumn(get);
+	} else {
+		// There are PK columns: check whether they are present in the scan; if not, add them
+		for (auto &pk : pks) {
+			bool found = false;
+			for (idx_t i = 0; i < get.names.size(); i++) {
+				if (get.names[i] == pk) {
+					found = true;
+				}
+			}
+			if (!found) {
+				get.AddColumnId(0); // todo
+				get.projection_ids.push_back(get.GetColumnIds().size() - 1);
+				get.returned_types.push_back(LogicalTypeId::BIGINT); // todo
+				// We also need to add a column binding
+				get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
+			}
+		}
+	}
+	// TODO - case B
+	plan->ResolveOperatorTypes();
+	plan->Verify(input.context);
 	Printer::Print("ok");
 }
 

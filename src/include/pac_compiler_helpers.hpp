@@ -20,6 +20,8 @@ void ReplanWithoutOptimizers(ClientContext &context, const std::string &query, u
 // If not found, returns nullptr and sets out_table_idx to DConstants::INVALID_INDEX.
 unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> &plan);
 
+void AddRowIDColumn(LogicalGet &get);
+
 } // namespace duckdb
 
 #endif // PAC_COMPILER_HELPERS_HPP
