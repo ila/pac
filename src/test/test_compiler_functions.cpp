@@ -17,7 +17,7 @@
 #include "../../duckdb/src/include/duckdb.hpp"
 #include "../../duckdb/src/include/duckdb/main/connection.hpp"
 #include "../../duckdb/src/include/duckdb/common/constants.hpp"
-#include "include/test_runner.hpp"
+#include "include/test_compiler_functions.hpp"
 
 namespace duckdb {
 // Use DuckDB-provided vector/unique_ptr/make_uniq; do NOT import std::vector/std::unique_ptr/make_uniq

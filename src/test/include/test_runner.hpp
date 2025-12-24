@@ -7,7 +7,6 @@
 
 // Declarations for test entrypoints implemented in the individual test files.
 // These replace their previous mains so a single test runner can invoke them.
-int RunCompilerFunctionTests();
-int RunPrivacyColumnsTests();
+namespace duckdb {} // namespace duckdb
 
-#endif //TEST_RUNNER_HPP
+#endif // TEST_RUNNER_HPP
