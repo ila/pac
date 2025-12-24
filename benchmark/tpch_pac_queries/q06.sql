@@ -1,10 +1,15 @@
 SELECT
-    sum(l_extendedprice * l_discount) AS revenue
+    pac_sum(hash(customer.c_custkey),
+            l_extendedprice * l_discount
+    ) AS revenue
 FROM
     lineitem
+        JOIN orders
+             ON lineitem.l_orderkey = orders.o_orderkey
+        JOIN customer
+             ON orders.o_custkey = customer.c_custkey
 WHERE
-    l_shipdate >= CAST('1994-01-01' AS date)
-    AND l_shipdate < CAST('1995-01-01' AS date)
-    AND l_discount BETWEEN 0.05
-    AND 0.07
-    AND l_quantity < 24;
+    l_shipdate >= DATE '1994-01-01'
+  AND l_shipdate < DATE '1995-01-01'
+  AND l_discount BETWEEN 0.05 AND 0.07
+  AND l_quantity < 24;

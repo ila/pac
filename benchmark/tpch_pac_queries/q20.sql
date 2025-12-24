@@ -2,8 +2,9 @@ SELECT
     s_name,
     s_address
 FROM
-    supplier,
-    nation
+    supplier
+        JOIN nation
+             ON s_nationkey = n_nationkey
 WHERE
     s_suppkey IN (
         SELECT
@@ -17,18 +18,24 @@ WHERE
                 FROM
                     part
                 WHERE
-                    p_name LIKE 'forest%')
-                AND ps_availqty > (
-                    SELECT
-                        0.5 * sum(l_quantity)
-                    FROM
-                        lineitem
-                    WHERE
-                        l_partkey = ps_partkey
-                        AND l_suppkey = ps_suppkey
-                        AND l_shipdate >= CAST('1994-01-01' AS date)
-                        AND l_shipdate < CAST('1995-01-01' AS date)))
-            AND s_nationkey = n_nationkey
-            AND n_name = 'CANADA'
-        ORDER BY
-            s_name;
+                    p_name LIKE 'forest%'
+            )
+          AND ps_availqty > (
+            SELECT
+                0.5 * pac_sum(hash(customer.c_custkey), l_quantity)
+            FROM
+                lineitem
+                    JOIN orders
+                         ON l_orderkey = o_orderkey
+                    JOIN customer
+                         ON o_custkey = c_custkey
+            WHERE
+                l_partkey = ps_partkey
+              AND l_suppkey = ps_suppkey
+              AND l_shipdate >= DATE '1994-01-01'
+              AND l_shipdate < DATE '1995-01-01'
+        )
+    )
+  AND n_name = 'CANADA'
+ORDER BY
+    s_name;

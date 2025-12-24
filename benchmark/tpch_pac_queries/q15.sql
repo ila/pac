@@ -1,14 +1,18 @@
 WITH revenue AS (
     SELECT
         l_suppkey AS supplier_no,
-        sum(l_extendedprice * (1 - l_discount)) AS total_revenue
+        pac_sum(hash(customer.c_custkey), l_extendedprice * (1 - l_discount)) AS total_revenue
     FROM
         lineitem
+            JOIN orders
+                 ON lineitem.l_orderkey = orders.o_orderkey
+            JOIN customer
+                 ON orders.o_custkey = customer.c_custkey
     WHERE
-        l_shipdate >= CAST('1996-01-01' AS date)
-      AND l_shipdate < CAST('1996-04-01' AS date)
+        l_shipdate >= DATE '1996-01-01'
+      AND l_shipdate < DATE '1996-04-01'
     GROUP BY
-        supplier_no
+        l_suppkey
 )
 SELECT
     s_suppkey,
@@ -17,13 +21,13 @@ SELECT
     s_phone,
     total_revenue
 FROM
-    supplier,
-    revenue
+    supplier
+        JOIN revenue
+             ON s_suppkey = supplier_no
 WHERE
-    s_suppkey = supplier_no
-    AND total_revenue = (
-        SELECT
-            max(total_revenue)
-        FROM revenue)
+    total_revenue = (
+        SELECT max(total_revenue)
+        FROM revenue
+    )
 ORDER BY
     s_suppkey;

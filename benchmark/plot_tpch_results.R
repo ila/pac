@@ -115,18 +115,27 @@ p <- ggplot(summary_df, aes(x = query, y = mean_time, fill = scenario)) +
     panel.grid.major = element_line(linewidth = 0.6),
     panel.grid.minor = element_blank(),
     legend.position = "top",
-    legend.title = element_text(size = 20),
-    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14),
     axis.text.x = element_text(angle = 45, hjust = 1, size = 18),
     axis.text.y = element_text(size = 18),
     axis.title = element_text(size = 20),
-    plot.title = element_text(size = 26, face = "bold", hjust = 0.5)
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5)
   )
 
 # Title with sf and runs
 title_sf <- ifelse(is.na(sf_str), "sf=unknown", paste0("sf=", sf_str))
 plot_title <- paste0("TPC-H Benchmark, ", title_sf, ", runs=", n_runs_text)
-p <- p + ggtitle(plot_title)
+note_lines <- c(
+  "Queries without dependence on customer (unchanged): Q2, Q11, Q16",
+  "Directly returning Customer data (unchanged, should not return): Q10, Q18",
+  "Directly scanning Customer: Q03, Q05, Q07 (?), Q08, Q13 (?), Q22",
+  "PAC join with Customer: Q01, Q06, Q09, Q15, Q17, Q19, Q20, Q21 (?)",
+  "Using Orders as PU: Q04, Q12, Q14"
+)
+subtitle_text <- paste(note_lines, collapse = "\n")
+p <- p + labs(title = plot_title, subtitle = subtitle_text)
 
 # Output file
 sf_for_name <- ifelse(is.na(sf_str), "unknown", gsub("\\.", "_", sf_str))
