@@ -34,7 +34,9 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	}
 
 	// Run the PAC compatibility checks only if the plan is a projection or order by (i.e., a SELECT query)
-	if (!plan || (plan->type != LogicalOperatorType::LOGICAL_PROJECTION && plan->type != LogicalOperatorType::LOGICAL_ORDER_BY && plan->type != LogicalOperatorType::LOGICAL_TOP_N)) {
+	if (!plan ||
+	    (plan->type != LogicalOperatorType::LOGICAL_PROJECTION && plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
+	     plan->type != LogicalOperatorType::LOGICAL_TOP_N)) {
 		return;
 	}
 	// Load configured PAC tables once
@@ -99,10 +101,12 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	for (auto &pu : privacy_units) {
 		auto pk_it = check.privacy_unit_pks.find(pu);
 		if (pk_it != check.privacy_unit_pks.end()) {
+#ifdef PAC_DEBUG
 			Printer::Print("Discovered primary key columns for privacy unit '" + pu + "':");
 			for (const auto &col : pk_it->second) {
 				Printer::Print(col);
 			}
+#endif
 		}
 	}
 
@@ -114,7 +118,9 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	bool apply_noise = IsPacNoiseEnabled(input.context, true);
 	if (apply_noise) {
 		for (auto &pu : privacy_units) {
+#ifdef PAC_DEBUG
 			Printer::Print("Query requires PAC Compilation for privacy unit: " + pu);
+#endif
 
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);

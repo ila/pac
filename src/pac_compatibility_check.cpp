@@ -267,6 +267,19 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		}
 	}
 
+	// If the privacy unit table itself is scanned directly (no FK path), we still want to
+	// populate its primary key information. This can happen when the query scans the PU
+	// table directly and there are no FK paths from other scanned tables. Populate any
+	// scanned PAC table entries that do not yet have PK information.
+	for (auto &t : result.scanned_pac_tables) {
+		if (result.privacy_unit_pks.find(t) == result.privacy_unit_pks.end()) {
+			auto pk = FindPrimaryKey(context, t);
+			if (!pk.empty()) {
+				result.privacy_unit_pks[t] = pk;
+			}
+		}
+	}
+
 	// Attach discovered fk_paths to the result
 	result.fk_paths = std::move(fk_paths);
 

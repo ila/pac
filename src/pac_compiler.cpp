@@ -366,11 +366,15 @@ void CompilePACQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator>
 
 	plan->ResolveOperatorTypes();
 	plan->Verify(input.context);
+#ifdef PAC_DEBUG
 	plan->Print();
 	Printer::Print("LPTS output plan after PAC compilation:\n");
+#endif
 	auto lp_to_sql = LogicalPlanToSql(input.context, plan);
 	auto ir = lp_to_sql.LogicalPlanToIR();
+#ifdef PAC_DEBUG
 	Printer::Print(ir->ToQuery(true));
+#endif
 	CreateQueryJoiningSampleCTE(ir->ToQuery(true), filename);
 	group_names.emplace_back("group_key");       // hardcoded for now
 	aggregate_names.emplace_back("aggregate_0"); // hardcoded for now
