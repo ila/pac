@@ -24,6 +24,8 @@ void AddRowIDColumn(LogicalGet &get);
 
 LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op);
 
+LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child);
+
 } // namespace duckdb
 
 #endif // PAC_COMPILER_HELPERS_HPP

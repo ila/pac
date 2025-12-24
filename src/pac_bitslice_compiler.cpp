@@ -108,15 +108,17 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 
 		// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
 		unique_ptr<Expression> value_child;
+		string pac_function_name;
+		string function_name;
 		if (agg->expressions[0]->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
 			auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
+			function_name = old_aggr.function.name;
 			if (old_aggr.children.empty()) {
 				throw InternalException("PAC compiler: expected aggregate to have a child expression");
 			}
 			value_child = old_aggr.children[0]->Copy();
 		} else {
-			// Fallback: copy whatever expression is present (best-effort)
-			value_child = agg->expressions[0]->Copy();
+			throw NotImplementedException("Not found expected aggregate expression in PAC compiler");
 		}
 
 		// Now bind the pac_sum aggregate function with the arguments (hash, value)
@@ -126,9 +128,16 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		arg_types.push_back(bound_hash->return_type);
 		arg_types.push_back(value_child->return_type);
 
+		if (function_name == "sum" || function_name == "sum_no_overflow") {
+			pac_function_name = "pac_sum";
+		} else if (function_name == "count" || function_name == "count_star") {
+			pac_function_name = "pac_count";
+		} else {
+			throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
+		}
+
 		// Lookup the pac_sum aggregate in the system catalog
-		auto &entry = Catalog::GetSystemCatalog(input.context)
-		                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "pac_sum");
+		auto &entry = Catalog::GetSystemCatalog(input.context).GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);
 		auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
 
 		auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
@@ -142,20 +151,25 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		aggr_children.push_back(std::move(value_child));
 
 		auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
-		                                                      AggregateType::NON_DISTINCT);
+		                                                     AggregateType::NON_DISTINCT);
 
 		// Replace the aggregate expression with the newly bound pac_sum aggregate
 		agg->expressions[0] = std::move(new_aggr);
 		agg->ResolveOperatorTypes();
+
 	} else {
 		// TODO - multiple PKs
 		throw NotImplementedException("PacBitsliceQuery does not support multiple PKs yet!");
 	}
 
+	// todo- tomorrow
+	// stop hardcoding the column indexes
+	// testing!!!
+
 	plan->ResolveOperatorTypes();
 	plan->Verify(input.context);
-	// plan->Print();
-	// Printer::Print("ok");
+	plan->Print();
+	Printer::Print("ok");
 }
 
 } // namespace duckdb

@@ -11,6 +11,7 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/common/constants.hpp"
 
 #include <vector>
@@ -95,6 +96,22 @@ LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
 		}
 	}
 	throw InternalException("PAC Compiler: could not find LogicalAggregate node in plan");
+}
+
+// Helper to find the parent LogicalProjection of a given child node
+LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child) {
+	if (!root) {
+		return nullptr;
+	}
+	for (auto &child : root->children) {
+		if (child.get() == target_child && root->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			return &root->Cast<LogicalProjection>();
+		}
+		if (auto *proj = FindParentProjection(child, target_child)) {
+			return proj;
+		}
+	}
+	return nullptr;
 }
 
 } // namespace duckdb

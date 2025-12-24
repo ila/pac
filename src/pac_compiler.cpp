@@ -48,22 +48,6 @@ static LogicalProjection *FindTopProjection(unique_ptr<LogicalOperator> &op) {
 	return nullptr;
 }
 
-// Helper to find the parent LogicalProjection of a given child node
-static LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child) {
-	if (!root) {
-		return nullptr;
-	}
-	for (auto &child : root->children) {
-		if (child.get() == target_child && root->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-			return &root->Cast<LogicalProjection>();
-		}
-		if (auto *proj = FindParentProjection(child, target_child)) {
-			return proj;
-		}
-	}
-	return nullptr;
-}
-
 // -----------------------------------------------------------------------------
 // Sample CTE emission
 // -----------------------------------------------------------------------------
