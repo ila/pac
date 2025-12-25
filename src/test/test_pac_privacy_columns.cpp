@@ -27,8 +27,9 @@ static bool EqualVectors(vector<string> &a, vector<string> &b) {
 // Helper to strip schema qualification if present
 static std::string Basename(const std::string &qname) {
 	auto pos = qname.rfind('.');
-	if (pos == std::string::npos)
+	if (pos == std::string::npos) {
 		return qname;
+	}
 	return qname.substr(pos + 1);
 }
 
@@ -45,9 +46,10 @@ int RunPrivacyColumnsTests() {
 		auto pk1 = FindPrimaryKey(*con.context, "t_no_pk");
 		if (!pk1.empty()) {
 			std::cerr << "FAIL: expected no PK for t_no_pk, got:";
-			for (auto &c : pk1)
+			for (auto &c : pk1) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: t_no_pk has no PK\n";
@@ -59,9 +61,10 @@ int RunPrivacyColumnsTests() {
 		vector<string> expect2 = {"id"};
 		if (!EqualVectors(pk2, expect2)) {
 			std::cerr << "FAIL: expected PK [id] for t_single_pk, got:";
-			for (auto &c : pk2)
+			for (auto &c : pk2) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: t_single_pk PK==[id]\n";
@@ -73,9 +76,10 @@ int RunPrivacyColumnsTests() {
 		vector<string> expect3 = {"a", "b"};
 		if (!EqualVectors(pk3, expect3)) {
 			std::cerr << "FAIL: expected PK [a,b] for t_multi_pk, got:";
-			for (auto &c : pk3)
+			for (auto &c : pk3) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: t_multi_pk PK==[a,b]\n";
@@ -88,9 +92,10 @@ int RunPrivacyColumnsTests() {
 		vector<string> expect4 = {"x"};
 		if (!EqualVectors(pk4, expect4)) {
 			std::cerr << "FAIL: expected PK [x] for myschema.t_schema_pk, got:";
-			for (auto &c : pk4)
+			for (auto &c : pk4) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: myschema.t_schema_pk PK==[x]\n";
@@ -101,9 +106,10 @@ int RunPrivacyColumnsTests() {
 		auto pk5 = FindPrimaryKey(*con.context, "t_string_pk");
 		if (!pk5.empty()) {
 			std::cerr << "FAIL: expected no PK for t_string_pk (TEXT PK should be ignored), got:";
-			for (auto &c : pk5)
+			for (auto &c : pk5) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: t_string_pk TEXT PK correctly ignored\n";
@@ -114,9 +120,10 @@ int RunPrivacyColumnsTests() {
 		auto pk6 = FindPrimaryKey(*con.context, "t_mixed_pk");
 		if (!pk6.empty()) {
 			std::cerr << "FAIL: expected no PK for t_mixed_pk (composite with TEXT member should be ignored), got:";
-			for (auto &c : pk6)
+			for (auto &c : pk6) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: t_mixed_pk composite mixed-type PK correctly treated as no PK\n";
@@ -127,9 +134,10 @@ int RunPrivacyColumnsTests() {
 		auto pk_bool = FindPrimaryKey(*con.context, "t_bool_pk");
 		if (!pk_bool.empty()) {
 			std::cerr << "FAIL: expected no PK for t_bool_pk (BOOLEAN PK should be ignored), got:";
-			for (auto &c : pk_bool)
+			for (auto &c : pk_bool) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: t_bool_pk BOOLEAN PK correctly ignored\n";
@@ -140,9 +148,10 @@ int RunPrivacyColumnsTests() {
 		auto pk_ts = FindPrimaryKey(*con.context, "t_ts_pk");
 		if (!pk_ts.empty()) {
 			std::cerr << "FAIL: expected no PK for t_ts_pk (TIMESTAMP PK should be ignored), got:";
-			for (auto &c : pk_ts)
+			for (auto &c : pk_ts) {
 				std::cerr << " '" << c << "'";
-			std::cerr << std::endl;
+			}
+			std::cerr << "\n";
 			failures++;
 		} else {
 			std::cerr << "PASS: t_ts_pk TIMESTAMP PK correctly ignored\n";
@@ -175,8 +184,9 @@ int RunPrivacyColumnsTests() {
 			} else {
 				if (Basename(path[0]) != "t_a" || Basename(path[1]) != "t_b" || Basename(path[2]) != "t_c") {
 					std::cerr << "FAIL: unexpected path for t_a: ";
-					for (auto &p : path)
+					for (auto &p : path) {
 						std::cerr << p << " ";
+					}
 					std::cerr << "\n";
 					failures++;
 				} else {
@@ -198,8 +208,9 @@ int RunPrivacyColumnsTests() {
 			} else {
 				if (Basename(path[0]) != "t_b" || Basename(path[1]) != "t_c") {
 					std::cerr << "FAIL: unexpected path for t_b: ";
-					for (auto &p : path)
+					for (auto &p : path) {
 						std::cerr << p << " ";
+					}
 					std::cerr << "\n";
 					failures++;
 				} else {
@@ -271,8 +282,9 @@ int RunPrivacyColumnsTests() {
 					ok = false;
 				if (!ok) {
 					std::cerr << "FAIL: unexpected long path: ";
-					for (auto &p : path)
+					for (auto &p : path) {
 						std::cerr << p << " ";
+					}
 					std::cerr << "\n";
 					failures++;
 				} else {
@@ -297,7 +309,7 @@ int RunPrivacyColumnsTests() {
 
 	} catch (std::exception &ex) {
 		con.Rollback();
-		std::cerr << "Exception during tests: " << ex.what() << std::endl;
+		std::cerr << "Exception during tests: " << ex.what() << "\n";
 		return 2;
 	}
 

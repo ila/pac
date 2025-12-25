@@ -625,7 +625,7 @@ static int Test_InsertJoinOnTopOfJoin() {
 	}
 
 	// Check nesting: outer_join should have the old join as its first child
-	if (outer_join->children.size() < 1) {
+	if (outer_join->children.empty()) {
 		return 23;
 	}
 	auto inner_join = dynamic_cast<LogicalJoin *>(outer_join->children[0].get());
