@@ -36,8 +36,9 @@ static int RunTest(const char *name, const std::function<int()> &fn) {
 
 // Collect all ColumnBinding (table_index, column_index) pairs from the operator tree
 static void CollectColumnBindingsRecursiveForTest(LogicalOperator *node, std::set<std::pair<idx_t, idx_t>> &out) {
-	if (!node)
+	if (!node) {
 		return;
+	}
 	auto binds = node->GetColumnBindings();
 	for (auto &b : binds) {
 		out.insert({b.table_index, b.column_index});
@@ -49,8 +50,9 @@ static void CollectColumnBindingsRecursiveForTest(LogicalOperator *node, std::se
 
 // Verify that every BoundColumnRefExpression in the tree refers to a collected binding
 static bool VerifyAllExprBindingsExist(LogicalOperator *node, const std::set<std::pair<idx_t, idx_t>> &bindings) {
-	if (!node)
+	if (!node) {
 		return true;
+	}
 	bool ok = true;
 	for (auto &expr : node->expressions) {
 		ExpressionIterator::VisitExpression<BoundColumnRefExpression>(*expr, [&](const BoundColumnRefExpression &bcr) {
@@ -64,8 +66,9 @@ static bool VerifyAllExprBindingsExist(LogicalOperator *node, const std::set<std
 		});
 	}
 	for (auto &c : node->children) {
-		if (!VerifyAllExprBindingsExist(c.get(), bindings))
+		if (!VerifyAllExprBindingsExist(c.get(), bindings)) {
 			ok = false;
+		}
 	}
 	return ok;
 }
@@ -83,8 +86,9 @@ static bool VerifyNoInvalidBindings(const std::set<std::pair<idx_t, idx_t>> &bin
 // New: collect a mapping from ColumnBinding (table_index,col_index) to producer LogicalOperator*
 static void CollectBindingProducers(LogicalOperator *node,
                                     std::map<std::pair<idx_t, idx_t>, std::vector<LogicalOperator *>> &out) {
-	if (!node)
+	if (!node) {
 		return;
+	}
 	auto binds = node->GetColumnBindings();
 	for (auto &b : binds) {
 		out[{b.table_index, b.column_index}].push_back(node);
@@ -155,8 +159,9 @@ static bool VerifyBindingProducersUniqueAndTypes(LogicalOperator *root) {
 		// compare to the count reported by GetColumnBindings() for this producer
 		auto binds = p->GetColumnBindings();
 		std::set<idx_t> reported_cols;
-		for (auto &b : binds)
+		for (auto &b : binds) {
 			reported_cols.insert(b.column_index);
+		}
 		if (cols.size() != reported_cols.size()) {
 			std::cerr << "Verification failure: mismatch in column set sizes for producer " << p->GetName()
 			          << " (col set sizes: collected=" << cols.size() << ", reported=" << reported_cols.size() << ")\n";
@@ -182,8 +187,9 @@ static bool VerifyExprTypesMatchProducers(LogicalOperator *root) {
 	bool ok = true;
 	// traverse expressions
 	std::function<void(LogicalOperator *)> check_node = [&](LogicalOperator *node) {
-		if (!node)
+		if (!node) {
 			return;
+		}
 		for (auto &expr : node->expressions) {
 			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
 			    *expr, [&](const BoundColumnRefExpression &bcr) {
@@ -211,8 +217,9 @@ static bool VerifyExprTypesMatchProducers(LogicalOperator *root) {
 				    }
 			    });
 		}
-		for (auto &c : node->children)
+		for (auto &c : node->children) {
 			check_node(c.get());
+		}
 	};
 	check_node(root);
 	return ok;
@@ -221,12 +228,14 @@ static bool VerifyExprTypesMatchProducers(LogicalOperator *root) {
 // New: verify that each operator's reported ColumnBindings correspond to its GetTypes and that expression return types
 // are valid
 static bool VerifyOperatorBindingsConsistentWithTypes(LogicalOperator *root) {
-	if (!root)
+	if (!root) {
 		return true;
+	}
 	bool ok = true;
 	std::function<void(LogicalOperator *)> check_node = [&](LogicalOperator *node) {
-		if (!node)
+		if (!node) {
 			return;
+		}
 		auto binds = node->GetColumnBindings();
 		auto types = node->types;
 		// For each reported binding, ensure the producer/operator actually has a type for that column_index
@@ -252,8 +261,9 @@ static bool VerifyOperatorBindingsConsistentWithTypes(LogicalOperator *root) {
 				}
 			});
 		}
-		for (auto &c : node->children)
+		for (auto &c : node->children) {
 			check_node(c.get());
+		}
 	};
 	check_node(root);
 	return ok;
@@ -270,18 +280,23 @@ static int RunRobustPlanVerification(const unique_ptr<LogicalOperator> &root) {
 		// collect and verify bindings on root
 		std::set<std::pair<idx_t, idx_t>> bindings;
 		CollectColumnBindingsRecursiveForTest(root.get(), bindings);
-		if (!VerifyNoInvalidBindings(bindings))
+		if (!VerifyNoInvalidBindings(bindings)) {
 			return -1;
-		if (!VerifyAllExprBindingsExist(root.get(), bindings))
+		}
+		if (!VerifyAllExprBindingsExist(root.get(), bindings)) {
 			return -2;
+		}
 		// new checks: ensure each binding has a unique producer and types align
-		if (!VerifyBindingProducersUniqueAndTypes(root.get()))
+		if (!VerifyBindingProducersUniqueAndTypes(root.get())) {
 			return -5;
-		if (!VerifyExprTypesMatchProducers(root.get()))
+		}
+		if (!VerifyExprTypesMatchProducers(root.get())) {
 			return -6;
+		}
 		// operator-level consistency checks
-		if (!VerifyOperatorBindingsConsistentWithTypes(root.get()))
+		if (!VerifyOperatorBindingsConsistentWithTypes(root.get())) {
 			return -9;
+		}
 
 		// attempt copy and run same checks on copy if supported
 		try {
@@ -290,16 +305,21 @@ static int RunRobustPlanVerification(const unique_ptr<LogicalOperator> &root) {
 			copy->Verify(*con.context);
 			std::set<std::pair<idx_t, idx_t>> copy_bindings;
 			CollectColumnBindingsRecursiveForTest(copy.get(), copy_bindings);
-			if (!VerifyNoInvalidBindings(copy_bindings))
+			if (!VerifyNoInvalidBindings(copy_bindings)) {
 				return -3;
-			if (!VerifyAllExprBindingsExist(copy.get(), copy_bindings))
+			}
+			if (!VerifyAllExprBindingsExist(copy.get(), copy_bindings)) {
 				return -4;
-			if (!VerifyBindingProducersUniqueAndTypes(copy.get()))
+			}
+			if (!VerifyBindingProducersUniqueAndTypes(copy.get())) {
 				return -7;
-			if (!VerifyExprTypesMatchProducers(copy.get()))
+			}
+			if (!VerifyExprTypesMatchProducers(copy.get())) {
 				return -8;
-			if (!VerifyOperatorBindingsConsistentWithTypes(copy.get()))
+			}
+			if (!VerifyOperatorBindingsConsistentWithTypes(copy.get())) {
 				return -10;
+			}
 		} catch (NotImplementedException &ex) {
 			std::cerr << "Copy skipped (not implemented): " << ex.what() << "\n";
 		} catch (SerializationException &ex) {
@@ -382,26 +402,32 @@ static int Test_ConsecutiveUpdateParent() {
 
 	// Second insertion above the same original child (now located under the inserted parent)
 	// operate on the unique_ptrs directly: pass the parent's unique_ptr and its child unique_ptr
-	if (!root->children[0])
+	if (!root->children[0]) {
 		return 7;
+	}
 	unique_ptr<LogicalOperator> new_parent2 = make_uniq<LogicalProjection>(2, vector<unique_ptr<Expression>>());
 	new_parent2->children.emplace_back(make_uniq<LogicalDummyScan>(8));
 	ReplaceNode(root->children[0], root->children[0]->children[0], new_parent2);
 
 	// Validate: there should be two projections between root and the DummyScan
-	auto first = dynamic_cast<LogicalProjection *>(root->children[0].get());
-	if (!first)
+	const auto first = dynamic_cast<LogicalProjection *>(root->children[0].get());
+	if (!first) {
 		return 8;
-	if (first->children.size() != 1)
+	}
+	if (first->children.size() != 1) {
 		return 9;
+	}
 	auto second = dynamic_cast<LogicalProjection *>(first->children[0].get());
-	if (!second)
+	if (!second) {
 		return 10;
-	if (second->children.size() != 1)
+	}
+	if (second->children.size() != 1) {
 		return 11;
+	}
 	auto moved_child = dynamic_cast<LogicalDummyScan *>(second->children[0].get());
-	if (!moved_child)
+	if (!moved_child) {
 		return 12;
+	}
 
 	// Check that remapping kept bindings consistent (root expression table index should equal moved_child table_index)
 	// Verify plan
@@ -456,11 +482,13 @@ static int Test_MultiColumnChildBinding() {
 	}
 
 	auto inserted_parent = dynamic_cast<LogicalProjection *>(root->children[0].get());
-	if (!inserted_parent)
+	if (!inserted_parent) {
 		return 14;
+	}
 	auto moved_child = dynamic_cast<LogicalDummyScan *>(inserted_parent->children[0].get());
-	if (!moved_child)
+	if (!moved_child) {
 		return 15;
+	}
 
 	auto &bcr = root->expressions[0]->Cast<BoundColumnRefExpression>();
 	if (bcr.binding.table_index != moved_child->table_index) {
@@ -562,8 +590,9 @@ static int Test_InsertJoinOnTopOfJoin() {
 	ReplaceNode(root, root->children[0], new_join);
 
 	auto outer_join = dynamic_cast<LogicalJoin *>(root->children[0].get());
-	if (!outer_join)
+	if (!outer_join) {
 		return 22;
+	}
 	// attach another scan as the right child of the outer join BEFORE verification
 	outer_join->children.emplace_back(make_uniq<LogicalDummyScan>(2));
 
@@ -596,16 +625,18 @@ static int Test_InsertJoinOnTopOfJoin() {
 	}
 
 	// Check nesting: outer_join should have the old join as its first child
-	if (outer_join->children.size() < 1)
+	if (outer_join->children.size() < 1) {
 		return 23;
+	}
 	auto inner_join = dynamic_cast<LogicalJoin *>(outer_join->children[0].get());
 	if (!inner_join) {
 		std::cerr << "Inner join not present where expected\n";
 		return 24;
 	}
 	// outer join should now have two children
-	if (outer_join->children.size() != 2)
+	if (outer_join->children.size() != 2) {
 		return 25;
+	}
 
 	// Collect and verify bindings
 	std::set<std::pair<idx_t, idx_t>> bindings;
@@ -661,11 +692,13 @@ static int Test_InsertFilterParent() {
 		std::cerr << "Inserted filter is null\n";
 		return 26;
 	}
-	if (inserted_filter->children.size() != 1)
+	if (inserted_filter->children.size() != 1) {
 		return 27;
+	}
 	auto moved_child = dynamic_cast<LogicalDummyScan *>(inserted_filter->children[0].get());
-	if (!moved_child)
+	if (!moved_child) {
 		return 28;
+	}
 
 	// Collect and verify bindings
 	std::set<std::pair<idx_t, idx_t>> bindings;
@@ -718,19 +751,23 @@ static int Test_PreserveColumnsNoRemap() {
 	}
 
 	auto inserted_parent = dynamic_cast<LogicalProjection *>(root->children[0].get());
-	if (!inserted_parent)
+	if (!inserted_parent) {
 		return 29;
+	}
 	auto moved_child = dynamic_cast<LogicalDummyScan *>(inserted_parent->children[0].get());
-	if (!moved_child)
+	if (!moved_child) {
 		return 30;
+	}
 
 	// verify projection expressions still reference column indices 0 and 1 (positions preserved)
 	auto &bcr0 = root->expressions[0]->Cast<BoundColumnRefExpression>();
 	auto &bcr1 = root->expressions[1]->Cast<BoundColumnRefExpression>();
-	if (bcr0.binding.column_index != 0)
+	if (bcr0.binding.column_index != 0) {
 		return 31;
-	if (bcr1.binding.column_index != 1)
+	}
+	if (bcr1.binding.column_index != 1) {
 		return 32;
+	}
 
 	return 0;
 }
@@ -777,8 +814,9 @@ int RunCompilerFunctionTests() {
 		return code;
 	}
 	code = RunTest("Test_InsertJoinOnTopOfJoin", Test_InsertJoinOnTopOfJoin);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 	code = RunTest("Test_InsertFilterParent", Test_InsertFilterParent);
 	if (code != 0) {
 		return code;
