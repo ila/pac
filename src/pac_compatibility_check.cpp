@@ -140,16 +140,12 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 }
 
 // helper: traverse the plan and count how many times each table/CTE name is scanned
-static void CountScans(const LogicalOperator &op, std::unordered_map<std::string, idx_t> &counts) {
+void CountScans(const LogicalOperator &op, std::unordered_map<std::string, idx_t> &counts) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &scan = op.Cast<LogicalGet>();
 		auto table_entry = scan.GetTable();
 		if (table_entry) {
 			counts[table_entry->name]++;
-		} else {
-			for (auto &n : scan.names) {
-				counts[n]++;
-			}
 		}
 	}
 	for (auto &child : op.children) {
@@ -223,7 +219,8 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 				// mismatch where both are non-zero -> ambiguous/invalid plan for PAC rewriting
 				throw InvalidInputException(
 				    "PAC rewrite: mismatch between PAC table scans (%s=%llu) and internal sample scans (%s=%llu)",
-				    t.c_str(), (unsigned long long)pac_count, sample_name.c_str(), (unsigned long long)sample_count);
+				    t.c_str(), static_cast<unsigned long long>(pac_count), sample_name.c_str(),
+				    static_cast<unsigned long long>(sample_count));
 			}
 		}
 	}

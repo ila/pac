@@ -6,7 +6,6 @@
 #include <unordered_set>
 #include <string>
 #include <algorithm>
-#include <functional>
 
 // Include public helper to access the configured PAC tables filename and read helper
 #include "include/pac_privacy_unit.hpp"

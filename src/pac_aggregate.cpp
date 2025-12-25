@@ -4,7 +4,6 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 
 #include <random>
@@ -40,7 +39,7 @@ static inline idx_t DeterministicUniformRange(std::mt19937_64 &gen, idx_t n) {
 	if (n <= 0) {
 		return 0;
 	}
-	const uint64_t maxv = std::numeric_limits<uint64_t>::max();
+	constexpr uint64_t maxv = std::numeric_limits<uint64_t>::max();
 	// compute largest multiple of n that fits in uint64_t (limit = floor((maxv+1)/n)*n)
 	// to avoid overflow use division
 	uint64_t limit = (maxv / static_cast<uint64_t>(n)) * static_cast<uint64_t>(n);
@@ -138,7 +137,7 @@ static double ComputeSecondMomentVariance(const std::vector<double> &values) {
 	for (auto v : values) {
 		mean += v;
 	}
-	mean /= double(n);
+	mean /= static_cast<double>(n);
 
 	double var = 0.0;
 	for (auto v : values) {
@@ -146,7 +145,7 @@ static double ComputeSecondMomentVariance(const std::vector<double> &values) {
 		var += d * d;
 	}
 	// Use sample variance (divide by n-1) to make the estimator unbiased for finite samples
-	return var / double(n - 1);
+	return var / static_cast<double>(n - 1);
 }
 
 // Exported helper: compute the PAC noise variance (delta) from values and mi.
@@ -229,29 +228,6 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 		idx_t vals_len = ve.length;
 		idx_t cnts_len = ce.length;
 
-		// Read configured m from session settings (default 128)
-		int64_t m_cfg = 128;
-		Value m_val;
-		if (state.GetContext().TryGetCurrentSetting("pac_m", m_val) && !m_val.IsNull()) {
-			m_cfg = m_val.GetValue<int64_t>();
-			if (m_cfg <= 0) {
-				m_cfg = 128;
-			}
-		}
-
-		// Read enforce_m_values flag (default true)
-		// bool enforce_m_values = true;
-		// Value enforce_val;
-		// if (state.GetContext().TryGetCurrentSetting("enforce_m_values", enforce_val) && !enforce_val.IsNull()) {
-		//     enforce_m_values = enforce_val.GetValue<bool>();
-		// }
-		//
-		// // Enforce per-sample array length equals configured m (only if enabled)
-		// if (enforce_m_values && (int64_t)vals_len != m_cfg) {
-		//     throw InvalidInputException(StringUtil::Format("pac_aggregate: expected per-sample array length %lld but
-		//     got %llu", (long long)m_cfg, (unsigned long long)vals_len));
-		// }
-
 		auto &vals_child = ListVector::GetEntry(vals);
 		auto &cnts_child = ListVector::GetEntry(cnts);
 		vals_child.Flatten(ve.offset + ve.length);
@@ -312,7 +288,7 @@ static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunct
 	uint64_t seed = std::random_device {}();
 	Value pac_seed_val;
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
+		seed = static_cast<uint64_t>(pac_seed_val.GetValue<int64_t>());
 	}
 	// mi is per-row for pac_aggregate; store default mi in bind data but it's unused here
 	double mi = 128.0;

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "duckdb.hpp"
-#include <unordered_set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,4 +26,5 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
                                             const std::vector<std::string> &pac_tables,
                                             bool replan_in_progress = false);
 
+void CountScans(const LogicalOperator &op, std::unordered_map<std::string, idx_t> &counts);
 } // namespace duckdb

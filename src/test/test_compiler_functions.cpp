@@ -244,7 +244,7 @@ static bool VerifyOperatorBindingsConsistentWithTypes(LogicalOperator *root) {
 		// Ensure expressions' return types are not INVALID
 		for (auto &expr : node->expressions) {
 			// Enumerate all expressions under this unique_ptr and check their return types
-			ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
+			ExpressionIterator::EnumerateExpression(expr, [&](const Expression &e) {
 				if (e.return_type.id() == LogicalTypeId::INVALID) {
 					std::cerr << "Verification failure: expression in operator " << node->GetName()
 					          << " has INVALID return type\n";
@@ -260,7 +260,7 @@ static bool VerifyOperatorBindingsConsistentWithTypes(LogicalOperator *root) {
 }
 
 // Helper to run verification on a plan and its copy (copy optional)
-static int RunRobustPlanVerification(unique_ptr<LogicalOperator> &root) {
+static int RunRobustPlanVerification(const unique_ptr<LogicalOperator> &root) {
 	try {
 		DuckDB db(nullptr);
 		Connection con(db);
@@ -350,7 +350,7 @@ static int Test_BasicUpdateParent() {
 		return 5;
 	}
 
-	auto &bcr = root->expressions[0]->template Cast<BoundColumnRefExpression>();
+	auto &bcr = root->expressions[0]->Cast<BoundColumnRefExpression>();
 	if (bcr.binding.table_index != moved_child->table_index) {
 		std::cerr << "Binding was not updated: bcr=" << bcr.binding.table_index << " child=" << moved_child->table_index
 		          << "\n";
@@ -409,7 +409,7 @@ static int Test_ConsecutiveUpdateParent() {
 		return 101;
 	}
 
-	auto &bcr = root->expressions[0]->template Cast<BoundColumnRefExpression>();
+	auto &bcr = root->expressions[0]->Cast<BoundColumnRefExpression>();
 	if (bcr.binding.table_index != moved_child->table_index) {
 		std::cerr << "Binding mismatch after consecutive updates: " << bcr.binding.table_index << " vs "
 		          << moved_child->table_index << "\n";
@@ -462,7 +462,7 @@ static int Test_MultiColumnChildBinding() {
 	if (!moved_child)
 		return 15;
 
-	auto &bcr = root->expressions[0]->template Cast<BoundColumnRefExpression>();
+	auto &bcr = root->expressions[0]->Cast<BoundColumnRefExpression>();
 	if (bcr.binding.table_index != moved_child->table_index) {
 		std::cerr << "Binding table index not remapped for multi-column child\n";
 		return 16;
@@ -725,8 +725,8 @@ static int Test_PreserveColumnsNoRemap() {
 		return 30;
 
 	// verify projection expressions still reference column indices 0 and 1 (positions preserved)
-	auto &bcr0 = root->expressions[0]->template Cast<BoundColumnRefExpression>();
-	auto &bcr1 = root->expressions[1]->template Cast<BoundColumnRefExpression>();
+	auto &bcr0 = root->expressions[0]->Cast<BoundColumnRefExpression>();
+	auto &bcr1 = root->expressions[1]->Cast<BoundColumnRefExpression>();
 	if (bcr0.binding.column_index != 0)
 		return 31;
 	if (bcr1.binding.column_index != 1)
@@ -761,29 +761,36 @@ static int Test_VerifierDetectsDuplicateProducers() {
 int RunCompilerFunctionTests() {
 	int code = 0;
 	code = RunTest("Test_BasicUpdateParent", Test_BasicUpdateParent);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 	code = RunTest("Test_ConsecutiveUpdateParent", Test_ConsecutiveUpdateParent);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 	code = RunTest("Test_MultiColumnChildBinding", Test_MultiColumnChildBinding);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 	code = RunTest("Test_InsertJoinBetweenAggregateAndScan", Test_InsertJoinBetweenAggregateAndScan);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 	code = RunTest("Test_InsertJoinOnTopOfJoin", Test_InsertJoinOnTopOfJoin);
 	if (code != 0)
 		return code;
 	code = RunTest("Test_InsertFilterParent", Test_InsertFilterParent);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 	code = RunTest("Test_PreserveColumnsNoRemap", Test_PreserveColumnsNoRemap);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 	code = RunTest("Test_VerifierDetectsDuplicateProducers", Test_VerifierDetectsDuplicateProducers);
-	if (code != 0)
+	if (code != 0) {
 		return code;
+	}
 
 	std::cout << "All UpdateParent tests passed\n";
 	return 0;

@@ -5,7 +5,6 @@
 #ifndef PAC_COMPILER_HELPERS_HPP
 #define PAC_COMPILER_HELPERS_HPP
 
-#include <memory>
 #include <string>
 #include "duckdb.hpp"
 

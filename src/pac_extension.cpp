@@ -14,17 +14,11 @@
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/types.hpp"
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_search_path.hpp"
 #include "include/pac_optimizer.hpp"
 #include "include/pac_privacy_unit.hpp"
 #include "include/pac_aggregate.hpp"
 #include "include/pac_count.hpp"
 #include "include/pac_sum.hpp"
-
-// planner/bound expression headers needed to inspect bind-time constant arguments and bound function info
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 namespace duckdb {
 

@@ -21,11 +21,10 @@
 #include <algorithm>
 #include <queue>
 
-// Add include for TableCatalogEntry to access GetPrimaryKey and column APIs
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
-// Add include for ForeignKeyConstraint
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
+#include "include/pac_optimizer.hpp"
 
 using idx_set = std::unordered_set<idx_t>;
 
@@ -34,7 +33,7 @@ namespace duckdb {
 string Sanitize(const string &in) {
 	string out;
 	for (char c : in) {
-		out.push_back(std::isalnum((unsigned char)c) || c == '_' ? c : '_');
+		out.push_back(std::isalnum(static_cast<unsigned char>(c)) || c == '_' ? c : '_');
 	}
 	return out;
 }
@@ -48,7 +47,7 @@ std::string NormalizeQueryForHash(const std::string &query) {
 	out.reserve(s.size());
 	bool in_space = false;
 	for (char c : s) {
-		if (std::isspace((unsigned char)c)) {
+		if (std::isspace(static_cast<unsigned char>(c))) {
 			if (!in_space) {
 				out.push_back(' ');
 				in_space = true;
@@ -103,7 +102,6 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan) {
 static void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out);
 static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator *skip, idx_set &out);
 static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map);
-static void CollectColumnBindingsRecursive(LogicalOperator *node, vector<ColumnBinding> &out);
 
 void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
                  unique_ptr<LogicalOperator> &new_node) {
@@ -148,8 +146,9 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 	if (!new_subtree_indices.empty()) {
 		idx_t next_idx = GetNextTableIndex(root);
 		for (auto idx : new_subtree_indices) {
-			if (idx == DConstants::INVALID_INDEX)
+			if (idx == DConstants::INVALID_INDEX) {
 				continue;
+			}
 			if (external_indices.find(idx) != external_indices.end()) {
 				// find a fresh index not in external_indices and not in new_subtree_indices
 				while (external_indices.find(next_idx) != external_indices.end() ||
@@ -176,7 +175,7 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 	const idx_t n = (std::min)(old_top_bindings.size(), new_top_bindings.size());
 	replacer.replacement_bindings.reserve(n);
 	for (idx_t i = 0; i < n; ++i) {
-		if (!(old_top_bindings[i] == new_top_bindings[i])) {
+		if (old_top_bindings[i] != new_top_bindings[i]) {
 			replacer.replacement_bindings.emplace_back(old_top_bindings[i], new_top_bindings[i]);
 		}
 	}
@@ -184,17 +183,6 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 	if (!replacer.replacement_bindings.empty()) {
 		replacer.stop_operator = subtree_root;
 		replacer.VisitOperator(*root);
-	}
-}
-
-static void CollectColumnBindingsRecursive(LogicalOperator *node, vector<ColumnBinding> &out) {
-	if (!node) {
-		return;
-	}
-	auto binds = node->GetColumnBindings();
-	out.insert(out.end(), binds.begin(), binds.end());
-	for (auto &c : node->children) {
-		CollectColumnBindingsRecursive(c.get(), out);
 	}
 }
 
@@ -556,15 +544,6 @@ FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &pr
 
 	return result;
 }
-
-} // namespace duckdb
-
-// Add PAC-specific helpers implementations
-#include "include/pac_optimizer.hpp"
-#include "include/pac_helpers.hpp"
-#include <algorithm>
-
-namespace duckdb {
 
 // ReplanGuard implementation
 ReplanGuard::ReplanGuard(PACOptimizerInfo *info) : info(info), prev(false) {
