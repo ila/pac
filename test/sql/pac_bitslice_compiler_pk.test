@@ -1,0 +1,117 @@
+# name: test/sql/pac_bitslice_compiler_pk.test
+# description: Test bitslice compiler queries when privacy-unit tables have primary keys (single & composite)
+# group: [sql]
+
+require pac
+
+# Create two tables with 25 rows each and 5 groups (grp = i % 5)
+# Single-column primary key
+statement ok
+CREATE TABLE bitslice_pk_single(
+    id INTEGER PRIMARY KEY,
+    grp INTEGER,
+    val INTEGER,
+    grp2 INTEGER
+);
+
+statement ok
+INSERT INTO bitslice_pk_single
+SELECT i AS id, i % 5 AS grp, (i % 10) AS val, (i % 3) AS grp2
+FROM range(25) t(i);
+
+# Composite primary key (three columns)
+statement ok
+CREATE TABLE bitslice_pk_many(
+    pk1 INTEGER,
+    pk2 INTEGER,
+    pk3 INTEGER,
+    grp INTEGER,
+    val INTEGER,
+    PRIMARY KEY(pk1, pk2, pk3)
+);
+
+statement ok
+INSERT INTO bitslice_pk_many
+SELECT i AS pk1, (i % 7) AS pk2, (i % 11) AS pk3, i % 5 AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
+statement ok
+pRAGMA add_pac_privacy_unit('bitslice_pk_single');
+
+statement ok
+pRAGMA add_pac_privacy_unit('bitslice_pk_many');
+
+statement ok
+set pac_seed = 42;
+
+# 1) Ungrouped SUM on single-PK table (should match distribution from no-pk test)
+query I
+SELECT SUM(val) FROM bitslice_pk_single
+----
+123
+
+# 2) GROUP BY on single-PK table (same expected group results)
+query II
+SELECT grp, SUM(val)
+FROM bitslice_pk_single
+GROUP BY grp
+ORDER BY grp
+----
+0	15
+1	21
+2	22
+3	22
+4	43
+
+# 3) GROUP BY on composite-PK table (non-projected PKs)
+query II
+SELECT grp, SUM(val)
+FROM bitslice_pk_many
+GROUP BY grp
+ORDER BY grp
+----
+0	10
+1	15
+2	15
+3	17
+4	30
+
+# 4) Projecting the PKs while aggregating (group by PKs => per-row sums)
+query II
+SELECT id, SUM(val)
+FROM bitslice_pk_single
+GROUP BY id
+ORDER BY id
+LIMIT 3
+----
+0	0
+1	1
+2	4
+
+query IIII
+SELECT pk1, pk2, pk3, SUM(val)
+FROM bitslice_pk_many
+WHERE pk1 < 1
+GROUP BY pk1, pk2, pk3
+ORDER BY pk1
+LIMIT 3
+----
+0	0	0	0
+
+statement ok
+PRAGMA remove_pac_privacy_unit('bitslice_pk_single');
+
+# 5) JOIN aggregation (no GROUP BY)
+query I
+SELECT SUM(a.val)
+FROM bitslice_pk_single a JOIN bitslice_pk_many b ON a.grp = b.grp
+----
+475
+
+# Cleanup
+statement ok
+DROP TABLE bitslice_pk_single
+
+statement ok
+DROP TABLE bitslice_pk_many
+
