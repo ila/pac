@@ -182,8 +182,9 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 			break;
 		}
 	}
-	if (!any_pac)
+	if (!any_pac) {
 		return result;
+	}
 
 	// Record which configured PAC tables were scanned in this plan. The optimizer
 	// rule will still want to compile queries that directly read from a privacy
@@ -219,8 +220,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 				// mismatch where both are non-zero -> ambiguous/invalid plan for PAC rewriting
 				throw InvalidInputException(
 				    "PAC rewrite: mismatch between PAC table scans (%s=%llu) and internal sample scans (%s=%llu)",
-				    t.c_str(), static_cast<unsigned long long>(pac_count), sample_name.c_str(),
-				    static_cast<unsigned long long>(sample_count));
+				    t.c_str(), pac_count, sample_name.c_str(), sample_count);
 			}
 		}
 	}
@@ -279,6 +279,15 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 
 	// Attach discovered fk_paths to the result
 	result.fk_paths = std::move(fk_paths);
+
+	// If any scanned table is linked to a privacy unit via FKs, trigger PAC compilation.
+	// This should not raise errors — we accept the plan and let the rewriter handle it.
+	for (auto &kv : result.fk_paths) {
+		if (!kv.second.empty()) {
+			result.eligible_for_rewrite = true;
+			return result;
+		}
+	}
 
 	// Structural checks (throw when invalid)
 	if (ContainsWindowFunction(plan)) {

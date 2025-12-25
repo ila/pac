@@ -278,8 +278,9 @@ int RunPrivacyColumnsTests() {
 						break;
 					}
 				}
-				if (Basename(path[12]) != "t_c_long")
+				if (Basename(path[12]) != "t_c_long") {
 					ok = false;
+				}
 				if (!ok) {
 					std::cerr << "FAIL: unexpected long path: ";
 					for (auto &p : path) {
