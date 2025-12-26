@@ -413,13 +413,9 @@ vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContex
 			if (!fk.info.IsAppendConstraint()) {
 				continue;
 			}
-			// Build referenced table name (schema.table) if schema present
-			std::string ref_table;
-			if (!fk.info.schema.empty()) {
-				ref_table = fk.info.schema + "." + fk.info.table;
-			} else {
-				ref_table = fk.info.table;
-			}
+			// Build referenced table name: DO NOT return schema-qualified name here; only return the table name.
+			// The schema-qualified variant adds complexity and is left for future work.
+			std::string ref_table = fk.info.table;
 			// fk.fk_columns contains the column names on THIS table that reference the other
 			result.emplace_back(ref_table, fk.fk_columns);
 		}
@@ -455,7 +451,8 @@ vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContex
 // This function resolves table names using the client's catalog search path, then performs a
 // BFS over outgoing FK edges (A -> referenced_table) to find the shortest path from each start
 // table to any privacy unit. Returns a map from the original start table string to the path
-// (vector of qualified table names from start to privacy unit inclusive).
+// (vector of table names from start to privacy unit inclusive). NOTE: table names are returned
+// unqualified (no schema prefix) to keep logic simple.
 std::unordered_map<std::string, std::vector<std::string>>
 FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &privacy_units,
                       const std::vector<std::string> &table_names) {
@@ -463,26 +460,29 @@ FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &pr
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
 	auto ResolveQualified = [&](const std::string &tbl_name) -> std::string {
+		// If schema-qualified name is provided (schema.table), prefer that exact lookup but return
+		// only the unqualified table name (tbl).
 		auto dot_pos = tbl_name.find('.');
 		if (dot_pos != std::string::npos) {
 			std::string schema = tbl_name.substr(0, dot_pos);
 			std::string tbl = tbl_name.substr(dot_pos + 1);
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
 			if (entry)
-				return schema + "." + tbl;
-			return tbl_name;
+				return tbl;  // return unqualified table name
+			return tbl_name; // fallback to original
 		}
+		// Non-qualified: walk the search path; if found return unqualified table name
 		CatalogSearchPath path(context);
 		for (auto &entry_path : path.Get()) {
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, tbl_name,
 			                              OnEntryNotFound::RETURN_NULL);
 			if (entry)
-				return entry_path.schema + "." + tbl_name;
+				return tbl_name; // already unqualified
 		}
-		return tbl_name; // fallback: return as-is if not found
+		return tbl_name; // fallback
 	};
 
-	// canonicalize privacy units
+	// canonicalize privacy units (use unqualified names)
 	std::unordered_set<std::string> privacy_set;
 	for (auto &pu : privacy_units) {
 		privacy_set.insert(ResolveQualified(pu));
@@ -491,14 +491,14 @@ FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &pr
 	std::unordered_map<std::string, std::vector<std::string>> result;
 
 	for (auto &start : table_names) {
-		std::string start_qual = ResolveQualified(start);
-		// BFS queue of qualified table names
+		std::string start_name = ResolveQualified(start);
+		// BFS queue of unqualified table names
 		std::queue<std::string> q;
 		std::unordered_set<std::string> visited;
 		std::unordered_map<std::string, std::string> parent;
 
-		visited.insert(start_qual);
-		q.push(start_qual);
+		visited.insert(start_name);
+		q.push(start_name);
 
 		bool found = false;
 		std::string found_target;
@@ -509,35 +509,37 @@ FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &pr
 			// Find outgoing FK edges from cur
 			auto fks = FindForeignKeys(context, cur);
 			for (auto &p : fks) {
-				std::string neighbor = p.first; // referenced table name (may be qualified or not)
-				std::string neighbor_qual = ResolveQualified(neighbor);
-				if (visited.find(neighbor_qual) != visited.end())
+				std::string neighbor = p.first; // referenced table name (unqualified now)
+				std::string neighbor_name = ResolveQualified(neighbor);
+				if (visited.find(neighbor_name) != visited.end()) {
 					continue;
-				visited.insert(neighbor_qual);
-				parent[neighbor_qual] = cur;
-				if (privacy_set.find(neighbor_qual) != privacy_set.end()) {
+				}
+				visited.insert(neighbor_name);
+				parent[neighbor_name] = cur;
+				if (privacy_set.find(neighbor_name) != privacy_set.end()) {
 					found = true;
-					found_target = neighbor_qual;
+					found_target = neighbor_name;
 					break;
 				}
-				q.push(neighbor_qual);
+				q.push(neighbor_name);
 			}
 		}
 
 		if (found) {
-			// reconstruct path from start_qual to found_target
+			// reconstruct path from start_name to found_target
 			std::vector<std::string> path;
 			std::string cur = found_target;
 			while (true) {
 				path.push_back(cur);
-				if (cur == start_qual)
+				if (cur == start_name)
 					break;
 				auto it = parent.find(cur);
-				if (it == parent.end())
+				if (it == parent.end()) {
 					break; // safety
+				}
 				cur = it->second;
 			}
-			std::reverse(path.begin(), path.end());
+			reverse(path.begin(), path.end());
 			result[start] = std::move(path);
 		}
 	}

@@ -234,6 +234,20 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		scanned_tables.push_back(kv.first);
 	}
 
+	// Populate scanned_non_pac_tables: scanned tables that are not in the configured pac_tables
+	// and are not internal sample tables (named _pac_internal_sample_<table>). This is useful
+	// to know which external/non-PAC tables were read by the query.
+	std::unordered_set<std::string> pac_set(pac_tables.begin(), pac_tables.end());
+	for (auto &name : scanned_tables) {
+		if (name.rfind("_pac_internal_sample_", 0) == 0) {
+			// internal sample table, skip
+			continue;
+		}
+		if (pac_set.find(name) == pac_set.end()) {
+			result.scanned_non_pac_tables.push_back(name);
+		}
+	}
+
 	// Compute FK paths from scanned tables to any privacy unit (transitive)
 	auto fk_paths = FindForeignKeyBetween(context, pac_tables, scanned_tables);
 
@@ -275,6 +289,11 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 			result.eligible_for_rewrite = true;
 			return result;
 		}
+	}
+
+	if (result.fk_paths.empty() && result.scanned_pac_tables.empty()) {
+		// No FK paths and no scanned PAC tables: nothing to do
+		return result;
 	}
 
 	// Structural checks (throw when invalid)

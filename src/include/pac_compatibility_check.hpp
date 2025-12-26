@@ -16,6 +16,8 @@ struct PACCompatibilityResult {
 	bool eligible_for_rewrite = false;
 	// List of configured PAC tables that were actually scanned in the plan
 	std::vector<std::string> scanned_pac_tables;
+	// List of scanned tables that are NOT configured PAC tables
+	std::vector<std::string> scanned_non_pac_tables;
 };
 
 // Check whether a logical plan is PAC-compatible according to the project's rules.

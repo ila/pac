@@ -143,6 +143,8 @@ void CreatePacAggregateQuery(const std::string &output_filename, const std::vect
 unique_ptr<LogicalGet> CreatePacSampleLogicalGet(ClientContext &context, idx_t table_index,
                                                  const string &privacy_unit) {
 
+	// todo - refactor (there is a similar function in the bitslice compiler)
+
 	string name = "_pac_internal_sample_" + Sanitize(privacy_unit);
 
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));

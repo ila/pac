@@ -5,16 +5,13 @@
 #include "include/pac_bitslice_compiler.hpp"
 #include "include/pac_helpers.hpp"
 #include "include/pac_compatibility_check.hpp"
-#include <iostream>
 #include "include/pac_compiler_helpers.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
-#include "duckdb/planner/operator/logical_projection.hpp"
 #include <duckdb/optimizer/optimizer.hpp>
 #include <duckdb/parser/parser.hpp>
 #include <duckdb/parser/expression/function_expression.hpp>
-#include <duckdb/planner/planner.hpp>
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -24,10 +21,52 @@
 
 namespace duckdb {
 
+unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                        const string &table) {
+
+	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
+	CatalogSearchPath path(context);
+
+	for (auto &schema : path.Get()) {
+		auto entry =
+		    catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema.schema, table, OnEntryNotFound::RETURN_NULL);
+		if (!entry) {
+			continue;
+		}
+
+		auto &table_entry = entry->Cast<TableCatalogEntry>();
+		vector<LogicalType> types = table_entry.GetTypes();
+		unique_ptr<FunctionData> bind_data;
+		auto scan_function = table_entry.GetScanFunction(context, bind_data);
+		vector<LogicalType> return_types = {};
+		vector<string> return_names = {};
+		vector<ColumnIndex> column_ids = {};
+		vector<idx_t> projection_ids = {};
+		for (auto &col : table_entry.GetColumns().Logical()) {
+			return_types.push_back(col.Type());
+			return_names.push_back(col.Name());
+			column_ids.push_back(ColumnIndex(col.Oid()));
+			projection_ids.push_back(column_ids.size() - 1);
+		}
+
+		auto table_index = GetNextTableIndex(plan);
+		unique_ptr<LogicalGet> get = make_uniq<LogicalGet>(table_index, scan_function, std::move(bind_data),
+		                                                   std::move(return_types), std::move(return_names));
+		get->SetColumnIds(std::move(column_ids));
+		get->projection_ids = projection_ids; // we project everything
+		get->ResolveOperatorTypes();
+		get->Verify(context);
+
+		return get;
+	}
+
+	throw ParserException("PAC: missing internal sample table " + table);
+}
+
 // Helper: ensure PK columns are present in a LogicalGet's column_ids and projection_ids.
 // If a PK column is not present in the scan, this function adds its column id to the LogicalGet
 // and ensures it is projected and that column bindings are regenerated.
-static void AddPKColumns(LogicalGet &get, const std::vector<string> &pks) {
+void AddPKColumns(LogicalGet &get, const std::vector<std::string> &pks) {
 	// We'll look up the table to map column names to column indexes
 	auto table_entry_ptr = get.GetTable();
 	if (!table_entry_ptr) {
@@ -86,98 +125,51 @@ static void AddPKColumns(LogicalGet &get, const std::vector<string> &pks) {
 	}
 }
 
-void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                             unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit,
-                             const std::string &query, const std::string &query_hash) {
-
-#ifdef DEBUG
-	Printer::Print("CompilePacBitsliceQuery called for PU=" + privacy_unit + " hash=" + query_hash);
-#endif
-
-	string path = GetPacCompiledPath(input.context, ".");
-	if (!path.empty() && path.back() != '/') {
-		path.push_back('/');
+// Helper: examine PACCompatibilityResult.fk_paths and populate gets_present / gets_missing.
+// Also returns the start table and canonical target privacy unit via reference output parameters.
+void PopulateGetsFromFKPath(const PACCompatibilityResult &check, const std::string &path,
+                            std::vector<std::string> &gets_present, std::vector<std::string> &gets_missing,
+                            std::string &start_table_out, std::string &target_pu_out) {
+	// Expect at least one FK path when this is called
+	auto it = check.fk_paths.begin();
+	start_table_out = it->first; // scanned table name
+	auto fk_path = it->second;   // vector from start -> ... -> privacy_unit
+	if (fk_path.empty()) {
+		throw InternalException("PAC compiler: FK path is empty");
 	}
-	string filename = path + privacy_unit + "_" + query_hash + "_bitslice.sql";
-
-	// The bitslice compiler works in the following way:
-	// a) the query scans PU table:
-	// a.1) the PU table has 1 PK: we hash it
-	// a.2) the PU table has multiple PKs: we XOR them and hash the result
-	// a.3) the PU table has no PK: we hash rowid
-	// b) the query does not scan PU table:
-	// b.1) we follow the FK path to find the PK(s) of the PU table
-	// b.2) we join the chain of tables from the scanned table to the PU table
-	// b.3) we hash the PK(s) as in a)
-
-	// Example: SELECT group_key, SUM(val) AS sum_val FROM t_single GROUP BY group_key;
-	// Becomes: SELECT group_key, pac_sum(HASH(rowid), val) AS sum_val FROM t_single GROUP BY group_key;
-	// todo- what is MI? what is k?
-
-	bool pu_present_in_tree = false;
-	bool use_rowid = false;
-
-	if (!check.scanned_pac_tables.empty()) {
-		pu_present_in_tree = true;
-	}
-
-	// Case a) query scans PU table (we assume only 1 PAC table for now)
-	std::vector<string> pks;
-	// Build two vectors: present (GETs already in the plan) and missing (GETs to create)
-	std::vector<std::string> gets_present;
-	std::vector<std::string> gets_missing;
-	std::unordered_map<std::string, idx_t> scan_counts;
-
-	if (pu_present_in_tree) {
-		if (!check.privacy_unit_pks.empty()) {
-			// Has PKs
-			pks = check.privacy_unit_pks.at(check.scanned_pac_tables[0]);
-		} else {
-			use_rowid = true;
-		}
-	} else if (!check.fk_paths.empty()) {
-		// The query does not scan the PU table: we need to follow the FK path
-		auto it = check.fk_paths.begin();
-		std::string start_table = it->first; // scanned table name
-		auto fk_path = it->second;           // vector from start -> ... -> privacy_unit
-		if (path.empty()) {
-			throw InternalException("PAC compiler: FK path is empty");
-		}
-		// canonical target privacy unit (last element)
-		std::string target_pu = fk_path.back();
-
-		// Collect scan counts from the current plan using helper defined in pac_helpers
-		CountScans(*plan, scan_counts); // fixme this is not the function we want here
-
-		for (auto &tbl : fk_path) {
-			auto itc = scan_counts.find(tbl);
-			if (itc != scan_counts.end() && itc->second > 0) {
-				gets_present.push_back(tbl);
-			} else {
-				gets_missing.push_back(tbl);
+	// canonical target privacy unit (last element)
+	target_pu_out = fk_path.back();
+	// For each table in the FK path, check whether a GET is already present
+	for (auto &table_in_path : fk_path) {
+		bool found_get = false;
+		for (auto &t : check.scanned_pac_tables) {
+			if (t == table_in_path) {
+				gets_present.push_back(t);
+				found_get = true;
+				break;
 			}
 		}
-
-#ifdef DEBUG
-		Printer::Print("PAC bitslice: FK path detection");
-		Printer::Print("start_table: " + start_table);
-		Printer::Print("target_pu: " + target_pu);
-		Printer::Print("gets_present:");
-		for (auto &g : gets_present)
-			Printer::Print("  " + g);
-		Printer::Print("gets_missing:");
-		for (auto &g : gets_missing)
-			Printer::Print("  " + g);
-#endif
-
-		// For now we stop here after detection as requested: next step is to create GETs for `gets_missing` and
-		// to find/prepare existing GET nodes for `gets_present`. That will be implemented next on request.
-		return; // stop compilation for now — detection-only phase
+		for (auto &t : check.scanned_non_pac_tables) {
+			if (t == table_in_path) {
+				gets_present.push_back(t);
+				found_get = true;
+				break;
+			}
+		}
+		if (!found_get) {
+			gets_missing.push_back(table_in_path);
+		}
 	}
+}
 
-	// Now we need to find the PAC scan node
-	// Replan the plan without compressed materialization
-	ReplanWithoutOptimizers(input.context, query, plan);
+void ModifyPlanWithoutPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                         const std::vector<std::string> &gets_missing, const std::vector<std::string> &gets_present,
+                         const std::string &privacy_unit, bool use_rowid) {
+}
+
+void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                      const std::vector<std::string> &pks, bool use_rowid) {
+
 	auto pu_scan_ptr = FindPrivacyUnitGetNode(plan);
 	auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
 	if (use_rowid) {
@@ -187,7 +179,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		AddPKColumns(get, pks);
 	}
 
-	// Now we need to edit the aggregate node to use pac_sum
+	// Now we need to edit the aggregate node to use pac functions
 	auto *agg = FindTopAggregate(plan);
 	if (agg->expressions.size() > 1) {
 		throw NotImplementedException("PacBitsliceQuery does not support multiple aggregations!");
@@ -301,6 +293,85 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	agg->expressions[0] = std::move(new_aggr);
 	// Hardcoded for now! Assumes only one aggregate expression (fixme)
 	agg->ResolveOperatorTypes();
+}
+
+void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
+                             unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit,
+                             const std::string &query, const std::string &query_hash) {
+
+#ifdef DEBUG
+	Printer::Print("CompilePacBitsliceQuery called for PU=" + privacy_unit + " hash=" + query_hash);
+#endif
+
+	string path = GetPacCompiledPath(input.context, ".");
+	if (!path.empty() && path.back() != '/') {
+		path.push_back('/');
+	}
+	string filename = path + privacy_unit + "_" + query_hash + "_bitslice.sql";
+
+	// The bitslice compiler works in the following way:
+	// a) the query scans PU table:
+	// a.1) the PU table has 1 PK: we hash it
+	// a.2) the PU table has multiple PKs: we XOR them and hash the result
+	// a.3) the PU table has no PK: we hash rowid
+	// b) the query does not scan PU table:
+	// b.1) we follow the FK path to find the PK(s) of the PU table
+	// b.2) we join the chain of tables from the scanned table to the PU table
+	// b.3) we hash the PK(s) as in a)
+
+	// Example: SELECT group_key, SUM(val) AS sum_val FROM t_single GROUP BY group_key;
+	// Becomes: SELECT group_key, pac_sum(HASH(rowid), val) AS sum_val FROM t_single GROUP BY group_key;
+	// todo- what is MI? what is k?
+
+	bool pu_present_in_tree = false;
+	bool use_rowid = false;
+
+	if (!check.scanned_pac_tables.empty()) {
+		pu_present_in_tree = true;
+	}
+
+	// Case a) query scans PU table (we assume only 1 PAC table for now)
+	std::vector<string> pks;
+	// Build two vectors: present (GETs already in the plan) and missing (GETs to create)
+	std::vector<std::string> gets_present;
+	std::vector<std::string> gets_missing;
+	std::vector<LogicalGet *> new_gets;
+
+	if (pu_present_in_tree) {
+		if (!check.privacy_unit_pks.empty()) {
+			// Has PKs
+			pks = check.privacy_unit_pks.at(check.scanned_pac_tables[0]);
+		} else {
+			use_rowid = true;
+		}
+	} else if (!check.fk_paths.empty()) {
+		// The query does not scan the PU table: we need to follow the FK path
+		string start_table;
+		string target_pu;
+		PopulateGetsFromFKPath(check, path, gets_present, gets_missing, start_table, target_pu);
+
+#ifdef DEBUG
+		Printer::Print("PAC bitslice: FK path detection");
+		Printer::Print("start_table: " + start_table);
+		Printer::Print("target_pu: " + target_pu);
+		Printer::Print("gets_present:");
+		for (auto &g : gets_present)
+			Printer::Print("  " + g);
+		Printer::Print("gets_missing:");
+		for (auto &g : gets_missing)
+			Printer::Print("  " + g);
+#endif
+	}
+
+	// Now we need to find the PAC scan node
+	// Replan the plan without compressed materialization
+	ReplanWithoutOptimizers(input.context, query, plan);
+
+	if (pu_present_in_tree) {
+		ModifyPlanWithPU(input, plan, pks, use_rowid);
+	} else {
+		ModifyPlanWithoutPU(input, plan, gets_missing, gets_present, privacy_unit, use_rowid);
+	}
 
 	plan->ResolveOperatorTypes();
 	plan->Verify(input.context);
