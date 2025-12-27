@@ -11,6 +11,7 @@
 namespace duckdb {
 
 void RegisterPacSumFunctions(ExtensionLoader &loader);
+void RegisterPacAvgFunctions(ExtensionLoader &loader);
 
 // ============================================================================
 // PAC_SUM(hash_key, value)  aggregate function
@@ -145,7 +146,11 @@ struct PacSumIntState {
 	// Use T64 for exact_subtotal64 to handle unsigned values correctly
 	int64_t exact_subtotal8, exact_subtotal16, exact_subtotal32;
 	T64 exact_subtotal64;
+#endif
+	uint64_t exact_count; // total count of values added (for pac_avg)
+	bool seen_null;
 
+#ifndef PAC_SUM_NONCASCADING
 	AUTOVECTORIZE inline void Flush64(T64 value, bool force = false) {
 		T64 new_total = value + exact_subtotal64;
 		bool would_overflow = ((SIGNED && value < 0) ? (new_total > exact_subtotal64) : (new_total < exact_subtotal64));
@@ -213,10 +218,9 @@ struct PacSumIntState {
 		}
 	}
 	void Flush() {
-		Flush8(0ULL, true);
+		Flush8(0LL, true);
 	}
 #endif
-	bool seen_null;
 };
 
 // Double pac_sum state
@@ -228,6 +232,9 @@ struct PacSumDoubleState {
 	double probabilistic_totals[64];
 #ifdef PAC_SUM_FLOAT_CASCADING
 	double exact_subtotal;
+#endif
+	uint64_t exact_count; // total count of values added (for pac_avg)
+	bool seen_null;
 
 	// Cascade constants for float cascading
 	static constexpr double MaxIncrementFloat32 = 1000000.0;
@@ -238,6 +245,7 @@ struct PacSumDoubleState {
 	}
 
 	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
+#ifdef PAC_SUM_FLOAT_CASCADING
 		double raw_subtotal = exact_subtotal + value;
 		bool would_overflow = FloatSubtotalFitsDouble(raw_subtotal, MinIncrementsFloat32);
 		if (would_overflow || force) {
@@ -249,17 +257,14 @@ struct PacSumDoubleState {
 		} else {
 			exact_subtotal = raw_subtotal;
 		}
+#endif
 	}
 
 	void Flush() {
+#ifdef PAC_SUM_FLOAT_CASCADING
 		Flush32(0, true);
-	}
-#else
-	// No-op Flush for compatibility with templated Combine/Finalize
-	void Flush() {
-	}
 #endif
-	bool seen_null;
+	}
 };
 
 } // namespace duckdb

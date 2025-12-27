@@ -1,14 +1,12 @@
 SELECT
     s_name,
-    pac_count(hash(customer.c_custkey)) AS numwait
+    pac_count(hash(orders.o_custkey)) AS numwait
 FROM
     supplier
         JOIN lineitem l1
              ON s_suppkey = l1.l_suppkey
         JOIN orders
              ON o_orderkey = l1.l_orderkey
-        JOIN customer
-             ON orders.o_custkey = customer.c_custkey
         JOIN nation
              ON s_nationkey = n_nationkey
 WHERE

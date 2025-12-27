@@ -2,7 +2,7 @@ SELECT
     n_name AS nation,
     extract(year FROM o_orderdate) AS o_year,
 
-    pac_sum(hash(customer.c_custkey),
+    pac_sum(hash(orders.o_custkey),
             l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity
     ) AS sum_profit
 
@@ -19,8 +19,6 @@ FROM
              ON orders.o_orderkey = lineitem.l_orderkey
         JOIN nation
              ON nation.n_nationkey = supplier.s_nationkey
-        JOIN customer
-             ON orders.o_custkey = customer.c_custkey
 
 WHERE
     part.p_name LIKE '%green%'

@@ -1,12 +1,12 @@
 SELECT
     100.0 * pac_sum(
-            hash(orders.o_orderkey),
+            hash(orders.o_custkey),
             CASE
                 WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount)
                 ELSE 0
                 END
             )
-        / pac_sum(hash(orders.o_orderkey), l_extendedprice * (1 - l_discount)) AS promo_revenue
+        / pac_sum(hash(orders.o_custkey), l_extendedprice * (1 - l_discount)) AS promo_revenue
 FROM
     lineitem
         JOIN part

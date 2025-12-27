@@ -82,8 +82,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
-	// Register pac_sum aggregate functions (moved to pac_sum.cpp)
+	// Register pac_sum/pac_avg aggregate functions (moved to pac_sum.cpp)
 	RegisterPacSumFunctions(loader);
+	RegisterPacAvgFunctions(loader);
 	RegisterPacCountFunctions(loader);
 }
 

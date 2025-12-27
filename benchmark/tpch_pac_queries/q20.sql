@@ -22,13 +22,11 @@ WHERE
             )
           AND ps_availqty > (
             SELECT
-                0.5 * pac_sum(hash(customer.c_custkey), l_quantity)
+                0.5 * pac_sum(hash(orders.o_custkey), l_quantity)
             FROM
                 lineitem
                     JOIN orders
                          ON l_orderkey = o_orderkey
-                    JOIN customer
-                         ON o_custkey = c_custkey
             WHERE
                 l_partkey = ps_partkey
               AND l_suppkey = ps_suppkey

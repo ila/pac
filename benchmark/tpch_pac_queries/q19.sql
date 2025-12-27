@@ -1,13 +1,11 @@
 SELECT
-    pac_sum(hash(customer.c_custkey), l_extendedprice * (1 - l_discount)) AS revenue
+    pac_sum(hash(orders.o_custkey), l_extendedprice * (1 - l_discount)) AS revenue
 FROM
     lineitem
         JOIN part
              ON lineitem.l_partkey = part.p_partkey
         JOIN orders
              ON lineitem.l_orderkey = orders.o_orderkey
-        JOIN customer
-             ON orders.o_custkey = customer.c_custkey
 WHERE
     (
         part.p_brand = 'Brand#12'

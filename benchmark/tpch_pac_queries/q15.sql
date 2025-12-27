@@ -1,13 +1,11 @@
 WITH revenue AS (
     SELECT
         l_suppkey AS supplier_no,
-        pac_sum(hash(customer.c_custkey), l_extendedprice * (1 - l_discount)) AS total_revenue
+        pac_sum(hash(orders.o_custkey), l_extendedprice * (1 - l_discount)) AS total_revenue
     FROM
         lineitem
             JOIN orders
                  ON lineitem.l_orderkey = orders.o_orderkey
-            JOIN customer
-                 ON orders.o_custkey = customer.c_custkey
     WHERE
         l_shipdate >= DATE '1996-01-01'
       AND l_shipdate < DATE '1996-04-01'

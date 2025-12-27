@@ -13,8 +13,7 @@ FROM (
              substring(c_phone FROM 1 FOR 2) IN ('13', '31', '23', '29', '30', '18', '17')
            AND c_acctbal > (
              SELECT
-                 pac_sum(hash(c_custkey), c_acctbal)
-                     / pac_count(hash(c_custkey))  -- AVG over privacy-unit keyed sample
+                 pac_avg(hash(c_custkey), c_acctbal) -- AVG over privacy-unit keyed sample
              FROM
                  customer
              WHERE
