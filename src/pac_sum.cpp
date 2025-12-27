@@ -16,7 +16,12 @@ PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSu
                 ArenaAllocator &allocator) {
 #ifndef PAC_SUM_NONCASCADING
 	// Store allocator pointer for use in Flush/EnsureLevelAllocated methods
-	state.allocator = &allocator;
+	if (!state.allocator) {
+		state.allocator = &allocator;
+#ifdef PAC_SUM_NONLAZY
+		state.InitializeAllLevels(allocator);
+#endif
+	}
 	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
 		state.exact_total8 = state.EnsureLevelAllocated(state.probabilistic_totals8, 8, state.exact_total8);
 		state.Flush8(value, false);
@@ -133,18 +138,17 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 // EXACT_T: exact_total type (pass dummy for level 128 which has no exact_total)
 template <typename BUF_T, typename EXACT_T>
 static inline void CombineLevel(BUF_T *&src_buf, BUF_T *&dst_buf, EXACT_T &src_exact, EXACT_T &dst_exact, idx_t count) {
-	if (!src_buf) {
-		return;
-	}
-	if (!dst_buf) {
-		dst_buf = src_buf;
-		dst_exact = src_exact;
-		src_buf = nullptr;
-	} else {
-		for (idx_t j = 0; j < count; j++) {
-			dst_buf[j] += src_buf[j];
+	if (src_buf) {
+		if (dst_buf) {
+			for (idx_t j = 0; j < count; j++) {
+				dst_buf[j] += src_buf[j];
+			}
+			dst_exact += src_exact;
+		} else {
+			dst_buf = src_buf;
+			dst_exact = src_exact;
+			src_buf = nullptr;
 		}
-		dst_exact += src_exact;
 	}
 }
 
@@ -230,6 +234,7 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 					buf[j] /= divisor;
 				}
 			}
+			// the random counter we choose to read is #42 (but we start counting from 0, so [41])
 			data[offset + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
 		}
 	}
@@ -374,8 +379,6 @@ static idx_t PacSumIntStateSize(const AggregateFunction &) {
 static void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(PacSumIntState<true>)); // memset to 0 works for both signed and unsigned
 }
-
-// No destructor needed - arena allocator handles cleanup automatically
 
 static idx_t PacSumDoubleStateSize(const AggregateFunction &) {
 	return sizeof(PacSumDoubleState);

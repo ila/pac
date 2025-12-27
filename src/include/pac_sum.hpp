@@ -26,7 +26,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // we rewrite into SIMD-friendly multiplication FOR(i=0;i<64;i++) totals[i]+=keybit[i]*val),
 //
 // mimicking what DuckDB's SUM() normally does, we have the following cases:
-// 1) integers: PAC_SUM(key_hash, [U](BIG||SMALL|TINY)INT) -> HUGEINT
+// 1) integers: PAC_SUM(key_hash, HUGEINT | [U](BIG||SMALL|TINY)INT) -> HUGEINT
 //              We keep sub-totals8/16/32/64 and uint128_t totals and sum each value in smallest subtotal that fits.
 //              We ensure "things fit" by flushing totalsX into the next wider total every 2^bX additions, and only
 //              by allowing values to be added into totalsX if they have the highest bX bits unset, so overflow cannot
@@ -35,11 +35,25 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 //              In Finalize() the noised result is computed from totals[]
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
 //              Accumulates directly into double[64] totals using AddToTotalsSimple.
-// 3) huge-int: PAC_SUM(key_hash, [U]HUGEINT) -> DOUBLE
-//              DuckDB produces DOUBLE outcomes for 128-bits integer sums, so we do as well.
+// 3) hugeint:  PAC_SUM(key_hash, UHUGEINT) -> DOUBLE
+//              DuckDB produces DOUBLE outcomes for unsigned 128-bits integer sums, so we do as well.
 //              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
+//
+// for DECIMAL types, we look at binding time which physical type is used and choose a relevant integer type.
+//
+// we also implement PAC_AVG(key_hash, value) with the same implementation functions as PAC_SUM(). To keep the
+// code simple, we added an exact_counter also to PAC_SUM(). The only difference is that in the Finalize() for
+// PAC_AVG() we divide the counter numbers by this exact_counter first.
+//
+// The cascading counter state can be quite large: ~2KB per aggregate resultr value. In aggregations with very many
+// distinct GROUP BY values (and relatively modest sums, therefore), the bigger counters are often not needed.
+// Therefore, we allocate counters lazily now: only when say 8-bits counters overflow we allocate the 16-bits counters
+// This optimization can reduce the memory footprint by 2-8x, which can help in avoiding spilling.
 
+// for benchmarking/reproducibility purposes, we can disable cascading counters (just sum directly to the largest tyoe)
+// and in cascading mode we can still use eager memory allocation.
 //#define PAC_SUM_NONCASCADING 1 // seems 10x slower on Apple
+//#define PAC_SUM_NONLAZY 1  // Pre-allocate all levels at initialization
 
 // Float cascading: accumulate in float subtotals, periodically flush to double totals
 // Only beneficial on x86 which has variable-shift SIMD (vpsrlvq). ARM lacks this and
@@ -208,8 +222,9 @@ struct PacSumIntState {
 		T64 new_total = value + exact_total64;
 		bool would_overflow = CHECK_BOUNDS_64(new_total, value, exact_total64);
 		if (would_overflow || (force && probabilistic_totals128)) {
-			if (would_overflow)
+			if (would_overflow) {
 				EnsureLevelAllocated(probabilistic_totals128, idx_t(64));
+			}
 			Cascade64To128();
 			exact_total64 = value;
 		} else {
@@ -223,8 +238,9 @@ struct PacSumIntState {
 		int64_t new_total = value + exact_total32;
 		bool would_overflow = CHECK_BOUNDS_32(new_total);
 		if (would_overflow || (force && probabilistic_totals64)) {
-			if (would_overflow)
+			if (would_overflow) {
 				exact_total64 = EnsureLevelAllocated(probabilistic_totals64, 64, exact_total64);
+			}
 			CascadeToNextLevel<T32, T64, 32, 64>(probabilistic_totals32, probabilistic_totals64);
 			memset(probabilistic_totals32, 0, 32 * sizeof(uint64_t));
 			Flush64(exact_total32, force);
@@ -240,8 +256,9 @@ struct PacSumIntState {
 		int64_t new_total = value + exact_total16;
 		bool would_overflow = CHECK_BOUNDS_16(new_total);
 		if (would_overflow || (force && probabilistic_totals32)) {
-			if (would_overflow)
+			if (would_overflow) {
 				exact_total32 = EnsureLevelAllocated(probabilistic_totals32, 32, exact_total32);
+			}
 			CascadeToNextLevel<T16, T32, 16, 32>(probabilistic_totals16, probabilistic_totals32);
 			memset(probabilistic_totals16, 0, 16 * sizeof(uint64_t));
 			Flush32(exact_total16, force);
@@ -257,8 +274,9 @@ struct PacSumIntState {
 		int64_t new_total = value + exact_total8;
 		bool would_overflow = CHECK_BOUNDS_8(new_total);
 		if (would_overflow || (force && probabilistic_totals16)) {
-			if (would_overflow)
+			if (would_overflow) {
 				exact_total16 = EnsureLevelAllocated(probabilistic_totals16, 16, exact_total16);
+			}
 			CascadeToNextLevel<T8, T16, 8, 16>(probabilistic_totals8, probabilistic_totals16);
 			memset(probabilistic_totals8, 0, 8 * sizeof(uint64_t));
 			Flush16(exact_total8, force);
@@ -305,6 +323,16 @@ struct PacSumIntState {
 			// No data allocated - return zeros
 			memset(dst, 0, 64 * sizeof(double));
 		}
+	}
+
+	// Pre-allocate all levels (for NONLAZY mode)
+	void InitializeAllLevels(ArenaAllocator &alloc) {
+		allocator = &alloc;
+		EnsureLevelAllocated(probabilistic_totals8, 8);
+		EnsureLevelAllocated(probabilistic_totals16, 16);
+		EnsureLevelAllocated(probabilistic_totals32, 32);
+		EnsureLevelAllocated(probabilistic_totals64, 64);
+		EnsureLevelAllocated(probabilistic_totals128, idx_t(64));
 	}
 #endif
 };

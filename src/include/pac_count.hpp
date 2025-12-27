@@ -41,10 +41,25 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 //
 // MEMORY OPTIMIZATION: We use lazy allocation with cascading levels (8->16->32->64 bits) to reduce
 // memory footprint. For small counts (< 255), only 64 bytes are needed instead of 576+ bytes.
+// Define PAC_COUNT_NONCASCADING to use simple fixed uint64_t[64] counters instead.
 
-// State for pac_count: lazily allocated cascading counters
+//#define PAC_COUNT_NONCASCADING 1
+//#define PAC_COUNT_NONLAZY 1  // Pre-allocate all levels at initialization
+
+// State for pac_count: lazily allocated cascading counters (or fixed array if NONCASCADING)
 // Uses ArenaAllocator for memory management - arena handles cleanup when aggregate completes.
 struct PacCountState {
+#ifdef PAC_COUNT_NONCASCADING
+	// Simple fixed array of 64 counters
+	uint64_t probabilistic_totals[64];
+
+	// NONCASCADING: dummy methods for uniform interface
+	void Flush() {
+	} // no-op
+	void GetTotalsAsDouble(double *dst) const {
+		ToDoubleArray(probabilistic_totals, dst);
+	}
+#else
 	// Pointer to DuckDB's arena allocator (set during first update)
 	ArenaAllocator *allocator;
 
@@ -174,25 +189,15 @@ struct PacCountState {
 		}
 	}
 
-	// Get a specific counter value (for the final result, we use counter 41)
-	uint64_t GetCounter(int idx) const {
-		if (probabilistic_totals64) {
-			return probabilistic_totals64[idx];
-		} else if (probabilistic_totals32) {
-			const uint32_t *packed = reinterpret_cast<const uint32_t *>(probabilistic_totals32);
-			int src_idx = (idx % 32) * 2 + (idx / 32);
-			return packed[src_idx];
-		} else if (probabilistic_totals16) {
-			const uint16_t *packed = reinterpret_cast<const uint16_t *>(probabilistic_totals16);
-			int src_idx = (idx % 16) * 4 + (idx / 16);
-			return packed[src_idx];
-		} else if (probabilistic_totals8) {
-			const uint8_t *packed = reinterpret_cast<const uint8_t *>(probabilistic_totals8);
-			int src_idx = (idx % 8) * 8 + (idx / 8);
-			return packed[src_idx];
-		}
-		return 0;
+	// Pre-allocate all levels (for NONLAZY mode)
+	void InitializeAllLevels(ArenaAllocator &alloc) {
+		allocator = &alloc;
+		EnsureLevelAllocated(probabilistic_totals8, 8);
+		EnsureLevelAllocated(probabilistic_totals16, 16);
+		EnsureLevelAllocated(probabilistic_totals32, 32);
+		EnsureLevelAllocated(probabilistic_totals64, 64);
 	}
+#endif
 };
 
 } // namespace duckdb

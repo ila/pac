@@ -38,11 +38,23 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 	memset(state_ptr, 0, sizeof(PacCountState));
 }
 
+#ifdef PAC_COUNT_NONCASCADING
+AUTOVECTORIZE static inline void // worker function that probabilistically counts one hash into 64 counters
+PacCountUpdateHash(uint64_t key_hash, PacCountState &state) {
+	// Direct update to uint64_t[64] counters
+	for (int j = 0; j < 64; j++) {
+		state.probabilistic_totals[j] += (key_hash >> j) & 1ULL;
+	}
+}
+#else
 AUTOVECTORIZE static inline void // worker function that probabilistically counts one hash into 64 subtotals
 PacCountUpdateHash(uint64_t key_hash, PacCountState &state, ArenaAllocator &allocator) {
 	// Ensure allocator is set and level8 is allocated
 	if (!state.allocator) {
 		state.allocator = &allocator;
+#ifdef PAC_COUNT_NONLAZY
+		state.InitializeAllLevels(allocator);
+#endif
 	}
 	if (!state.probabilistic_totals8) {
 		state.EnsureLevelAllocated(state.probabilistic_totals8, 8);
@@ -54,7 +66,79 @@ PacCountUpdateHash(uint64_t key_hash, PacCountState &state, ArenaAllocator &allo
 	}
 	state.Flush8(1, false); // increment exact_total8 by 1, flush if needed
 }
+#endif
 
+#ifdef PAC_COUNT_NONCASCADING
+AUTOVECTORIZE static inline void // worker function that probabilistically counts one tuple into 64 counters
+PacCountUpdateOne(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state) {
+	auto idx = idata.sel->get_index(i);
+	if (idata.validity.RowIsValid(idx)) {
+		PacCountUpdateHash(input_data[idx], state);
+	}
+}
+
+void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
+	D_ASSERT(input_count == 1 || input_count == 2); // optional mi param (unused here) can make it 2
+	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
+
+	UnifiedVectorFormat idata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
+	for (idx_t i = 0; i < count; i++) {
+		PacCountUpdateOne(idata, i, input_data, state);
+	}
+}
+
+void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	UnifiedVectorFormat idata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
+	UnifiedVectorFormat sdata;
+	states.ToUnifiedFormat(count, sdata);
+
+	auto state_p = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
+	for (idx_t i = 0; i < count; i++) {
+		PacCountUpdateOne(idata, i, input_data, *state_p[sdata.sel->get_index(i)]);
+	}
+}
+
+// Column-based update: counts non-null values in the column
+void PacCountColumnUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
+	D_ASSERT(input_count >= 2); // hash + column (+ optional mi)
+	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
+
+	UnifiedVectorFormat hash_data, col_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, col_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto c_idx = col_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
+			PacCountUpdateHash(hashes[h_idx], state);
+		}
+	}
+}
+
+void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+	UnifiedVectorFormat hash_data, col_data, sdata;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, col_data);
+	states.ToUnifiedFormat(count, sdata);
+
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto state_p = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto c_idx = col_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
+			PacCountUpdateHash(hashes[h_idx], *state_p[sdata.sel->get_index(i)]);
+		}
+	}
+}
+#else
 AUTOVECTORIZE static inline void // worker function that probabilistically counts one tuple into 64 subtotals
 PacCountUpdateOne(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state,
                   ArenaAllocator &allocator) {
@@ -126,7 +210,19 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 		}
 	}
 }
+#endif
 
+#ifdef PAC_COUNT_NONCASCADING
+AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
+	auto src_state = FlatVector::GetData<PacCountState *>(src);
+	auto dst_state = FlatVector::GetData<PacCountState *>(dst);
+	for (idx_t i = 0; i < count; i++) {
+		for (int j = 0; j < 64; j++) {
+			dst_state[i]->probabilistic_totals[j] += src_state[i]->probabilistic_totals[j];
+		}
+	}
+}
+#else
 // Helper to combine one level of counters (moves source pointer ownership to dest if dest is null)
 template <typename T>
 static inline void CombineLevel(uint64_t *&src_buf, uint64_t *&dst_buf, uint32_t &src_exact, uint32_t &dst_exact,
@@ -192,6 +288,7 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 		CombineLevel64(s->probabilistic_totals64, d->probabilistic_totals64);
 	}
 }
+#endif
 
 void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state = FlatVector::GetData<PacCountState *>(states);
