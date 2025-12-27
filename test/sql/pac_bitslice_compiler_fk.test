@@ -1,0 +1,61 @@
+# name: test/sql/pac_bitslice_compiler_fk.test
+# description: Test GROUP BY aggregation on a non-privacy-unit table that references a PU table via PK-FK
+# group: [sql]
+
+require pac
+
+# Create PU table (primary key) and a non-PU table referencing it via FK
+statement ok
+CREATE TABLE bitslice_fk_pu(
+    id INTEGER PRIMARY KEY,
+    meta INTEGER
+);
+
+statement ok
+CREATE TABLE bitslice_fk_child(
+    id INTEGER PRIMARY KEY,
+    pu_id INTEGER REFERENCES bitslice_fk_pu(id),
+    grp INTEGER,
+    val INTEGER
+);
+
+# Insert 25 rows into PU (ids 0..4 repeated relations)
+statement ok
+INSERT INTO bitslice_fk_pu
+SELECT i AS id, (i % 7) AS meta
+FROM range(5) t(i);
+
+statement ok
+INSERT INTO bitslice_fk_child
+SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
+statement ok
+pRAGMA add_pac_privacy_unit('bitslice_fk_pu');
+
+statement ok
+set pac_seed = 42;
+
+# Single GROUP BY query on the non-PU table (grp, SUM(val))
+query II
+SELECT grp, SUM(val)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Cleanup
+statement ok
+PRAGMA remove_pac_privacy_unit('bitslice_fk_pu');
+
+statement ok
+DROP TABLE bitslice_fk_child
+
+statement ok
+DROP TABLE bitslice_fk_pu
+
