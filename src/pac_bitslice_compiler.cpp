@@ -84,9 +84,25 @@ void AddPKColumns(LogicalGet &get, const std::vector<std::string> &pks) {
 }
 
 unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &check, ClientContext &context,
-                                              unique_ptr<LogicalGet> left, unique_ptr<LogicalGet> right) {
+                                              unique_ptr<LogicalOperator> left_operator, unique_ptr<LogicalGet> right) {
 	// Simpler join builder: use precomputed metadata only. Find FK(s) on one side that reference
 	// the other's table; pair FK columns to PK columns and produce equality JoinCondition(s).
+
+	// The left logical operator can be a GET or another JOIN
+	LogicalGet *left = nullptr;
+	if (left_operator->type == LogicalOperatorType::LOGICAL_GET) {
+		left = &left_operator->Cast<LogicalGet>();
+	} else if (left_operator->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		// We extract the table from the right side of the join
+		if (left_operator->children.size() != 2 ||
+		    left_operator->children[1]->type != LogicalOperatorType::LOGICAL_GET) {
+			throw InternalException("PAC compiler: expected right child of left join to be LogicalGet");
+		}
+		left = &left_operator->children[1]->Cast<LogicalGet>();
+	} else {
+		throw InternalException("PAC compiler: expected left node to be LogicalGet or LogicalComparisonJoin");
+	}
+
 	auto left_table_ptr = left->GetTable();
 	auto right_table_ptr = right->GetTable();
 	if (!left_table_ptr || !right_table_ptr) {
@@ -153,7 +169,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 				                            " -> " + right_table_name);
 			}
 			for (size_t i = 0; i < left_fk_cols.size(); ++i) {
-				idx_t lproj = ensure_proj_idx(left.get(), left_fk_cols[i]);
+				idx_t lproj = ensure_proj_idx(left, left_fk_cols[i]);
 				idx_t rproj = ensure_proj_idx(right.get(), right_pks[i]);
 				if (lproj == DConstants::INVALID_INDEX || rproj == DConstants::INVALID_INDEX) {
 					throw InternalException("PAC compiler: failed to project FK/PK columns for join");
@@ -184,7 +200,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 				}
 				for (size_t i = 0; i < right_fk_cols.size(); ++i) {
 					// pair left PK with right FK
-					idx_t lproj = ensure_proj_idx(left.get(), left_pks[i]);
+					idx_t lproj = ensure_proj_idx(left, left_pks[i]);
 					idx_t rproj = ensure_proj_idx(right.get(), right_fk_cols[i]);
 					if (lproj == DConstants::INVALID_INDEX || rproj == DConstants::INVALID_INDEX) {
 						throw InternalException("PAC compiler: failed to project FK/PK columns for join");
@@ -211,7 +227,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	}
 
 	vector<unique_ptr<Expression>> extra;
-	return LogicalComparisonJoin::CreateJoin(context, JoinType::INNER, JoinRefType::REGULAR, std::move(left),
+	return LogicalComparisonJoin::CreateJoin(context, JoinType::INNER, JoinRefType::REGULAR, std::move(left_operator),
 	                                         std::move(right), std::move(conditions), std::move(extra));
 }
 
@@ -307,6 +323,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 	// Create the necessary LogicalGets for missing tables
 	std::unordered_map<std::string, unique_ptr<LogicalGet>> get_map;
+	// Preserve creation order: store raw pointers (ownership kept in get_map) in this vector
+	std::vector<LogicalGet *> ordered_gets;
 	for (auto &table : gets_missing) {
 		auto it = check.table_metadata.find(table);
 		if (it == check.table_metadata.end()) {
@@ -314,19 +332,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		}
 		std::vector<std::string> pks = it->second.pks;
 		auto get = CreateLogicalGet(input.context, plan, table, pks);
+		// store in map (ownership) and record pointer to preserve order
 		get_map[table] = std::move(get);
-	}
-
-	// If there are no missing gets, nothing to do
-	if (gets_missing.empty()) {
-		return;
-	}
-
-	// For simplicity (common case) we only support joining a single missing GET to an existing GET
-	if (gets_missing.size() > 1) {
-		throw NotImplementedException(
-		    "PAC compiler: ModifyPlanWithoutPU currently supports only a single missing GET (found " +
-		    to_string(gets_missing.size()) + ")");
+		ordered_gets.push_back(get_map[table].get());
 	}
 
 	// Find the unique_ptr reference to the existing LogicalGet for gets_present[0]
@@ -366,36 +374,55 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		                        (gets_present.empty() ? std::string("<none>") : gets_present[0]));
 	}
 
-	// Move out the existing node and create a join with the missing get
+	// We create the joins in this order:
+	// the PU joins with ordered_gets[0], then this join node joins with ordered_gets[1], ...
+	unique_ptr<LogicalOperator> final_join;
 	unique_ptr<LogicalOperator> existing_node = (*target_ref)->Copy(input.context);
-	if (!existing_node) {
-		throw InternalException("PAC compiler: unexpected null node while extracting existing GET");
-	}
-	if (existing_node->type != LogicalOperatorType::LOGICAL_GET) {
-		throw InternalException("PAC compiler: expected a LogicalGet when extracting existing GET");
-	}
-	unique_ptr<LogicalGet> left_get(static_cast<LogicalGet *>(existing_node.release()));
 
-	auto it = get_map.find(gets_missing[0]);
-	if (it == get_map.end()) {
-		throw InternalException("PAC compiler: created GET for missing table not found in get_map");
+	// To safely transfer ownership from get_map (which stores unique_ptr<LogicalGet>),
+	// extract the ordered table names first so we don't rely on pointers that will be released.
+	vector<string> ordered_table_names;
+	ordered_table_names.reserve(ordered_gets.size());
+	for (auto g : ordered_gets) {
+		ordered_table_names.push_back(g->GetTable()->name);
 	}
-	unique_ptr<LogicalGet> right_get = std::move(it->second);
-	auto pu_op = right_get->Copy(input.context);
-	auto pu_get = dynamic_cast<LogicalGet *>(pu_op.get());
+
+	for (size_t i = 0; i < ordered_table_names.size(); ++i) {
+		auto &tbl_name = ordered_table_names[i];
+		// move the LogicalGet from get_map into a unique_ptr<LogicalGet>
+		unique_ptr<LogicalGet> right_op(nullptr);
+		right_op.reset(get_map[tbl_name].release());
+
+		if (i == 0) {
+			auto join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
+			final_join = std::move(join);
+		} else {
+			auto join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
+			final_join = std::move(join);
+		}
+	}
+
+	// Use ReplaceNode to insert the join and handle column binding remapping
+	ReplaceNode(plan, *target_ref, final_join);
+#if DEBUG
+	plan->Print();
+
+#endif
+
+	// Locate the privacy-unit LogicalGet we just inserted (so we can reference its projections)
+	unique_ptr<LogicalOperator> *pu_ref = nullptr;
+	if (!privacy_unit.empty()) {
+		pu_ref = find_node_ref(&plan, privacy_unit);
+	}
+	if (!pu_ref || !pu_ref->get()) {
+		throw InternalException("PAC compiler: could not find LogicalGet for privacy unit " + privacy_unit);
+	}
+	auto pu_get = &pu_ref->get()->Cast<LogicalGet>();
 
 	vector<string> pu_pks;
 	for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
 		pu_pks.push_back(pk);
 	}
-
-	auto join_node = CreateLogicalJoin(check, input.context, std::move(left_get), std::move(right_get));
-
-	// Use ReplaceNode to insert the join and handle column binding remapping
-	ReplaceNode(plan, *target_ref, join_node);
-#if DEBUG
-	plan->Print();
-#endif
 
 	// Now we need to edit the aggregate node to use pac functions
 	auto *agg = FindTopAggregate(plan);

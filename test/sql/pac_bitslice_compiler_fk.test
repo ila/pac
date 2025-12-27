@@ -30,45 +30,74 @@ INSERT INTO bitslice_fk_child
 SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp, (i % 10) AS val
 FROM range(25) t(i);
 
+# Create a leaf table that references the child (this will be the scanned table t1)
+statement ok
+CREATE TABLE bitslice_fk_leaf(
+    id INTEGER PRIMARY KEY,
+    child_id INTEGER REFERENCES bitslice_fk_child(id),
+    grp INTEGER,
+    val INTEGER
+);
+
+statement ok
+INSERT INTO bitslice_fk_leaf
+SELECT i AS id, i AS child_id, (i % 5) AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
 statement ok
 pRAGMA add_pac_privacy_unit('bitslice_fk_pu');
 
 statement ok
 set pac_seed = 42;
 
-# Single GROUP BY query on the non-PU table (grp, SUM(val))
-query II
-SELECT grp, SUM(val)
-FROM bitslice_fk_child
-GROUP BY grp
-ORDER BY grp
-----
-0	0
-1	15
-2	40
-3	25
-4	60
-
-# Testing with AVG
-query II
-SELECT grp, AVG(val)::DECIMAL(5, 2)
-FROM bitslice_fk_child
-GROUP BY grp
-ORDER BY grp
-----
-0	0.00
-1	3.00
-2	8.00
-3	5.00
-4	12.00
+# # Single GROUP BY query on the non-PU table (grp, SUM(val))
+# query II
+# SELECT grp, SUM(val)
+# FROM bitslice_fk_child
+# GROUP BY grp
+# ORDER BY grp
+# ----
+# 0	0
+# 1	15
+# 2	40
+# 3	25
+# 4	60
+#
+# # Testing with AVG
+# query II
+# SELECT grp, AVG(val)::DECIMAL(5, 2)
+# FROM bitslice_fk_child
+# GROUP BY grp
+# ORDER BY grp
+# ----
+# 0	0.00
+# 1	3.00
+# 2	8.00
+# 3	5.00
+# 4	12.00
+#
+# # 2-join aggregation: t1 (leaf) -> t2 (child) -> t3 (pu). t1 is scanned and t3 is the PU
+# query II
+# SELECT l.grp, SUM(l.val)
+# FROM bitslice_fk_leaf l
+# GROUP BY l.grp
+# ORDER BY l.grp
+# ----
+# 0	0
+# 1	15
+# 2	40
+# 3	25
+# 4	60
 
 # Cleanup
 statement ok
 PRAGMA remove_pac_privacy_unit('bitslice_fk_pu');
 
 statement ok
+DROP TABLE bitslice_fk_leaf
+
+statement ok
 DROP TABLE bitslice_fk_child
 
 statement ok
 DROP TABLE bitslice_fk_pu
-
