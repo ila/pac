@@ -39,22 +39,32 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 }
 
 AUTOVECTORIZE static inline void // worker function that probabilistically counts one hash into 64 subtotals
-PacCountUpdateHash(uint64_t key_hash, PacCountState &state) {
-	for (int j = 0; j < 8; j++) {
-		state.probabilistic_subtotals[j] += (key_hash >> j) & PAC_COUNT_MASK;
+PacCountUpdateHash(uint64_t key_hash, PacCountState &state, ArenaAllocator &allocator) {
+	// Ensure allocator is set and level8 is allocated
+	if (!state.allocator) {
+		state.allocator = &allocator;
 	}
-	state.Flush();
+	if (!state.probabilistic_totals8) {
+		state.EnsureLevelAllocated(state.probabilistic_totals8, 8);
+	}
+
+	// Add to SWAR-packed uint8 counters
+	for (int j = 0; j < 8; j++) {
+		state.probabilistic_totals8[j] += (key_hash >> j) & PAC_COUNT_MASK;
+	}
+	state.Flush8(1, false); // increment exact_total8 by 1, flush if needed
 }
 
 AUTOVECTORIZE static inline void // worker function that probabilistically counts one tuple into 64 subtotals
-PacCountUpdateOne(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state) {
+PacCountUpdateOne(const UnifiedVectorFormat &idata, idx_t i, const uint64_t *input_data, PacCountState &state,
+                  ArenaAllocator &allocator) {
 	auto idx = idata.sel->get_index(i);
 	if (idata.validity.RowIsValid(idx)) {
-		PacCountUpdateHash(input_data[idx], state);
+		PacCountUpdateHash(input_data[idx], state, allocator);
 	}
 }
 
-void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
+void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
 	D_ASSERT(input_count == 1 || input_count == 2); // optional mi param (unused here) can make it 2
 	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
 
@@ -62,11 +72,11 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, da
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
 	for (idx_t i = 0; i < count; i++) {
-		PacCountUpdateOne(idata, i, input_data, state);
+		PacCountUpdateOne(idata, i, input_data, state, aggr.allocator);
 	}
 }
 
-void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
@@ -75,12 +85,13 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector 
 
 	auto state_p = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
 	for (idx_t i = 0; i < count; i++) {
-		PacCountUpdateOne(idata, i, input_data, *state_p[sdata.sel->get_index(i)]);
+		PacCountUpdateOne(idata, i, input_data, *state_p[sdata.sel->get_index(i)], aggr.allocator);
 	}
 }
 
 // Column-based update: counts non-null values in the column
-void PacCountColumnUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, data_ptr_t state_ptr, idx_t count) {
+void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, data_ptr_t state_ptr,
+                          idx_t count) {
 	D_ASSERT(input_count >= 2); // hash + column (+ optional mi)
 	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
 
@@ -90,15 +101,15 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &, idx_t input_cou
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 
 	for (idx_t i = 0; i < count; i++) {
-		auto hash_idx = hash_data.sel->get_index(i);
-		auto col_idx = col_data.sel->get_index(i);
-		if (hash_data.validity.RowIsValid(hash_idx) && col_data.validity.RowIsValid(col_idx)) {
-			PacCountUpdateHash(hashes[hash_idx], state);
+		auto h_idx = hash_data.sel->get_index(i);
+		auto c_idx = col_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
+			PacCountUpdateHash(hashes[h_idx], state, aggr.allocator);
 		}
 	}
 }
 
-void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states, idx_t count) {
+void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	UnifiedVectorFormat hash_data, col_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -108,22 +119,77 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, V
 	auto state_p = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
 
 	for (idx_t i = 0; i < count; i++) {
-		auto hash_idx = hash_data.sel->get_index(i);
-		auto col_idx = col_data.sel->get_index(i);
-		if (hash_data.validity.RowIsValid(hash_idx) && col_data.validity.RowIsValid(col_idx)) {
-			PacCountUpdateHash(hashes[hash_idx], *state_p[sdata.sel->get_index(i)]);
+		auto h_idx = hash_data.sel->get_index(i);
+		auto c_idx = col_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
+			PacCountUpdateHash(hashes[h_idx], *state_p[sdata.sel->get_index(i)], aggr.allocator);
 		}
 	}
 }
 
-AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
+// Helper to combine one level of counters (moves source pointer ownership to dest if dest is null)
+template <typename T>
+static inline void CombineLevel(uint64_t *&src_buf, uint64_t *&dst_buf, uint32_t &src_exact, uint32_t &dst_exact,
+                                int count) {
+	if (!src_buf) {
+		return; // nothing to combine
+	}
+	if (!dst_buf) {
+		// Move ownership from src to dst
+		dst_buf = src_buf;
+		dst_exact = src_exact;
+		src_buf = nullptr;
+		src_exact = 0;
+		return;
+	}
+	// Both have data - add element by element
+	T *src = reinterpret_cast<T *>(src_buf);
+	T *dst = reinterpret_cast<T *>(dst_buf);
+	for (int i = 0; i < 64; i++) {
+		dst[i] += src[i];
+	}
+	dst_exact += src_exact;
+}
+
+// Overload for uint64_t level (no exact_total needed)
+static inline void CombineLevel64(uint64_t *&src_buf, uint64_t *&dst_buf) {
+	if (!src_buf) {
+		return;
+	}
+	if (!dst_buf) {
+		dst_buf = src_buf;
+		src_buf = nullptr;
+		return;
+	}
+	for (int i = 0; i < 64; i++) {
+		dst_buf[i] += src_buf[i];
+	}
+}
+
+AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	auto src_state = FlatVector::GetData<PacCountState *>(src);
 	auto dst_state = FlatVector::GetData<PacCountState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
-		src_state[i]->Flush(true); // force flush source before reading from it
-		for (int j = 0; j < 64; j++) {
-			dst_state[i]->probabilistic_totals[j] += src_state[i]->probabilistic_totals[j];
+		auto *s = src_state[i];
+		auto *d = dst_state[i];
+
+		// Flush source to ensure all data is cascaded up
+		s->Flush();
+
+		// Ensure dst has allocator pointer
+		if (!d->allocator) {
+			d->allocator = &aggr.allocator;
 		}
+
+		// Combine at each level
+		CombineLevel<uint8_t>(s->probabilistic_totals8, d->probabilistic_totals8, s->exact_total8, d->exact_total8, 8);
+		CombineLevel<uint16_t>(s->probabilistic_totals16, d->probabilistic_totals16, s->exact_total16, d->exact_total16,
+		                       16);
+		uint32_t src32 = static_cast<uint32_t>(s->exact_total32);
+		uint32_t dst32 = static_cast<uint32_t>(d->exact_total32);
+		CombineLevel<uint32_t>(s->probabilistic_totals32, d->probabilistic_totals32, src32, dst32, 32);
+		d->exact_total32 = dst32;
+		CombineLevel64(s->probabilistic_totals64, d->probabilistic_totals64);
 	}
 }
 
@@ -136,11 +202,11 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 
 	for (idx_t i = 0; i < count; i++) {
-		state[i]->Flush(true); // force flush any remaining small totals into the big totals
+		state[i]->Flush(); // force flush any remaining small totals into the big totals
 		double buf[64];
-		ToDoubleArray(state[i]->probabilistic_totals, buf); // Convert uint64_t totals64 to double array
+		state[i]->GetTotalsAsDouble(buf);
 		data[offset + i] = // when choosing any one of the totals we go for #42 (but one counts from 0 ofc)
-		    static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen)) + state[i]->probabilistic_totals[41];
+		    static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen)) + static_cast<int64_t>(buf[41]);
 	}
 }
 

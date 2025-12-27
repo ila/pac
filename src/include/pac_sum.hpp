@@ -51,7 +51,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
 // This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
 template <typename ACCUM_T, typename VALUE_T>
-AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *totals, VALUE_T value, uint64_t key_hash) {
+AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *__restrict__ totals, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
 		totals[j] += v * static_cast<ACCUM_T>((key_hash >> j) & 1ULL);
@@ -76,7 +76,7 @@ AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *totals, VALUE_T valu
 // MASK: broadcast mask (one bit per element, e.g., 0x0101010101010101 for 8-bit)
 // VALUE_T: input value type
 template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_T>
-AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *totals, VALUE_T value, uint64_t key_hash) {
+AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *__restrict__ totals, VALUE_T value, uint64_t key_hash) {
 	constexpr int BITS = sizeof(SIGNED_T) * 8;
 	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
@@ -122,8 +122,13 @@ AUTOVECTORIZE static inline void AddToTotalsFloat(float *totals, float value, ui
 #define CHECK_BOUNDS_32(val) ((val > (SIGNED ? INT32_MAX : UINT32_MAX)) || (SIGNED && (val < INT32_MIN)))
 #define CHECK_BOUNDS_16(val) ((val > (SIGNED ? INT16_MAX : UINT16_MAX)) || (SIGNED && (val < INT16_MIN)))
 #define CHECK_BOUNDS_8(val)  ((val > (SIGNED ? INT8_MAX : UINT8_MAX)) || (SIGNED && (val < INT8_MIN)))
+// 64-bit: detect wrap-around (int64_t can't exceed bounds, so check if addition wrapped)
+#define CHECK_BOUNDS_64(new_total, value, exact_total)                                                                 \
+	((SIGNED && (value) < 0) ? ((new_total) > (exact_total)) : ((new_total) < (exact_total)))
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
+// Uses lazy allocation via DuckDB's ArenaAllocator for memory management.
+// Arena handles cleanup automatically when aggregate operation completes.
 template <bool SIGNED>
 struct PacSumIntState {
 	// Type aliases based on signedness
@@ -133,92 +138,173 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
 #ifndef PAC_SUM_NONCASCADING
-	// All levels use SWAR packed format: uint64_t arrays holding packed values
-	// subtotals_X[i] holds counters for bits i, i+X, i+2*X, ... (interleaved layout)
-	uint64_t subtotals8[8];   // 8 x uint64_t, each holds 8 packed T8
-	uint64_t subtotals16[16]; // 16 x uint64_t, each holds 4 packed T16
-	uint64_t subtotals32[32]; // 32 x uint64_t, each holds 2 packed T32
-	uint64_t subtotals64[64]; // 64 x uint64_t, each holds 1 T64
+	// Pointer to DuckDB's arena allocator (set during first update)
+	ArenaAllocator *allocator;
+
+	// All levels lazily allocated via arena allocator (nullptr if not allocated)
+	uint64_t *probabilistic_totals8;    // 8 x uint64_t (64 bytes) when allocated, each holds 8 packed T8
+	uint64_t *probabilistic_totals16;   // 16 x uint64_t (128 bytes) when allocated, each holds 4 packed T16
+	uint64_t *probabilistic_totals32;   // 32 x uint64_t (256 bytes) when allocated, each holds 2 packed T32
+	uint64_t *probabilistic_totals64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
+	hugeint_t *probabilistic_totals128; // 64 x hugeint_t (1024 bytes) when allocated
+#else
+	hugeint_t probabilistic_totals128[64]; // final totals (non-cascading mode only)
 #endif
-	hugeint_t probabilistic_totals[64]; // final totals, want last for sequential cache access
 #ifndef PAC_SUM_NONCASCADING
 	// these hold the exact subtotal of each aggregation level, we flush once we see this overflow
-	// Use T64 for exact_subtotal64 to handle unsigned values correctly
-	int64_t exact_subtotal8, exact_subtotal16, exact_subtotal32;
-	T64 exact_subtotal64;
+	T64 exact_total8, exact_total16, exact_total32, exact_total64;
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
 	bool seen_null;
 
-#ifndef PAC_SUM_NONCASCADING
-	AUTOVECTORIZE inline void Flush64(T64 value, bool force = false) {
-		T64 new_total = value + exact_subtotal64;
-		bool would_overflow = ((SIGNED && value < 0) ? (new_total > exact_subtotal64) : (new_total < exact_subtotal64));
-		if (would_overflow || force) {
-			const T64 *src = reinterpret_cast<const T64 *>(subtotals64);
-			for (int i = 0; i < 64; i++) {
-				probabilistic_totals[i] += Hugeint::Convert(src[i]); // Use Convert for correct uint64_t handling
-			}
-			memset(subtotals64, 0, sizeof(subtotals64));
-			exact_subtotal64 = value;
-		} else {
-			exact_subtotal64 = new_total;
-		}
-	}
-	AUTOVECTORIZE inline void Flush32(int64_t value, bool force = false) {
-		int64_t new_total = value + exact_subtotal32;
-		bool would_overflow = CHECK_BOUNDS_32(new_total);
-		if (would_overflow || force) {
-			const T32 *src = reinterpret_cast<const T32 *>(subtotals32);
-			T64 *dst = reinterpret_cast<T64 *>(subtotals64);
-			for (int bit = 0; bit < 64; bit++) { // convert between SWAR orders
-				dst[bit] += src[(bit % 32) * 2 + (bit / 32)];
-			}
-			memset(subtotals32, 0, sizeof(subtotals32));
-			Flush64(exact_subtotal32, force);
-			exact_subtotal32 = value;
-		} else {
-			exact_subtotal32 = new_total;
-		}
-	}
-	AUTOVECTORIZE inline void Flush16(int64_t value, bool force = false) {
-		int64_t new_total = value + exact_subtotal16;
-		bool would_overflow = CHECK_BOUNDS_16(new_total);
-		if (would_overflow || force) {
-			const T16 *src = reinterpret_cast<const T16 *>(subtotals16);
-			T32 *dst = reinterpret_cast<T32 *>(subtotals32);
-			for (int bit = 0; bit < 64; bit++) { // convert between SWAR orders
-				int dst_idx = (bit % 32) * 2 + (bit / 32);
-				int src_idx = (bit % 16) * 4 + (bit / 16);
-				dst[dst_idx] += src[src_idx];
-			}
-			memset(subtotals16, 0, sizeof(subtotals16));
-			Flush32(exact_subtotal16, force);
-			exact_subtotal16 = value;
-		} else {
-			exact_subtotal16 = new_total;
-		}
-	}
-	AUTOVECTORIZE inline void Flush8(int64_t value, bool force = false) {
-		int64_t new_total = value + exact_subtotal8;
-		bool would_overflow = CHECK_BOUNDS_8(new_total);
-		if (would_overflow || force) {
-			const T8 *src = reinterpret_cast<const T8 *>(subtotals8);
-			T16 *dst = reinterpret_cast<T16 *>(subtotals16);
-			for (int bit = 0; bit < 64; bit++) { // convert between SWAR orders
-				int dst_idx = (bit % 16) * 4 + (bit / 16);
-				int src_idx = (bit % 8) * 8 + (bit / 8);
-				dst[dst_idx] += src[src_idx];
-			}
-			memset(subtotals8, 0, sizeof(subtotals8));
-			Flush16(exact_subtotal8, force);
-			exact_subtotal8 = value;
-		} else {
-			exact_subtotal8 = new_total;
-		}
-	}
+#ifdef PAC_SUM_NONCASCADING
+	// NONCASCADING: dummy methods for uniform interface
 	void Flush() {
-		Flush8(0LL, true);
+	} // no-op
+	void GetTotalsAsDouble(double *dst) const {
+		ToDoubleArray(probabilistic_totals128, dst);
+	}
+#else
+	// Lazily allocate a level's buffer if not yet allocated
+	// BUF_T: buffer element type (uint64_t for SWAR levels, hugeint_t for level 128)
+	// Returns 0 if allocated, otherwise returns exact_total unchanged
+	template <typename BUF_T, typename EXACT_T = int>
+	inline EXACT_T EnsureLevelAllocated(BUF_T *&buffer, idx_t count, EXACT_T exact_total = 0) {
+		if (!buffer) {
+			buffer = reinterpret_cast<BUF_T *>(allocator->Allocate(count * sizeof(BUF_T)));
+			memset(buffer, 0, count * sizeof(BUF_T));
+			return 0;
+		}
+		return exact_total;
+	}
+
+	// Cascade SWAR-packed counters from one level to the next with proper bit reordering
+	// SRC_T/DST_T: element types, SRC_SWAR/DST_SWAR: SWAR widths (8/16/32/64)
+	template <typename SRC_T, typename DST_T, int SRC_SWAR, int DST_SWAR>
+	static inline void CascadeToNextLevel(const uint64_t *src_buf, uint64_t *dst_buf) {
+		const SRC_T *src = reinterpret_cast<const SRC_T *>(src_buf);
+		DST_T *dst = reinterpret_cast<DST_T *>(dst_buf);
+		constexpr int SRC_PER_U64 = 64 / SRC_SWAR;
+		constexpr int DST_PER_U64 = 64 / DST_SWAR;
+		for (int bit = 0; bit < 64; bit++) {
+			int src_idx = (bit % SRC_SWAR) * SRC_PER_U64 + (bit / SRC_SWAR);
+			int dst_idx = (bit % DST_SWAR) * DST_PER_U64 + (bit / DST_SWAR);
+			dst[dst_idx] += src[src_idx];
+		}
+	}
+
+	// Helper to cascade level 64 to 128 (no SWAR reorder, just convert to hugeint)
+	inline void Cascade64To128() {
+		const T64 *src = reinterpret_cast<const T64 *>(probabilistic_totals64);
+		for (int i = 0; i < 64; i++) {
+			probabilistic_totals128[i] += Hugeint::Convert(src[i]);
+		}
+		memset(probabilistic_totals64, 0, 64 * sizeof(uint64_t));
+	}
+
+	// Flush64: cascade probabilistic_totals64 to probabilistic_totals128
+	AUTOVECTORIZE inline void Flush64(T64 value, bool force) {
+		D_ASSERT(probabilistic_totals64);
+		T64 new_total = value + exact_total64;
+		bool would_overflow = CHECK_BOUNDS_64(new_total, value, exact_total64);
+		if (would_overflow || (force && probabilistic_totals128)) {
+			if (would_overflow)
+				EnsureLevelAllocated(probabilistic_totals128, idx_t(64));
+			Cascade64To128();
+			exact_total64 = value;
+		} else {
+			exact_total64 = new_total;
+		}
+	}
+
+	// Flush32: cascade probabilistic_totals32 to probabilistic_totals64
+	AUTOVECTORIZE inline void Flush32(int64_t value, bool force) {
+		D_ASSERT(probabilistic_totals32);
+		int64_t new_total = value + exact_total32;
+		bool would_overflow = CHECK_BOUNDS_32(new_total);
+		if (would_overflow || (force && probabilistic_totals64)) {
+			if (would_overflow)
+				exact_total64 = EnsureLevelAllocated(probabilistic_totals64, 64, exact_total64);
+			CascadeToNextLevel<T32, T64, 32, 64>(probabilistic_totals32, probabilistic_totals64);
+			memset(probabilistic_totals32, 0, 32 * sizeof(uint64_t));
+			Flush64(exact_total32, force);
+			exact_total32 = value;
+		} else {
+			exact_total32 = new_total;
+		}
+	}
+
+	// Flush16: cascade probabilistic_totals16 to probabilistic_totals32
+	AUTOVECTORIZE inline void Flush16(int64_t value, bool force) {
+		D_ASSERT(probabilistic_totals16);
+		int64_t new_total = value + exact_total16;
+		bool would_overflow = CHECK_BOUNDS_16(new_total);
+		if (would_overflow || (force && probabilistic_totals32)) {
+			if (would_overflow)
+				exact_total32 = EnsureLevelAllocated(probabilistic_totals32, 32, exact_total32);
+			CascadeToNextLevel<T16, T32, 16, 32>(probabilistic_totals16, probabilistic_totals32);
+			memset(probabilistic_totals16, 0, 16 * sizeof(uint64_t));
+			Flush32(exact_total16, force);
+			exact_total16 = value;
+		} else {
+			exact_total16 = new_total;
+		}
+	}
+
+	// Flush8: cascade probabilistic_totals8 to probabilistic_totals16
+	AUTOVECTORIZE inline void Flush8(int64_t value, bool force) {
+		D_ASSERT(probabilistic_totals8);
+		int64_t new_total = value + exact_total8;
+		bool would_overflow = CHECK_BOUNDS_8(new_total);
+		if (would_overflow || (force && probabilistic_totals16)) {
+			if (would_overflow)
+				exact_total16 = EnsureLevelAllocated(probabilistic_totals16, 16, exact_total16);
+			CascadeToNextLevel<T8, T16, 8, 16>(probabilistic_totals8, probabilistic_totals16);
+			memset(probabilistic_totals8, 0, 8 * sizeof(uint64_t));
+			Flush16(exact_total8, force);
+			exact_total8 = value;
+		} else {
+			exact_total8 = new_total;
+		}
+	}
+
+	void Flush() {
+		if (probabilistic_totals8) {
+			Flush8(0LL, true);
+		}
+	}
+
+	// Convert SWAR packed subtotals to double[64] for finalization
+	// These read from the lowest allocated level and unpack to bit-position order
+	template <typename SRC_T>
+	static void UnpackSWARToDouble(const uint64_t *swar_data, int swar_size, double *dst) {
+		const SRC_T *src = reinterpret_cast<const SRC_T *>(swar_data);
+		constexpr int elements_per_u64 = sizeof(uint64_t) / sizeof(SRC_T);
+		for (int bit = 0; bit < 64; bit++) {
+			int src_idx = (bit % swar_size) * elements_per_u64 + (bit / swar_size);
+			dst[bit] = static_cast<double>(src[src_idx]);
+		}
+	}
+
+	// Get the probabilistic totals as doubles, reading from the highest allocated level
+	void GetTotalsAsDouble(double *dst) const {
+		if (probabilistic_totals128) {
+			ToDoubleArray(probabilistic_totals128, dst);
+		} else if (probabilistic_totals64) {
+			const T64 *src = reinterpret_cast<const T64 *>(probabilistic_totals64);
+			for (int i = 0; i < 64; i++) {
+				dst[i] = static_cast<double>(src[i]);
+			}
+		} else if (probabilistic_totals32) {
+			UnpackSWARToDouble<T32>(probabilistic_totals32, 32, dst);
+		} else if (probabilistic_totals16) {
+			UnpackSWARToDouble<T16>(probabilistic_totals16, 16, dst);
+		} else if (probabilistic_totals8) {
+			UnpackSWARToDouble<T8>(probabilistic_totals8, 8, dst);
+		} else {
+			// No data allocated - return zeros
+			memset(dst, 0, 64 * sizeof(double));
+		}
 	}
 #endif
 };
@@ -227,11 +313,11 @@ struct PacSumIntState {
 struct PacSumDoubleState {
 #ifdef PAC_SUM_FLOAT_CASCADING
 	// Float cascading: accumulate small values in float subtotals, flush to double totals
-	float probabilistic_subtotals[64];
+	float probabilistic_totals_float[64];
 #endif
 	double probabilistic_totals[64];
 #ifdef PAC_SUM_FLOAT_CASCADING
-	double exact_subtotal;
+	double exact_total;
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
 	bool seen_null;
@@ -246,16 +332,16 @@ struct PacSumDoubleState {
 
 	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
 #ifdef PAC_SUM_FLOAT_CASCADING
-		double raw_subtotal = exact_subtotal + value;
+		double raw_subtotal = exact_total + value;
 		bool would_overflow = FloatSubtotalFitsDouble(raw_subtotal, MinIncrementsFloat32);
 		if (would_overflow || force) {
 			for (int i = 0; i < 64; i++) {
-				probabilistic_totals[i] += static_cast<double>(probabilistic_subtotals[i]);
+				probabilistic_totals[i] += static_cast<double>(probabilistic_totals_float[i]);
 			}
-			memset(probabilistic_subtotals, 0, sizeof(probabilistic_subtotals));
-			exact_subtotal = value;
+			memset(probabilistic_totals_float, 0, sizeof(probabilistic_totals_float));
+			exact_total = value;
 		} else {
-			exact_subtotal = raw_subtotal;
+			exact_total = raw_subtotal;
 		}
 #endif
 	}
@@ -264,6 +350,12 @@ struct PacSumDoubleState {
 #ifdef PAC_SUM_FLOAT_CASCADING
 		Flush32(0, true);
 #endif
+	}
+
+	void GetTotalsAsDouble(double *dst) const {
+		for (int i = 0; i < 64; i++) {
+			dst[i] = probabilistic_totals[i];
+		}
 	}
 };
 
