@@ -179,7 +179,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	// unit even when no FK paths or PKs were discovered.
 	for (auto &t : pac_tables) {
 		if (scan_counts[t] > 0) {
-			result.scanned_pac_tables.push_back(t);
+			result.scanned_pu_tables.push_back(t);
 		}
 	}
 
@@ -213,7 +213,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		}
 	}
 
-	if (all_matched && result.scanned_pac_tables.size() > 0) {
+	if (all_matched && !result.scanned_pu_tables.empty()) {
 		// All PAC tables already have corresponding sample CTE scans the same number of times.
 		// Nothing for the PAC rewriter to do.
 		return result;
@@ -244,37 +244,72 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 			continue;
 		}
 		if (pac_set.find(name) == pac_set.end()) {
-			result.scanned_non_pac_tables.push_back(name);
+			result.scanned_non_pu_tables.push_back(name);
 		}
+	}
+
+	// --- Populate per-table metadata (PKs and FKs) for scanned tables ---
+	for (auto &name : scanned_tables) {
+		if (name.rfind("_pac_internal_sample_", 0) == 0) {
+			continue; // skip internal sample tables
+		}
+		ColumnMetadata md;
+		md.table_name = name;
+		// primary keys (may be empty)
+		auto pk = FindPrimaryKey(context, name);
+		md.pks = pk;
+		// foreign keys declared on this table
+		auto fks = FindForeignKeys(context, name);
+		md.fks = fks;
+		result.table_metadata[name] = std::move(md);
 	}
 
 	// Compute FK paths from scanned tables to any privacy unit (transitive)
 	auto fk_paths = FindForeignKeyBetween(context, pac_tables, scanned_tables);
 
-	// Populate privacy unit PKs for any discovered privacy units
+	// Populate metadata (PKs/FKs) for every table that appears on any discovered FK path.
+	// Compatibility check should provide metadata for scanned tables already; for any path
+	// tables that were not scanned we must populate metadata here so downstream consumers
+	// (the bitslice compiler) can rely solely on `result.table_metadata` without further
+	// catalog lookups.
 	for (auto &kv : fk_paths) {
 		auto &path = kv.second;
-		if (path.empty()) {
-			continue;
-		}
-		std::string target = path.back();
-		if (result.privacy_unit_pks.find(target) == result.privacy_unit_pks.end()) {
-			auto pk = FindPrimaryKey(context, target);
-			if (!pk.empty()) {
-				result.privacy_unit_pks[target] = pk;
+		for (auto &tbl : path) {
+			if (result.table_metadata.find(tbl) == result.table_metadata.end()) {
+				ColumnMetadata md;
+				md.table_name = tbl;
+				auto pk = FindPrimaryKey(context, tbl);
+				md.pks = pk;
+				auto fks = FindForeignKeys(context, tbl);
+				md.fks = fks;
+				result.table_metadata[tbl] = std::move(md);
+			} else {
+				// if metadata exists but pks empty, try to fill
+				if (result.table_metadata[tbl].pks.empty()) {
+					auto pk = FindPrimaryKey(context, tbl);
+					if (!pk.empty()) {
+						result.table_metadata[tbl].pks = pk;
+					}
+				}
 			}
 		}
 	}
 
-	// If the privacy unit table itself is scanned directly (no FK path), we still want to
-	// populate its primary key information. This can happen when the query scans the PU
-	// table directly and there are no FK paths from other scanned tables. Populate any
-	// scanned PAC table entries that do not yet have PK information.
-	for (auto &t : result.scanned_pac_tables) {
-		if (result.privacy_unit_pks.find(t) == result.privacy_unit_pks.end()) {
+	// If the privacy unit table itself is scanned directly (no FK path), ensure its PK info is present in
+	// table_metadata.
+	for (auto &t : result.scanned_pu_tables) {
+		if (result.table_metadata.find(t) == result.table_metadata.end()) {
+			ColumnMetadata md;
+			md.table_name = t;
+			auto pk = FindPrimaryKey(context, t);
+			md.pks = pk;
+			auto fks = FindForeignKeys(context, t);
+			md.fks = fks;
+			result.table_metadata[t] = std::move(md);
+		} else if (result.table_metadata[t].pks.empty()) {
 			auto pk = FindPrimaryKey(context, t);
 			if (!pk.empty()) {
-				result.privacy_unit_pks[t] = pk;
+				result.table_metadata[t].pks = pk;
 			}
 		}
 	}
@@ -291,7 +326,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		}
 	}
 
-	if (result.fk_paths.empty() && result.scanned_pac_tables.empty()) {
+	if (result.fk_paths.empty() && result.scanned_pu_tables.empty()) {
 		// No FK paths and no scanned PAC tables: nothing to do
 		return result;
 	}

@@ -57,23 +57,20 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// If no FK paths were found and no configured PAC tables were scanned, nothing to do.
 	// However, if the plan directly scans configured PAC tables (privacy units) we should still
 	// proceed with compilation even when no FK paths (or PKs) were discovered.
-	if (check.fk_paths.empty() && check.scanned_pac_tables.empty()) {
+	if (check.fk_paths.empty() && check.scanned_pu_tables.empty()) {
 		return;
 	}
 
-	// Determine the set of discovered privacy units (could come from privacy_unit_pks keys or fk_paths targets)
+	// Determine the set of discovered privacy units (could come from fk_paths targets or scanned PAC tables)
 	std::vector<std::string> discovered_pus;
-	// First, privacy units for which we have PK info
-	for (auto &kv : check.privacy_unit_pks) {
-		discovered_pus.push_back(kv.first);
-	}
-	// Also consider fk_paths targets in case pk map didn't include them
+	// Consider fk_paths targets
 	for (auto &kv : check.fk_paths) {
-		if (!kv.second.empty())
+		if (!kv.second.empty()) {
 			discovered_pus.push_back(kv.second.back());
+		}
 	}
 	// Also include any configured PAC tables that were scanned directly in the plan
-	for (auto &t : check.scanned_pac_tables) {
+	for (auto &t : check.scanned_pu_tables) {
 		discovered_pus.push_back(t);
 	}
 	// Deduplicate
@@ -98,11 +95,11 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	// Print discovered PKs for diagnostics (if available) for each privacy unit
 	for (auto &pu : privacy_units) {
-		auto pk_it = check.privacy_unit_pks.find(pu);
-		if (pk_it != check.privacy_unit_pks.end()) {
+		auto it = check.table_metadata.find(pu);
+		if (it != check.table_metadata.end() && !it->second.pks.empty()) {
 #ifdef DEBUG
 			Printer::Print("Discovered primary key columns for privacy unit '" + pu + "':");
-			for (const auto &col : pk_it->second) {
+			for (const auto &col : it->second.pks) {
 				Printer::Print(col);
 			}
 #endif
