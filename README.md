@@ -6,25 +6,32 @@ This README focuses on practical developer workflows: building, running, configu
 
 What PAC enforces
 - The query must scan at least one table listed in the PAC tables file.
-- Allowed aggregates: SUM, COUNT, AVG. Other aggregates (MIN, MAX, custom aggregates) are disallowed.
+- Allowed aggregates: SUM, COUNT, AVG, MIN, MAX. Other aggregates (custom aggregates) are disallowed.
 - Nested aggregates (an aggregate inside another aggregate) are disallowed.
 - Window functions are disallowed.
 - DISTINCT is disallowed.
 - Only INNER JOIN is allowed. Outer joins, cross products, and set operations (UNION/EXCEPT/INTERSECT) are disallowed.
+- ORDER BY and LIMIT on the final query are supported by the compiler and preserved when producing the compiled CTE form; sorting/limiting that depends on non-supported constructs may still be rejected.
 
 When a query is rejected the optimizer throws a ParserException with one of the explanatory messages, for example:
 - "Query does not scan any PAC table!"
-- "Query does not contain any allowed aggregation (sum, count, avg)!"
-- "Query contains disallowed aggregates (only sum, count, avg allowed; no nested aggregates)!"
+- "Query does not contain any allowed aggregation (sum, count, avg, min, max)!"
+- "Query contains disallowed aggregates (only sum, count, avg, min, max allowed; no nested aggregates)!"
 - "Query contains window functions, which are not allowed in PAC-compatible queries!"
 - "Query contains DISTINCT, which is not allowed in PAC-compatible queries!"
 - "Query contains disallowed joins (only INNER JOIN allowed in PAC-compatible queries)!"
+
+Two compilers
+- The repository contains two compiler implementations in `src/`:
+  - bitslice compiler: implemented in `src/pac_bitslice_compiler.cpp`. This is the production compiler and is the one currently enabled.
+  - alternative compiler (WIP): a second compiler skeleton exists (for example `src/pac_compiler.cpp`) and is under active development but currently disabled / not feature-complete. The bitslice compiler should be assumed to be the authoritative implementation for now.
 
 Repository layout (important parts)
 - `src/`, `include/` — extension source code and headers
 - `test/sql/` — SQL tests exercised by the DuckDB test runner
 - `duckdb/` — vendored DuckDB source used to build the extension
 - `build/` — out-of-tree build output (debug/release)
+- `benchmark/` — microbenchmarks and TPCH harness for performance testing
 
 Quick build (Makefile shortcut)
 - The repository ships a Makefile target that builds DuckDB + extension. From the repo root:
@@ -132,6 +139,27 @@ Start the built DuckDB binary and use SQL normally. The extension validates quer
 ./build/release/duckdb
 ```
 
+Benchmarking
+-
+The repository includes a TPCH-based benchmark harness under `benchmark/` (for example `benchmark/pac_tpch_benchmark.cpp` and associated scripts). To run the benchmark:
+
+1. Build a Release binary (recommended for performance runs):
+
+```sh
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/release -j$(nproc)
+```
+
+2. Run the benchmark binary (path may vary depending on build system). If the project builds a dedicated benchmark binary it will typically appear under `build/release/benchmark/` or `build/release/`. Example invocations:
+
+```sh
+# Example: run the TPCH PAC benchmark (adjust path as needed)
+build/release/benchmark/pac_tpch_benchmark --help
+build/release/benchmark/pac_tpch_benchmark --scale-factor 1 --output benchmark/tpch_benchmark_results_sf1.csv
+```
+
+3. The `benchmark/` directory contains helper scripts (R plotting and CSVs) to visualize and inspect results. See `benchmark/README.md` (if present) or open the C++ source and scripts in `benchmark/` for options and flags.
+
 Running tests
 - The SQL tests in `test/sql/` are executed by the DuckDB `unittest` binary.
 
@@ -143,10 +171,11 @@ make test
 Run the test runner directly (example for debug build):
 
 ```sh
+# From repo root — adjust paths if you used a different build dir
 build/debug/test/unittest --test-dir ../../.. [sql] -R pac -V
 ```
 
-Adjust paths and filters to your build layout and desired test selection.
+If you are running the entire DuckDB test executables or a specific test binary, point the runner at the repo-root `test/` directory and use filters to select the `sql` tests and the `pac` group. The test runner accepts the usual DuckDB unittest filtering options (`-R`, `-V`, `--test-dir`, etc.).
 
 Building and running tests with Ninja
 - If you prefer Ninja as the generator you can drive the Makefile with the `GEN=ninja` variable; this repository exposes a convenience Make target for common CMake workflows. Example (Debug build):
@@ -155,11 +184,7 @@ Building and running tests with Ninja
 GEN=ninja make debug
 ```
 
-This creates a `build/debug/` directory and compiles the DuckDB binary and test binaries using Ninja. After the build, test binaries live under `build/debug/test/`. To run the updated test executable added in this patch (all tests are contained in `src/test_update_parent_aggregate.cpp`), run:
-
-```sh
-build/debug/test/test_update_parent_aggregate
-```
+This creates a `build/debug/` directory and compiles the DuckDB binary and test binaries using Ninja. After the build, test binaries live under `build/debug/test/`.
 
 CLion / Debugging tips
 - Open `duckdb/CMakeLists.txt` or the project root in CLion and point the CMake profile to an out-of-tree build directory (for example `build/debug`).
