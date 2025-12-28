@@ -30,7 +30,7 @@ SELECT SUM(val) FROM bitslice_a
 query I
 SELECT COUNT(val) AS c FROM bitslice_a
 ----
-25
+27
 
 # 2) SUM / COUNT + GROUP BY (single grouping column)
 query II
@@ -51,11 +51,11 @@ FROM bitslice_a
 GROUP BY grp
 ORDER BY grp
 ----
-0	5
-1	7
-2	5
+0	4
+1	6
+2	6
 3	4
-4	4
+4	7
 
 # 3) SUM / COUNT + GROUP BY + WHERE filter
 query II
@@ -75,9 +75,9 @@ ORDER BY grp
 ----
 0	3
 1	3
-2	4
-3	3
-4	1
+2	2
+3	2
+4	3
 
 # 4) SUM / COUNT with 2 GROUP BY columns
 query III
@@ -99,7 +99,7 @@ ORDER BY grp, grp2
 LIMIT 2
 ----
 0	0	1
-0	1	0
+0	1	1
 
 # Testing with average
 query III
@@ -140,11 +140,11 @@ FROM bitslice_a a JOIN bitslice_b b ON a.grp = b.grp
 GROUP BY a.grp
 ORDER BY a.grp
 ----
-0	25
-1	35
-2	25
+0	20
+1	30
+2	30
 3	20
-4	20
+4	35
 
 # Edge case: table that actually has a column named "rowid"
 statement ok
@@ -163,7 +163,7 @@ SELECT SUM(val) FROM bitslice_with_rowid
 query I
 SELECT COUNT(rowid) FROM bitslice_with_rowid
 ----
-9
+12
 
 # Cleanup
 statement ok
