@@ -344,7 +344,7 @@ unique_ptr<CteNode> LogicalPlanToSql::CreateCteNode(unique_ptr<LogicalOperator> 
 			// Get using `i`.
 			const idx_t idx = col_ids[i].GetPrimaryIndex();
 			string column_name;
-			if (idx == 18446744073709551615) {
+			if (idx == 18446744073709551615ULL) {
 				column_name = "rowid"; // Special case for rowid (else it overflows).
 			} else {
 				// Normal case.

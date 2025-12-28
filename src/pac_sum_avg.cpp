@@ -1,4 +1,4 @@
-#include "include/pac_sum.hpp"
+#include "include/pac_sum_avg.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include <cmath>
 #include <unordered_map>

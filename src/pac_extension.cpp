@@ -18,7 +18,7 @@
 #include "include/pac_privacy_unit.hpp"
 #include "include/pac_aggregate.hpp"
 #include "include/pac_count.hpp"
-#include "include/pac_sum.hpp"
+#include "include/pac_sum_avg.hpp"
 
 namespace duckdb {
 
@@ -82,7 +82,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
-	// Register pac_sum/pac_avg aggregate functions (moved to pac_sum.cpp)
+	// Register pac_sum/pac_avg aggregate functions (moved to pac_sum_avg.cpp)
 	RegisterPacSumFunctions(loader);
 	RegisterPacAvgFunctions(loader);
 	RegisterPacCountFunctions(loader);
