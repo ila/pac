@@ -247,10 +247,10 @@ template <bool IS_MAX>
 struct PacMinMaxDoubleState {
 	static constexpr float FLOAT_RANGE_MIN = -1000000.0f;
 	static constexpr float FLOAT_RANGE_MAX = 1000000.0f;
-	static constexpr float FLOAT_INIT = IS_MAX ? -std::numeric_limits<float>::infinity()
-	                                           : std::numeric_limits<float>::infinity();
-	static constexpr double DOUBLE_INIT = IS_MAX ? -std::numeric_limits<double>::infinity()
-	                                             : std::numeric_limits<double>::infinity();
+	static constexpr float FLOAT_INIT =
+	    IS_MAX ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+	static constexpr double DOUBLE_INIT =
+	    IS_MAX ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
 
 	static inline bool IsBetter(double a, double b) {
 		return IS_MAX ? (a > b) : (a < b);
@@ -293,8 +293,8 @@ struct PacMinMaxDoubleState {
 	ArenaAllocator *allocator;
 
 	// Lazily allocated levels
-	float *extremesF;   // 32-bit float level
-	double *extremesD;  // 64-bit double level
+	float *extremesF;  // 32-bit float level
+	double *extremesD; // 64-bit double level
 
 	uint8_t current_level; // 32 for float, 64 for double, 0 = not initialized
 	double global_bound;   // Always stored as double

@@ -117,8 +117,8 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(PacMinMaxDoubleState<IS_MAX>
 	// Update at current level using templated helper
 	switch (state.current_level) {
 	case 32:
-		state.global_bound = UpdateExtremesAtLevel<float, double, IS_MAX>(state.extremesF, key_hash,
-		                                                                  static_cast<float>(value));
+		state.global_bound =
+		    UpdateExtremesAtLevel<float, double, IS_MAX>(state.extremesF, key_hash, static_cast<float>(value));
 		break;
 	case 64:
 	default:
@@ -149,8 +149,8 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
-			PacMinMaxUpdateOne<SIGNED, IS_MAX>(state, hashes[h_idx],
-			                                   static_cast<VALUE_TYPE>(values[v_idx]), aggr.allocator);
+			PacMinMaxUpdateOne<SIGNED, IS_MAX>(state, hashes[h_idx], static_cast<VALUE_TYPE>(values[v_idx]),
+			                                   aggr.allocator);
 		}
 	} else {
 		for (idx_t i = 0; i < count; i++) {
@@ -160,8 +160,8 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 				state.seen_null = true;
 				return;
 			}
-			PacMinMaxUpdateOne<SIGNED, IS_MAX>(state, hashes[h_idx],
-			                                   static_cast<VALUE_TYPE>(values[v_idx]), aggr.allocator);
+			PacMinMaxUpdateOne<SIGNED, IS_MAX>(state, hashes[h_idx], static_cast<VALUE_TYPE>(values[v_idx]),
+			                                   aggr.allocator);
 		}
 	}
 }
@@ -190,8 +190,8 @@ static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, id
 		} else if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			state->seen_null = true;
 		} else {
-			PacMinMaxUpdateOne<SIGNED, IS_MAX>(*state, hashes[h_idx],
-			                                   static_cast<VALUE_TYPE>(values[v_idx]), aggr.allocator);
+			PacMinMaxUpdateOne<SIGNED, IS_MAX>(*state, hashes[h_idx], static_cast<VALUE_TYPE>(values[v_idx]),
+			                                   aggr.allocator);
 		}
 	}
 }
@@ -264,8 +264,8 @@ AUTOVECTORIZE static void PacMinMaxCombineInt(Vector &src, Vector &dst, Aggregat
 		case 16:
 			new_bound = d->extremes16[0];
 			for (int j = 0; j < 64; j++) {
-				auto src_val = (s->current_level >= 16) ? s->extremes16[j]
-				                                        : static_cast<typename State::T16>(s->extremes8[j]);
+				auto src_val =
+				    (s->current_level >= 16) ? s->extremes16[j] : static_cast<typename State::T16>(s->extremes8[j]);
 				d->extremes16[j] = State::IsBetter(src_val, d->extremes16[j]) ? src_val : d->extremes16[j];
 				new_bound = State::Worse(new_bound, static_cast<typename State::T64>(d->extremes16[j]));
 			}
@@ -462,19 +462,23 @@ void PacMinMaxUpdateInt64(Vector inputs[], AggregateInputData &aggr, idx_t n, da
 // Unsigned integer updates
 template <bool IS_MAX>
 void PacMinMaxUpdateUInt8(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p, idx_t count) {
-	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint8_t>(inputs, aggr, n, state_p, count);
+	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint8_t>(inputs, aggr, n, state_p,
+	                                                                                    count);
 }
 template <bool IS_MAX>
 void PacMinMaxUpdateUInt16(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p, idx_t count) {
-	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint16_t>(inputs, aggr, n, state_p, count);
+	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint16_t>(inputs, aggr, n, state_p,
+	                                                                                     count);
 }
 template <bool IS_MAX>
 void PacMinMaxUpdateUInt32(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p, idx_t count) {
-	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint32_t>(inputs, aggr, n, state_p, count);
+	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint32_t>(inputs, aggr, n, state_p,
+	                                                                                     count);
 }
 template <bool IS_MAX>
 void PacMinMaxUpdateUInt64(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p, idx_t count) {
-	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint64_t>(inputs, aggr, n, state_p, count);
+	PacMinMaxUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint64_t>(inputs, aggr, n, state_p,
+	                                                                                     count);
 }
 
 // Float/Double updates
@@ -490,37 +494,45 @@ void PacMinMaxUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t n, d
 // Signed integer scatter updates
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateInt8(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int8_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int8_t>(inputs, aggr, n, states,
+	                                                                                       count);
 }
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateInt16(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int16_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int16_t>(inputs, aggr, n, states,
+	                                                                                        count);
 }
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateInt32(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int32_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int32_t>(inputs, aggr, n, states,
+	                                                                                        count);
 }
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateInt64(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int64_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<true, IS_MAX>, true, IS_MAX, int64_t, int64_t>(inputs, aggr, n, states,
+	                                                                                        count);
 }
 
 // Unsigned integer scatter updates
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateUInt8(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint8_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint8_t>(inputs, aggr, n, states,
+	                                                                                           count);
 }
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateUInt16(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint16_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint16_t>(inputs, aggr, n, states,
+	                                                                                            count);
 }
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateUInt32(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint32_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint32_t>(inputs, aggr, n, states,
+	                                                                                            count);
 }
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateUInt64(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states, idx_t count) {
-	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint64_t>(inputs, aggr, n, states, count);
+	PacMinMaxScatterUpdate<PacMinMaxIntState<false, IS_MAX>, false, IS_MAX, uint64_t, uint64_t>(inputs, aggr, n, states,
+	                                                                                            count);
 }
 
 // Float/Double scatter updates
@@ -692,16 +704,14 @@ void RegisterPacMinFunctions(ExtensionLoader &loader) {
 
 	// Register with ANY type - bind callback handles specialization
 	// 2-param version: pac_min(hash, value)
-	fcn_set.AddFunction(
-	    AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY, nullptr, nullptr,
-	                      nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr,
-	                      PacMinMaxBind<false>));
+	fcn_set.AddFunction(AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
+	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
 	// 3-param version: pac_min(hash, value, mi)
-	fcn_set.AddFunction(
-	    AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY,
-	                      nullptr, nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                      nullptr, PacMinMaxBind<false>));
+	fcn_set.AddFunction(AggregateFunction("pac_min", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
+	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
+	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
 	loader.RegisterFunction(fcn_set);
 }
@@ -711,16 +721,14 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader) {
 
 	// Register with ANY type - bind callback handles specialization
 	// 2-param version: pac_max(hash, value)
-	fcn_set.AddFunction(
-	    AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY, nullptr, nullptr,
-	                      nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr,
-	                      PacMinMaxBind<true>));
+	fcn_set.AddFunction(AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
+	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
 	// 3-param version: pac_max(hash, value, mi)
-	fcn_set.AddFunction(
-	    AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY,
-	                      nullptr, nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                      nullptr, PacMinMaxBind<true>));
+	fcn_set.AddFunction(AggregateFunction("pac_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
+	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
+	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
 	loader.RegisterFunction(fcn_set);
 }
