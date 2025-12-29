@@ -23,10 +23,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <thread>
-#include <cstdlib>
 #include <unistd.h>
 #include <limits.h>
-#include <sys/wait.h>
 
 namespace duckdb {
 static string Timestamp() {
@@ -144,16 +142,15 @@ static string ReadFileToString(const string &path) {
 // helper: find Rscript absolute path via 'which'
 static string FindRscriptAbsolute() {
     FILE *pipe = popen("which Rscript 2>/dev/null", "r");
-    if (!pipe) return string();
+    if (!pipe) { return string(); }
     char buf[PATH_MAX];
     string out;
     while (fgets(buf, sizeof(buf), pipe)) {
         out += string(buf);
     }
-    int rc = pclose(pipe);
     // trim newline/whitespace
-    while (!out.empty() && (out.back()=='\n' || out.back()=='\r' || out.back()==' ')) out.pop_back();
-    if (out.empty()) return string();
+    while (!out.empty() && (out.back()=='\n' || out.back()=='\r' || out.back()==' ')) { out.pop_back(); }
+    if (out.empty()) { return string(); }
     return out;
 }
 
@@ -161,10 +158,7 @@ static string FindRscriptAbsolute() {
 // Returns true if a plot was successfully generated.
 static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir) {
     string script = FindPlotScriptAbsolute();
-    if (script.empty()) {
-        Log(string("Plot script not found (looked in several candidate locations). Skipping plotting."));
-        return false;
-    }
+    if (script.empty()) { Log(string("Plot script not found (looked in several candidate locations). Skipping plotting.")); return false; }
 
     string rscript_path = FindRscriptAbsolute();
     if (rscript_path.empty()) {
@@ -185,14 +179,14 @@ static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir
     string output;
     while (true) {
         size_t n = fread(buffer, 1, sizeof(buffer), pipe);
-        if (n > 0) output.append(buffer, buffer + n);
-        if (n < sizeof(buffer)) break;
+        if (n > 0) { output.append(buffer, buffer + n); }
+        if (n < sizeof(buffer)) { break; }
     }
     int rc = pclose(pipe);
     int exit_code = rc;
-    if (rc != -1 && WIFEXITED(rc)) exit_code = WEXITSTATUS(rc);
+    if (rc != -1 && WIFEXITED(rc)) { exit_code = WEXITSTATUS(rc); }
     string out_log = output;
-    if (out_log.size() > 4000) out_log = out_log.substr(0, 4000) + "\n...[truncated]...";
+    if (out_log.size() > 4000) { out_log = out_log.substr(0, 4000) + "\n...[truncated]..."; }
     Log(string("Plot script output (truncated):\n") + out_log);
     Log(string("Plot script returned exit code: ") + std::to_string(exit_code));
     if (exit_code == 0) {
@@ -206,10 +200,12 @@ static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir
     return false;
 }
 
-int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv) {
+int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive) {
     try {
+        // Log the run_naive flag for now (no behavior change yet)
+        Log(string("run_naive flag: ") + (run_naive ? string("true") : string("false")));
         // Open (file-backed) DuckDB database
-        // Determine whether the caller explicitly provided a DB path (not the default) so we can
+        // Decide whether the caller explicitly provided a DB path (not the default) so we can
         // decide whether to warn and/or re-create tables in an existing DB.
         bool user_provided_db = !(db_path.empty() || db_path == "tpch.db");
         // Compute actual DB filename: use user-provided path, otherwise derive from scale factor
@@ -279,7 +275,17 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
         if (!csv.is_open()) {
             throw std::runtime_error("Failed to open output CSV: " + actual_out);
         }
-        csv << "query,run,time_ms,pac_time_ms\n";
+        // CSV columns: query,mode,run,time_ms
+        // For baseline rows, time_ms = TPCH warm-run time.
+        // For PAC rows (SIMD PAC / naive PAC), time_ms = measured PAC execution time.
+        csv << "query,mode,run,time_ms\n";
+
+    	// Locate PAC query files (hardcoded directories)
+    	// The repository keeps PAC query variants under the 'benchmark' root. We hardcode
+    	// the three variant subdirectories here. The caller's `queries_dir` parameter
+    	// is treated as the root (default is "benchmark").
+    	string bitslice_dir = queries_dir + string("/tpch_pac_queries");
+    	string naive_dir = queries_dir + string("/tpch_pac_naive_queries");
 
         for (int q = 1; q <= 22; ++q) {
             Log("=== Query " + std::to_string(q) + " ===");
@@ -316,42 +322,72 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                 double tpch_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                 tpch_times_ms.push_back(tpch_time_ms);
                 Log("TPCH query " + std::to_string(q) + " warm run " + std::to_string(t) + " time (ms): " + FormatNumber(tpch_time_ms));
-                if (r_warm && r_warm->HasError()) {
-                    Log(string("TPCH warm run error for query ") + std::to_string(q) + ": " + r_warm->GetError());
-                }
+                if (r_warm && r_warm->HasError()) { Log(string("TPCH warm run error for query ") + std::to_string(q) + ": " + r_warm->GetError()); }
             }
-
-            // Locate PAC query file
-            string qfile = FindQueryFile(queries_dir, q);
-            if (!FileExists(qfile)) {
-                throw std::runtime_error("PAC query file not found for query " + std::to_string(q) + ": " + qfile);
-            }
-
-            string pac_sql = ReadFileToString(qfile);
-            if (pac_sql.empty()) {
-                throw std::runtime_error("PAC query file " + qfile + " is empty or unreadable");
-            }
-
-            // Run PAC query 3 times
+            // Record baseline (TPCH warm) runs in the CSV. Baseline mode's time_ms is the TPCH warm-run time.
             for (int run = 1; run <= 3; ++run) {
-                auto t0 = std::chrono::steady_clock::now();
-                auto r_pac = con.Query(pac_sql);
-                auto t1 = std::chrono::steady_clock::now();
-                double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                if (r_pac && r_pac->HasError()) {
-                    Log("PAC query " + std::to_string(q) + " run " + std::to_string(run) + " error: " + r_pac->GetError());
-                    double tpch_time_ms = tpch_times_ms.at(run - 1);
-                    csv << q << "," << run << "," << FormatNumber(tpch_time_ms) << ",-1\n";
-                } else {
-                    Log("PAC query " + std::to_string(q) + " run " + std::to_string(run) + " time (ms): " + FormatNumber(pac_time_ms));
-                    double tpch_time_ms = tpch_times_ms.at(run - 1);
-                    csv << q << "," << run << "," << FormatNumber(tpch_time_ms) << "," << FormatNumber(pac_time_ms) << "\n";
+                double tpch_time_ms = tpch_times_ms.at(run - 1);
+                csv << q << ",baseline," << run << "," << FormatNumber(tpch_time_ms) << "\n";
+            }
+
+            string bits_qfile = FindQueryFile(bitslice_dir, q);
+            if (!FileExists(bits_qfile)) {
+                throw std::runtime_error("Bitslice PAC query file not found for query " + std::to_string(q) + ": " + bits_qfile);
+            }
+            string pac_sql_bits = ReadFileToString(bits_qfile);
+            if (pac_sql_bits.empty()) {
+                throw std::runtime_error("Bitslice PAC query file " + bits_qfile + " is empty or unreadable");
+            }
+
+            // naive query file (optional depending on run_naive)
+            string pac_sql_naive;
+            if (run_naive) {
+                string naive_qfile = FindQueryFile(naive_dir, q);
+                if (!FileExists(naive_qfile)) {
+                    throw std::runtime_error("Naive PAC query file not found for query " + std::to_string(q) + ": " + naive_qfile);
+                }
+                pac_sql_naive = ReadFileToString(naive_qfile);
+                if (pac_sql_naive.empty()) {
+                    throw std::runtime_error("Naive PAC query file " + naive_qfile + " is empty or unreadable");
                 }
             }
-        }
 
-        csv.close();
-        Log(string("Benchmark finished. Results written to ") + actual_out);
+        	// Run PAC variants: baseline + bitslice always; naive additionally when requested
+        	vector<pair<string,string>> pac_variants;
+        	pac_variants.emplace_back("bitslice", pac_sql_bits);
+        	if (run_naive) { pac_variants.emplace_back("naive", pac_sql_naive); }
+
+            for (auto &pv : pac_variants) {
+                const string &variant = pv.first;
+                const string &pac_sql = pv.second;
+                string mode_str;
+                if (variant == "bitslice") {
+                    mode_str = "SIMD PAC"; // bitslice implementation
+                } else if (variant == "naive") {
+                    mode_str = "naive PAC";
+                } else {
+                    mode_str = variant;
+                }
+                 // Run PAC query 3 times for this variant
+                 for (int run = 1; run <= 3; ++run) {
+                     auto t0 = std::chrono::steady_clock::now();
+                     auto r_pac = con.Query(pac_sql);
+                     auto t1 = std::chrono::steady_clock::now();
+                     double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                     if (r_pac && r_pac->HasError()) {
+                         // On error, fail fast so failures are obvious.
+                         throw std::runtime_error("PAC (" + variant + ") query " + std::to_string(q) + " run " + std::to_string(run) + " error: " + r_pac->GetError());
+                     } else {
+                         Log("PAC (" + variant + ") query " + std::to_string(q) + " run " + std::to_string(run) + " time (ms): " + FormatNumber(pac_time_ms));
+                        // For PAC rows, time_ms is the PAC execution time.
+                         csv << q << "," << mode_str << "," << run << "," << FormatNumber(pac_time_ms) << "\n";
+                     }
+                 }
+             }
+         }
+
+         csv.close();
+         Log(string("Benchmark finished. Results written to ") + actual_out);
 
         // Automatically call the R plotting script with the generated CSV file (use absolute paths)
         {
@@ -387,11 +423,13 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 
 // Add a small helper for printing usage (placed outside of namespace to avoid analyzer warnings)
 static void PrintUsageMain() {
-    std::cout << "Usage: pac_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv]\n"
-              << "  sf: TPCH scale factor (int, default 10)\n"
-              << "  db_path: DuckDB database file (default 'tpch.db')\n"
-              << "  queries_dir: directory with PAC SQL files (default 'benchmark/tpch_pac_queries')\n"
-              << "  out_csv: optional output CSV path (auto-named if omitted)\n";
+     std::cout << "Usage: pac_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-naive]\n"
+               << "  sf: TPCH scale factor (int, default 10)\n"
+               << "  db_path: DuckDB database file (default 'tpch.db')\n"
+               << "  queries_dir: root directory containing PAC SQL variants (default 'benchmark').\n"
+               << "               subdirectories expected: 'tpch_pac_queries' (bitslice), 'tpch_pac_naive_queries' (naive)\n"
+               << "  out_csv: optional output CSV path (auto-named if omitted)\n"
+               << "  --run-naive: optional flag to instruct the benchmark to run a naive PAC variant as well\n";
 }
 
 // Add a small main so this file builds to an executable
@@ -404,35 +442,51 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
-    if (argc > 5) {
+    if (argc > 6) {
         std::cout << "Error: too many arguments provided." << '\n';
         PrintUsageMain();
         return 1;
     }
 
+    // Preprocess argv to detect the optional --run-naive flag and remove it from positional parsing
+    bool run_naive = false;
+    std::vector<char*> filtered_argv;
+    filtered_argv.reserve(argc);
+    filtered_argv.push_back(argv[0]);
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--run-naive") {
+            run_naive = true;
+            continue;
+        }
+        filtered_argv.push_back(argv[i]);
+    }
+    int fargc = (int)filtered_argv.size();
+    char **fargv = filtered_argv.data();
 
     int argi = 1;
     double sf = 10.0;
     std::string db = "tpch.db";
-    std::string queries_dir = "benchmark/tpch_pac_queries";
+    // default queries_dir is the benchmark root; the caller may override to a different root
+    std::string queries_dir = "benchmark";
     std::string out_csv = ""; // empty means auto-name
 
-    if (argc > argi) {
-        std::istringstream iss(argv[argi]);
+    if (fargc > argi) {
+        std::istringstream iss(fargv[argi]);
         double val;
         if (iss >> val) {
             sf = val;
             argi++;
         }
     }
-    if (argc > argi) {
-        db = argv[argi++];
+    if (fargc > argi) {
+        db = fargv[argi++];
     }
-    if (argc > argi) {
-        queries_dir = argv[argi++];
+    if (fargc > argi) {
+        queries_dir = fargv[argi++];
     }
-    if (argc > argi) {
-        out_csv = argv[argi++];
+    if (fargc > argi) {
+        out_csv = fargv[argi++];
     }
-    return duckdb::RunTPCHBenchmark(db, queries_dir, sf, out_csv);
+    return duckdb::RunTPCHBenchmark(db, queries_dir, sf, out_csv, run_naive);
 }

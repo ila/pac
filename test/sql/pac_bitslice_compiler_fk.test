@@ -50,44 +50,151 @@ pRAGMA add_pac_privacy_unit('bitslice_fk_pu');
 statement ok
 set pac_seed = 42;
 
-# # Single GROUP BY query on the non-PU table (grp, SUM(val))
-# query II
-# SELECT grp, SUM(val)
-# FROM bitslice_fk_child
-# GROUP BY grp
-# ORDER BY grp
-# ----
-# 0	0
-# 1	15
-# 2	40
-# 3	25
-# 4	60
-#
-# # Testing with AVG
-# query II
-# SELECT grp, AVG(val)::DECIMAL(5, 2)
-# FROM bitslice_fk_child
-# GROUP BY grp
-# ORDER BY grp
-# ----
-# 0	0.00
-# 1	3.00
-# 2	8.00
-# 3	5.00
-# 4	12.00
-#
-# # 2-join aggregation: t1 (leaf) -> t2 (child) -> t3 (pu). t1 is scanned and t3 is the PU
-# query II
-# SELECT l.grp, SUM(l.val)
-# FROM bitslice_fk_leaf l
-# GROUP BY l.grp
-# ORDER BY l.grp
-# ----
-# 0	0
-# 1	15
-# 2	40
-# 3	25
-# 4	60
+# Single GROUP BY query on the non-PU table (grp, SUM(val))
+query II
+SELECT grp, SUM(val)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Testing with AVG
+query II
+SELECT grp, AVG(val)::DECIMAL(5, 2)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY grp
+----
+0	0.00
+1	3.00
+2	8.00
+3	5.00
+4	12.00
+
+# 2-join aggregation: t1 (leaf) -> t2 (child) -> t3 (pu). t1 is scanned and t3 is the PU
+query II
+SELECT l.grp, SUM(l.val)
+FROM bitslice_fk_leaf l
+GROUP BY l.grp
+ORDER BY l.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Additional tests: deeper chains and joins between two non-PU tables linked to the same PU
+
+# Create a deep chain (child -> deep1 -> deep2 -> deepleaf). We will scan deepleaf (PU not directly scanned)
+statement ok
+CREATE TABLE bitslice_deep1(
+    id INTEGER PRIMARY KEY,
+    child_id INTEGER REFERENCES bitslice_fk_child(id)
+);
+
+statement ok
+CREATE TABLE bitslice_deep2(
+    id INTEGER PRIMARY KEY,
+    d1_id INTEGER REFERENCES bitslice_deep1(id)
+);
+
+statement ok
+CREATE TABLE bitslice_deepleaf(
+    id INTEGER PRIMARY KEY,
+    d2_id INTEGER REFERENCES bitslice_deep2(id),
+    grp INTEGER,
+    val INTEGER
+);
+
+# Populate deep chain (align ids to map to child ids modulo 5)
+statement ok
+INSERT INTO bitslice_deep1
+SELECT i AS id, (i % 5) AS child_id
+FROM range(5) t(i);
+
+statement ok
+INSERT INTO bitslice_deep2
+SELECT i AS id, (i % 5) AS d1_id
+FROM range(5) t(i);
+
+# deepleaf: 25 rows mapping to deep2 ids (0..4)
+statement ok
+INSERT INTO bitslice_deepleaf
+SELECT i AS id, (i % 5) AS d2_id, (i % 5) AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
+# Aggregation over deepleaf (SUM)
+query II
+SELECT grp, SUM(val)
+FROM bitslice_deepleaf
+GROUP BY grp
+ORDER BY grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# AVG over deepleaf
+query II
+SELECT grp, AVG(val)::DECIMAL(5,2)
+FROM bitslice_deepleaf
+GROUP BY grp
+ORDER BY grp
+----
+0	0.00
+1	3.00
+2	8.00
+3	5.00
+4	12.00
+
+# Create a second non-PU table that references the same PU (bitslice_fk_side)
+statement ok
+CREATE TABLE bitslice_fk_side(
+    id INTEGER PRIMARY KEY,
+    pu_id INTEGER REFERENCES bitslice_fk_pu(id),
+    grp2 INTEGER,
+    val2 INTEGER
+);
+
+statement ok
+INSERT INTO bitslice_fk_side
+SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp2, (i % 10) AS val2
+FROM range(25) t(i);
+
+# Join two non-PU tables on the PU foreign key (both reference PU but PU is not scanned)
+# We aggregate (c.val + s.val2) grouped by c.grp. Because each group has 5 child rows and 5 side rows per PU,
+# the join produces 25 pairings per group and the sum equals 5*(sum_child + sum_side) = 10*sum_child (since sums equal)
+query II
+SELECT c.grp, SUM(c.val + s.val2)
+FROM bitslice_fk_child c
+JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+GROUP BY c.grp
+ORDER BY c.grp
+----
+0	0
+1	150
+2	400
+3	250
+4	600
+
+# ORDER BY + LIMIT example (top 2 groups by SUM(val))
+query II
+SELECT grp, SUM(val)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY SUM(val) DESC
+LIMIT 2
+----
+4	60
+2	40
 
 # Cleanup
 statement ok
@@ -97,7 +204,19 @@ statement ok
 DROP TABLE bitslice_fk_leaf
 
 statement ok
+DROP TABLE bitslice_deepleaf
+
+statement ok
+DROP TABLE bitslice_deep2
+
+statement ok
+DROP TABLE bitslice_deep1
+
+statement ok
 DROP TABLE bitslice_fk_child
+
+statement ok
+DROP TABLE bitslice_fk_side
 
 statement ok
 DROP TABLE bitslice_fk_pu

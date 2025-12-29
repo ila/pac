@@ -232,7 +232,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 }
 
 unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<LogicalOperator> &plan, const string &table,
-                                        std::vector<string> &pks) {
+                                        idx_t idx) {
 
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 	CatalogSearchPath path(context);
@@ -259,8 +259,7 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 			projection_ids.push_back(column_ids.size() - 1);
 		}
 
-		auto table_index = GetNextTableIndex(plan);
-		unique_ptr<LogicalGet> get = make_uniq<LogicalGet>(table_index, scan_function, std::move(bind_data),
+		unique_ptr<LogicalGet> get = make_uniq<LogicalGet>(idx, scan_function, std::move(bind_data),
 		                                                   std::move(return_types), std::move(return_names));
 		get->SetColumnIds(std::move(column_ids));
 		get->projection_ids = projection_ids; // we project everything
@@ -325,16 +324,18 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	std::unordered_map<std::string, unique_ptr<LogicalGet>> get_map;
 	// Preserve creation order: store raw pointers (ownership kept in get_map) in this vector
 	std::vector<LogicalGet *> ordered_gets;
+	auto idx = GetNextTableIndex(plan);
 	for (auto &table : gets_missing) {
 		auto it = check.table_metadata.find(table);
 		if (it == check.table_metadata.end()) {
 			throw InternalException("PAC compiler: missing table metadata for missing GET: " + table);
 		}
 		std::vector<std::string> pks = it->second.pks;
-		auto get = CreateLogicalGet(input.context, plan, table, pks);
+		auto get = CreateLogicalGet(input.context, plan, table, idx);
 		// store in map (ownership) and record pointer to preserve order
 		get_map[table] = std::move(get);
 		ordered_gets.push_back(get_map[table].get());
+		idx++;
 	}
 
 	// Find the unique_ptr reference to the existing LogicalGet for gets_present[0]
