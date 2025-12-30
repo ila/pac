@@ -176,13 +176,14 @@ static void PacMinMaxInitialize(const AggregateFunction &, data_ptr_t p) {
 	void NAME(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p, idx_t count) {                   \
 		PacMinMaxUpdate<PacMinMaxIntState<SIGNED, IS_MAX, MAXLEVEL>, IS_MAX, INTYPE>(inputs, aggr, n, state_p, count); \
 	}
-INT_UPDATE_WRAPPER(PacMinMaxUpdateInt8, true, 4, int8_t)
-INT_UPDATE_WRAPPER(PacMinMaxUpdateInt16, true, 4, int16_t)
-INT_UPDATE_WRAPPER(PacMinMaxUpdateInt32, true, 4, int32_t)
+// Use type-appropriate MAXLEVEL: each type cascades up to its own width only
+INT_UPDATE_WRAPPER(PacMinMaxUpdateInt8, true, 1, int8_t)
+INT_UPDATE_WRAPPER(PacMinMaxUpdateInt16, true, 2, int16_t)
+INT_UPDATE_WRAPPER(PacMinMaxUpdateInt32, true, 3, int32_t)
 INT_UPDATE_WRAPPER(PacMinMaxUpdateInt64, true, 4, int64_t)
-INT_UPDATE_WRAPPER(PacMinMaxUpdateUInt8, false, 4, uint8_t)
-INT_UPDATE_WRAPPER(PacMinMaxUpdateUInt16, false, 4, uint16_t)
-INT_UPDATE_WRAPPER(PacMinMaxUpdateUInt32, false, 4, uint32_t)
+INT_UPDATE_WRAPPER(PacMinMaxUpdateUInt8, false, 1, uint8_t)
+INT_UPDATE_WRAPPER(PacMinMaxUpdateUInt16, false, 2, uint16_t)
+INT_UPDATE_WRAPPER(PacMinMaxUpdateUInt32, false, 3, uint32_t)
 INT_UPDATE_WRAPPER(PacMinMaxUpdateUInt64, false, 4, uint64_t)
 INT_UPDATE_WRAPPER(PacMinMaxUpdateHugeInt, true, 5, hugeint_t)
 INT_UPDATE_WRAPPER(PacMinMaxUpdateUHugeInt, false, 5, uhugeint_t)
@@ -205,13 +206,14 @@ void PacMinMaxUpdateDoubleW(Vector in[], AggregateInputData &a, idx_t n, data_pt
 		PacMinMaxScatterUpdate<PacMinMaxIntState<SIGNED, IS_MAX, MAXLEVEL>, IS_MAX, INTYPE>(input, aggr, n, states,    \
 		                                                                                    count);                    \
 	}
-INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateInt8, true, 4, int8_t)
-INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateInt16, true, 4, int16_t)
-INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateInt32, true, 4, int32_t)
+// Use type-appropriate MAXLEVEL: each type cascades up to its own width only
+INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateInt8, true, 1, int8_t)
+INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateInt16, true, 2, int16_t)
+INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateInt32, true, 3, int32_t)
 INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateInt64, true, 4, int64_t)
-INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUInt8, false, 4, uint8_t)
-INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUInt16, false, 4, uint16_t)
-INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUInt32, false, 4, uint32_t)
+INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUInt8, false, 1, uint8_t)
+INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUInt16, false, 2, uint16_t)
+INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUInt32, false, 3, uint32_t)
 INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUInt64, false, 4, uint64_t)
 INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateHugeInt, true, 5, hugeint_t)
 INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUHugeInt, false, 5, uhugeint_t)
@@ -227,13 +229,37 @@ void PacMinMaxScatterUpdateDoubleW(Vector in[], AggregateInputData &a, idx_t n, 
 	PacMinMaxScatterUpdate<PacMinMaxFloatState<IS_MAX, 2>, IS_MAX, double>(in, a, n, s, c);
 }
 
-// Combine wrappers
+// Combine wrappers - one per (SIGNED, MAXLEVEL) combination
 template <bool IS_MAX>
-void PacMinMaxCombineIntSigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+void PacMinMaxCombineInt8Signed(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+	PacMinMaxCombine<PacMinMaxIntState<true, IS_MAX, 1>, IS_MAX>(src, dst, a, c);
+}
+template <bool IS_MAX>
+void PacMinMaxCombineInt16Signed(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+	PacMinMaxCombine<PacMinMaxIntState<true, IS_MAX, 2>, IS_MAX>(src, dst, a, c);
+}
+template <bool IS_MAX>
+void PacMinMaxCombineInt32Signed(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+	PacMinMaxCombine<PacMinMaxIntState<true, IS_MAX, 3>, IS_MAX>(src, dst, a, c);
+}
+template <bool IS_MAX>
+void PacMinMaxCombineInt64Signed(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
 	PacMinMaxCombine<PacMinMaxIntState<true, IS_MAX, 4>, IS_MAX>(src, dst, a, c);
 }
 template <bool IS_MAX>
-void PacMinMaxCombineIntUnsigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+void PacMinMaxCombineInt8Unsigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+	PacMinMaxCombine<PacMinMaxIntState<false, IS_MAX, 1>, IS_MAX>(src, dst, a, c);
+}
+template <bool IS_MAX>
+void PacMinMaxCombineInt16Unsigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+	PacMinMaxCombine<PacMinMaxIntState<false, IS_MAX, 2>, IS_MAX>(src, dst, a, c);
+}
+template <bool IS_MAX>
+void PacMinMaxCombineInt32Unsigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+	PacMinMaxCombine<PacMinMaxIntState<false, IS_MAX, 3>, IS_MAX>(src, dst, a, c);
+}
+template <bool IS_MAX>
+void PacMinMaxCombineInt64Unsigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
 	PacMinMaxCombine<PacMinMaxIntState<false, IS_MAX, 4>, IS_MAX>(src, dst, a, c);
 }
 template <bool IS_MAX>
@@ -264,33 +290,33 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 	// Select implementation based on physical type
 	// NOTE: function.update = scatter update (Vector &states)
 	//       function.simple_update = simple update (data_ptr_t state_p)
-	// Note: MAXLEVEL=4 for int8-int64 types, MAXLEVEL=5 for hugeint types
+	// Each type uses MAXLEVEL matching its width: int8=1, int16=2, int32=3, int64=4, hugeint=5
 	switch (physical_type) {
 	case PhysicalType::INT8:
-		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<true, IS_MAX, 4>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<true, IS_MAX, 4>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<true, IS_MAX, 1>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<true, IS_MAX, 1>>;
 		function.update = PacMinMaxScatterUpdateInt8<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateInt8<IS_MAX>;
-		function.combine = PacMinMaxCombineIntSigned<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<true, IS_MAX, 4>, int8_t>;
+		function.combine = PacMinMaxCombineInt8Signed<IS_MAX>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<true, IS_MAX, 1>, int8_t>;
 		break;
 
 	case PhysicalType::INT16:
-		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<true, IS_MAX, 4>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<true, IS_MAX, 4>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<true, IS_MAX, 2>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<true, IS_MAX, 2>>;
 		function.update = PacMinMaxScatterUpdateInt16<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateInt16<IS_MAX>;
-		function.combine = PacMinMaxCombineIntSigned<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<true, IS_MAX, 4>, int16_t>;
+		function.combine = PacMinMaxCombineInt16Signed<IS_MAX>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<true, IS_MAX, 2>, int16_t>;
 		break;
 
 	case PhysicalType::INT32:
-		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<true, IS_MAX, 4>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<true, IS_MAX, 4>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<true, IS_MAX, 3>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<true, IS_MAX, 3>>;
 		function.update = PacMinMaxScatterUpdateInt32<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateInt32<IS_MAX>;
-		function.combine = PacMinMaxCombineIntSigned<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<true, IS_MAX, 4>, int32_t>;
+		function.combine = PacMinMaxCombineInt32Signed<IS_MAX>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<true, IS_MAX, 3>, int32_t>;
 		break;
 
 	case PhysicalType::INT64:
@@ -298,35 +324,35 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<true, IS_MAX, 4>>;
 		function.update = PacMinMaxScatterUpdateInt64<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateInt64<IS_MAX>;
-		function.combine = PacMinMaxCombineIntSigned<IS_MAX>;
+		function.combine = PacMinMaxCombineInt64Signed<IS_MAX>;
 		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<true, IS_MAX, 4>, int64_t>;
 		break;
 
 	case PhysicalType::UINT8:
-		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<false, IS_MAX, 4>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<false, IS_MAX, 4>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<false, IS_MAX, 1>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<false, IS_MAX, 1>>;
 		function.update = PacMinMaxScatterUpdateUInt8<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateUInt8<IS_MAX>;
-		function.combine = PacMinMaxCombineIntUnsigned<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<false, IS_MAX, 4>, uint8_t>;
+		function.combine = PacMinMaxCombineInt8Unsigned<IS_MAX>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<false, IS_MAX, 1>, uint8_t>;
 		break;
 
 	case PhysicalType::UINT16:
-		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<false, IS_MAX, 4>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<false, IS_MAX, 4>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<false, IS_MAX, 2>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<false, IS_MAX, 2>>;
 		function.update = PacMinMaxScatterUpdateUInt16<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateUInt16<IS_MAX>;
-		function.combine = PacMinMaxCombineIntUnsigned<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<false, IS_MAX, 4>, uint16_t>;
+		function.combine = PacMinMaxCombineInt16Unsigned<IS_MAX>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<false, IS_MAX, 2>, uint16_t>;
 		break;
 
 	case PhysicalType::UINT32:
-		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<false, IS_MAX, 4>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<false, IS_MAX, 4>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxIntState<false, IS_MAX, 3>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<false, IS_MAX, 3>>;
 		function.update = PacMinMaxScatterUpdateUInt32<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateUInt32<IS_MAX>;
-		function.combine = PacMinMaxCombineIntUnsigned<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<false, IS_MAX, 4>, uint32_t>;
+		function.combine = PacMinMaxCombineInt32Unsigned<IS_MAX>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<false, IS_MAX, 3>, uint32_t>;
 		break;
 
 	case PhysicalType::UINT64:
@@ -334,7 +360,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 		function.initialize = PacMinMaxInitialize<PacMinMaxIntState<false, IS_MAX, 4>>;
 		function.update = PacMinMaxScatterUpdateUInt64<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateUInt64<IS_MAX>;
-		function.combine = PacMinMaxCombineIntUnsigned<IS_MAX>;
+		function.combine = PacMinMaxCombineInt64Unsigned<IS_MAX>;
 		function.finalize = PacMinMaxFinalize<PacMinMaxIntState<false, IS_MAX, 4>, uint64_t>;
 		break;
 
@@ -473,8 +499,14 @@ INST_S(PacMinMaxScatterUpdateDoubleW);
 INST_S(PacMinMaxScatterUpdateHugeInt);
 INST_S(PacMinMaxScatterUpdateUHugeInt);
 
-INST_C(PacMinMaxCombineIntSigned);
-INST_C(PacMinMaxCombineIntUnsigned);
+INST_C(PacMinMaxCombineInt8Signed);
+INST_C(PacMinMaxCombineInt16Signed);
+INST_C(PacMinMaxCombineInt32Signed);
+INST_C(PacMinMaxCombineInt64Signed);
+INST_C(PacMinMaxCombineInt8Unsigned);
+INST_C(PacMinMaxCombineInt16Unsigned);
+INST_C(PacMinMaxCombineInt32Unsigned);
+INST_C(PacMinMaxCombineInt64Unsigned);
 INST_C(PacMinMaxCombineDoubleWrapper);
 INST_C(PacMinMaxCombineHugeIntSigned);
 INST_C(PacMinMaxCombineHugeIntUnsigned);
