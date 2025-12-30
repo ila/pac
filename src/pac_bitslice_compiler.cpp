@@ -21,6 +21,9 @@
 
 namespace duckdb {
 
+// Forward-declare helper so it can be used by functions defined earlier in this file.
+static idx_t EnsureProjectedColumn(LogicalGet &g, const std::string &col_name);
+
 // Helper: ensure PK columns are present in a LogicalGet's column_ids and projection_ids.
 // If a PK column is not present in the scan, this function adds its column id to the LogicalGet
 // and ensures it is projected and that column bindings are regenerated.
@@ -30,57 +33,88 @@ void AddPKColumns(LogicalGet &get, const std::vector<std::string> &pks) {
 	if (!table_entry_ptr) {
 		throw InternalException("PAC compiler: expected LogicalGet to be bound to a table when PKs are present");
 	}
-	auto &table_entry = *table_entry_ptr;
-
 	// For each PK name, ensure it is present in the LogicalGet's column_ids and projection
 	for (auto &pk : pks) {
-		bool found = false;
-		// Check if any of the returned names equals PK (case-sensitive as stored)
-		for (idx_t i = 0; i < get.names.size(); i++) {
-			if (get.names[i] == pk) {
-				// Ensure this column is part of projection_ids (so it's produced by the scan)
-				// Find the corresponding ColumnIndex in get.GetColumnIds() - match by primary index
-				for (idx_t cid = 0; cid < get.GetColumnIds().size(); cid++) {
-					auto col_index = get.GetColumnIds()[cid];
-					if (!col_index.IsVirtualColumn() && col_index.GetPrimaryIndex() == i) {
-						// mark projection if not already
-						if (std::find(get.projection_ids.begin(), get.projection_ids.end(), cid) ==
-						    get.projection_ids.end()) {
-							get.projection_ids.push_back(cid);
-						}
-						found = true;
-						break;
-					}
-				}
-				if (found) {
-					break;
-				}
-			}
-		}
-		if (!found) {
-			// Need to add the column id for this PK: find its logical index in the table
-			idx_t logical_idx = DConstants::INVALID_INDEX;
-			{
-				idx_t ti = 0;
-				for (auto &col : table_entry.GetColumns().Logical()) {
-					if (col.Name() == pk) {
-						logical_idx = ti;
-						break;
-					}
-					ti++;
-				}
-			}
-			if (logical_idx == DConstants::INVALID_INDEX) {
-				throw InternalException("PAC compiler: could not find PK column " + pk + " in table");
-			}
-			// Add the column id and project it
-			get.AddColumnId(logical_idx);
-			get.projection_ids.push_back(get.GetColumnIds().size() - 1);
-			// Ensure returned_types/names are OK - LogicalGet stores full returned_types/names already
-			// Generate new column bindings for the added column count
-			get.GenerateColumnBindings(get.table_index, get.GetColumnIds().size());
+		idx_t proj_idx = EnsureProjectedColumn(get, pk);
+		if (proj_idx == DConstants::INVALID_INDEX) {
+			// If the helper couldn't find the column in the table, this is an error
+			throw InternalException("PAC compiler: could not find PK column " + pk + " in table");
 		}
 	}
+}
+
+// New helper: ensure a column is projected in a LogicalGet and return its projection index
+// If the column is not present, attempt to add it from the underlying table schema. Returns
+// DConstants::INVALID_INDEX if the table or column cannot be found (caller can decide how to handle).
+static idx_t EnsureProjectedColumn(LogicalGet &g, const std::string &col_name) {
+	// try existing projected columns by matching returned names via ColumnIndex primary
+	for (idx_t cid = 0; cid < g.GetColumnIds().size(); ++cid) {
+		auto col_idx = g.GetColumnIds()[cid];
+		if (!col_idx.IsVirtualColumn()) {
+			idx_t primary = col_idx.GetPrimaryIndex();
+			if (primary < g.names.size() && g.names[primary] == col_name) {
+				return cid;
+			}
+		}
+	}
+	// otherwise add column from table schema
+	auto table_entry = g.GetTable();
+	if (!table_entry) {
+		return DConstants::INVALID_INDEX;
+	}
+	idx_t logical_idx = DConstants::INVALID_INDEX;
+	idx_t ti = 0;
+	for (auto &col : table_entry->GetColumns().Logical()) {
+		if (col.Name() == col_name) {
+			logical_idx = ti;
+			break;
+		}
+		ti++;
+	}
+	if (logical_idx == DConstants::INVALID_INDEX) {
+		return DConstants::INVALID_INDEX;
+	}
+	g.AddColumnId(logical_idx);
+	g.projection_ids.push_back(g.GetColumnIds().size() - 1);
+	g.GenerateColumnBindings(g.table_index, g.GetColumnIds().size());
+	return g.GetColumnIds().size() - 1;
+}
+
+// Helper: build XOR(pk1, pk2, ...) then hash(...) bound expression for the given LogicalGet's PKs.
+static unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, LogicalGet &get,
+                                                  const std::vector<std::string> &pks) {
+	vector<unique_ptr<Expression>> pk_cols;
+	for (auto &pk : pks) {
+		// find the binding for this pk in the LogicalGet projection (use centralized helper)
+		idx_t proj_idx = EnsureProjectedColumn(get, pk);
+		if (proj_idx == DConstants::INVALID_INDEX) {
+			throw InternalException("PAC compiler: failed to find PK column " + pk);
+		}
+		// create BoundColumnRefExpression referencing table_index and proj_idx
+		auto col_binding = ColumnBinding(get.table_index, proj_idx);
+		// determine the column's logical type from the LogicalGet's column index
+		auto col_index_obj = get.GetColumnIds()[proj_idx];
+		auto &col_type = get.GetColumnType(col_index_obj);
+		pk_cols.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
+	}
+
+	// If there is only one PK, no XOR needed
+	unique_ptr<Expression> xor_expr;
+	if (pk_cols.size() == 1) {
+		xor_expr = std::move(pk_cols[0]);
+	} else {
+		// Build chain using optimizer.BindScalarFunction with operator "^" (bitwise XOR)
+		auto left = std::move(pk_cols[0]);
+		for (size_t i = 1; i < pk_cols.size(); ++i) {
+			auto right = std::move(pk_cols[i]);
+			// use the public two-arg BindScalarFunction
+			left = input.optimizer.BindScalarFunction("^", std::move(left), std::move(right));
+		}
+		xor_expr = std::move(left);
+	}
+
+	// Finally bind the hash over the xor_expr
+	return input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
 }
 
 unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &check, ClientContext &context,
@@ -123,37 +157,10 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 
 	// Helper: ensure a column is projected in a LogicalGet and return its projection index
 	auto ensure_proj_idx = [&](LogicalGet *g, const std::string &col_name) -> idx_t {
-		// try existing projected columns by matching returned names via ColumnIndex primary
-		for (idx_t cid = 0; cid < g->GetColumnIds().size(); ++cid) {
-			auto col_idx = g->GetColumnIds()[cid];
-			if (!col_idx.IsVirtualColumn()) {
-				idx_t primary = col_idx.GetPrimaryIndex();
-				if (primary < g->names.size() && g->names[primary] == col_name) {
-					return cid;
-				}
-			}
-		}
-		// otherwise add column from table schema
-		auto table_entry = g->GetTable();
-		if (!table_entry) {
+		if (!g) {
 			return DConstants::INVALID_INDEX;
 		}
-		idx_t logical_idx = DConstants::INVALID_INDEX;
-		idx_t ti = 0;
-		for (auto &col : table_entry->GetColumns().Logical()) {
-			if (col.Name() == col_name) {
-				logical_idx = ti;
-				break;
-			}
-			ti++;
-		}
-		if (logical_idx == DConstants::INVALID_INDEX) {
-			return DConstants::INVALID_INDEX;
-		}
-		g->AddColumnId(logical_idx);
-		g->projection_ids.push_back(g->GetColumnIds().size() - 1);
-		g->GenerateColumnBindings(g->table_index, g->GetColumnIds().size());
-		return g->GetColumnIds().size() - 1;
+		return EnsureProjectedColumn(*g, col_name);
 	};
 
 	vector<JoinCondition> conditions;
@@ -314,6 +321,24 @@ void PopulateGetsFromFKPath(const PACCompatibilityResult &check, std::vector<std
 	}
 }
 
+string GetPacAggregateFunctionName(const string &function_name) {
+	string pac_function_name;
+	if (function_name == "sum" || function_name == "sum_no_overflow") {
+		pac_function_name = "pac_sum";
+	} else if (function_name == "count" || function_name == "count_star") {
+		pac_function_name = "pac_count";
+	} else if (function_name == "avg") {
+		pac_function_name = "pac_avg";
+	} else if (function_name == "min") {
+		pac_function_name = "pac_min";
+	} else if (function_name == "max") {
+		pac_function_name = "pac_max";
+	} else {
+		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
+	}
+	return pac_function_name;
+}
+
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const std::vector<std::string> &gets_missing,
                          const std::vector<std::string> &gets_present, const std::vector<std::string> &fk_path,
@@ -435,53 +460,11 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	unique_ptr<Expression> hash_input_expr;
 
 	// Build XOR(pk1, pk2, ...) as a scalar expression then hash(...)
-	vector<unique_ptr<Expression>> pk_cols;
-	for (auto &pk : pu_pks) {
-		// find the binding for this pk in the LogicalGet projection (search GetColumnIds and names)
-		idx_t proj_idx = DConstants::INVALID_INDEX;
-		for (idx_t cid = 0; cid < pu_get->GetColumnIds().size(); cid++) {
-			auto col_index = pu_get->GetColumnIds()[cid];
-			idx_t primary = col_index.GetPrimaryIndex();
-			if (!col_index.IsVirtualColumn() && primary < pu_get->names.size() && pu_get->names[primary] == pk) {
-				proj_idx = cid;
-				break;
-			}
-		}
-		if (proj_idx == DConstants::INVALID_INDEX) {
-			throw InternalException("PAC compiler: failed to find PK column " + pk);
-		}
-		// create BoundColumnRefExpression referencing table_index and proj_idx
-		auto col_binding = ColumnBinding(pu_get->table_index, proj_idx);
-		// determine the column's logical type from the LogicalGet's column index
-		auto col_index_obj = pu_get->GetColumnIds()[proj_idx];
-		auto &col_type = pu_get->GetColumnType(col_index_obj);
-		pk_cols.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
-
-		// If there is only one PK, no XOR needed
-		unique_ptr<Expression> xor_expr;
-		if (pk_cols.size() == 1) {
-			xor_expr = std::move(pk_cols[0]);
-		} else {
-			// Build chain using optimizer.BindScalarFunction with operator "^" (bitwise XOR)
-			// Start with first two, then iteratively XOR with the next
-			auto left = std::move(pk_cols[0]);
-			for (size_t i = 1; i < pk_cols.size(); ++i) {
-				auto right = std::move(pk_cols[i]);
-				// use the public two-arg BindScalarFunction
-				left = input.optimizer.BindScalarFunction("^", std::move(left), std::move(right));
-			}
-			xor_expr = std::move(left);
-		}
-
-		// Finally bind the hash over the xor_expr
-		auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
-		hash_input_expr = std::move(bound_hash);
-	}
+	hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
 
 	// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
 	// Hardcoded for now! Assumes only one aggregate expression (fixme)
 	unique_ptr<Expression> value_child;
-	string pac_function_name;
 	string function_name;
 	if (agg->expressions[0]->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
 		auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
@@ -500,19 +483,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	arg_types.push_back(hash_input_expr->return_type);
 	arg_types.push_back(value_child->return_type);
 
-	if (function_name == "sum" || function_name == "sum_no_overflow") {
-		pac_function_name = "pac_sum";
-	} else if (function_name == "count" || function_name == "count_star") {
-		pac_function_name = "pac_count";
-	} else if (function_name == "avg") {
-		pac_function_name = "pac_avg";
-	} else if (function_name == "min") {
-		pac_function_name = "pac_min";
-	} else if (function_name == "max") {
-		pac_function_name = "pac_max";
-	} else {
-		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
-	}
+	string pac_function_name = GetPacAggregateFunctionName(function_name);
 
 	auto &entry = Catalog::GetSystemCatalog(input.context)
 	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);
@@ -563,55 +534,13 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
 		hash_input_expr = std::move(bound_hash);
 	} else {
-		// Build XOR(pk1, pk2, ...) as a scalar expression then hash(...)
-		vector<unique_ptr<Expression>> pk_cols;
-		for (auto &pk : pks) {
-			// find the binding for this pk in the LogicalGet projection (search GetColumnIds and names)
-			idx_t proj_idx = DConstants::INVALID_INDEX;
-			for (idx_t cid = 0; cid < get.GetColumnIds().size(); cid++) {
-				auto col_index = get.GetColumnIds()[cid];
-				idx_t primary = col_index.GetPrimaryIndex();
-				if (!col_index.IsVirtualColumn() && primary < get.names.size() && get.names[primary] == pk) {
-					proj_idx = cid;
-					break;
-				}
-			}
-			if (proj_idx == DConstants::INVALID_INDEX) {
-				throw InternalException("PAC compiler: failed to find PK column " + pk);
-			}
-			// create BoundColumnRefExpression referencing table_index and proj_idx
-			auto col_binding = ColumnBinding(get.table_index, proj_idx);
-			// determine the column's logical type from the LogicalGet's column index
-			auto col_index_obj = get.GetColumnIds()[proj_idx];
-			auto &col_type = get.GetColumnType(col_index_obj);
-			pk_cols.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
-		}
-
-		// If there is only one PK, no XOR needed
-		unique_ptr<Expression> xor_expr;
-		if (pk_cols.size() == 1) {
-			xor_expr = std::move(pk_cols[0]);
-		} else {
-			// Build chain using optimizer.BindScalarFunction with operator "^" (bitwise XOR)
-			// Start with first two, then iteratively XOR with the next
-			auto left = std::move(pk_cols[0]);
-			for (size_t i = 1; i < pk_cols.size(); ++i) {
-				auto right = std::move(pk_cols[i]);
-				// use the public two-arg BindScalarFunction
-				left = input.optimizer.BindScalarFunction("^", std::move(left), std::move(right));
-			}
-			xor_expr = std::move(left);
-		}
-
-		// Finally bind the hash over the xor_expr
-		auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
-		hash_input_expr = std::move(bound_hash);
+		// Replaced duplicated inline logic with helper
+		hash_input_expr = BuildXorHashFromPKs(input, get, pks);
 	}
 
 	// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
 	// Hardcoded for now! Assumes only one aggregate expression (fixme)
 	unique_ptr<Expression> value_child;
-	string pac_function_name;
 	string function_name;
 	if (agg->expressions[0]->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
 		auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
@@ -630,19 +559,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	arg_types.push_back(hash_input_expr->return_type);
 	arg_types.push_back(value_child->return_type);
 
-	if (function_name == "sum" || function_name == "sum_no_overflow") {
-		pac_function_name = "pac_sum";
-	} else if (function_name == "count" || function_name == "count_star") {
-		pac_function_name = "pac_count";
-	} else if (function_name == "avg") {
-		pac_function_name = "pac_avg";
-	} else if (function_name == "min") {
-		pac_function_name = "pac_min";
-	} else if (function_name == "max") {
-		pac_function_name = "pac_max";
-	} else {
-		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
-	}
+	string pac_function_name = GetPacAggregateFunctionName(function_name);
 
 	auto &entry = Catalog::GetSystemCatalog(input.context)
 	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);

@@ -34,7 +34,8 @@ static bool ContainsCrossJoinWithGenerateSeries(const LogicalOperator &op) {
 }
 
 static bool IsAllowedAggregate(const std::string &func) {
-	static const std::unordered_set<std::string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min", "max"};
+	static const std::unordered_set<std::string> allowed = {
+	    "sum", "sum_no_overflow", "count", "count_star", "avg", "min", "max"};
 	std::string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return allowed.count(lower_func) > 0;
