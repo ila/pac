@@ -4,6 +4,8 @@
 
 #include "duckdb.hpp"
 #include "pac_aggregate.hpp"
+#include <cstdint>
+#include <type_traits>
 
 #ifndef PAC_SUM_HPP
 #define PAC_SUM_HPP
@@ -54,7 +56,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 
 // for benchmarking/reproducibility purposes, we can disable cascading counters (just sum directly to the largest tyoe)
 // and in cascading mode we can still use eager memory allocation.
-//#define PAC_SUMAVG_NONCASCADING 1 // seems 10x slower on Apple
+#define PAC_SUMAVG_NONCASCADING 1 // seems 10x slower on Apple
 //#define PAC_SUMAVG_NONLAZY 1  // Pre-allocate all levels at initialization
 
 // NULL handling: by default we ignore NULLs (safe behavior, like DuckDB's SUM/AVG).
@@ -65,8 +67,10 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // Only beneficial on x86 which has variable-shift SIMD (vpsrlvq). ARM lacks this and
 // showed no benefit from float cascading approaches (SWAR, lookup tables, etc.)
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-#define PAC_SUM_FLOAT_CASCADING 1
+#define PAC_SUMAVG_FLOAT_CASCADING 1
 #endif
+//#define PAC_SUMAVG_TENFOLDOPT 1
+
 
 // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
 // This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
@@ -109,7 +113,7 @@ AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *__restrict__ total, V
 	}
 }
 
-#ifdef PAC_SUM_FLOAT_CASCADING
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
 // SWAR approach for x86: extract bytes, expand bits to float masks via union, multiply-accumulate
 // x86 has variable-shift SIMD (vpsrlvq) so this vectorizes well
 // prototyped here: https://godbolt.org/z/jodKW3er7
@@ -135,7 +139,50 @@ AUTOVECTORIZE static inline void AddToTotalsFloat(float *total, float value, uin
 		}
 	}
 }
-#endif // PAC_SUM_FLOAT_CASCADING
+#endif // PAC_SUMAVG_FLOAT_CASCADING
+
+
+#ifdef PAC_SUMAVG_TENFOLDOPT
+static inline bool divisible_by(int64_t v, int64_t inv, int64_t d) {
+	int64_t q = (v * inv) >> 38;
+	return q * d == v;
+}
+
+static inline uint8_t is_tenfold(int64_t v) {
+	// Value 0 is technically divisible by any power of 10, but treating it as tenfold
+	// doesn't help (0/10^z=0, 0*10^z=0) and sets up misleading factors
+	if (v == 0) {
+		return 0;
+	}
+	if (v > -274877906943LL && v < 274877906943LL) {
+		if (divisible_by(v, 2748779070LL, 100)) {
+			return divisible_by(v, 27487791LL, 10000) ? 4 : 2;
+		} else {
+			return divisible_by(v, 27487790695LL, 10) ? 1 : 0;
+		}
+	}
+	return 0; // out of the domain for quick calculation
+}
+
+// Lookup table for powers of 10 (used by tenfold optimization)
+static constexpr int64_t POWERS_OF_10[] = {1, 10, 100, 1000, 10000};
+
+// Fast division by powers of 10 - using constant divisors so compiler optimizes
+static inline int64_t fast_div10(int64_t v, uint8_t n) {
+	switch (n) {
+	case 1:
+		return v / 10;
+	case 2:
+		return v / 100;
+	case 3:
+		return v / 1000;
+	case 4:
+		return v / 10000;
+	default:
+		return v; // n=0 means no division
+	}
+}
+#endif // PAC_SUMAVG_TENFOLDOPT
 
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
@@ -176,6 +223,16 @@ struct PacSumIntState {
 #ifndef PAC_SUMAVG_NONCASCADING
 	// these hold the exact subtotal of each aggregation level, we flush once we see this overflow
 	T64 exact_total8, exact_total16, exact_total32, exact_total64;
+
+#ifdef PAC_SUMAVG_TENFOLDOPT
+	// Tenfold optimization: track power-of-10 divisor per level for DECIMAL compression
+	// tenfold[0]=lvl8, tenfold[1]=lvl16, tenfold[2]=lvl32, tenfold[3]=unused
+	static constexpr uint8_t TENFOLD_UNINITIALIZED = 255;
+	union {
+		uint32_t anytenfolds; // Quick check: any level has tenfold tracking? (non-zero if yes)
+		uint8_t tenfold[4];   // Per-level tenfold factor (power of 10)
+	};
+#endif // PAC_SUMAVG_TENFOLDOPT
 #endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
 #ifdef PAC_SUMAVG_UNSAFENULL
@@ -243,6 +300,23 @@ struct PacSumIntState {
 		}
 	}
 
+#ifdef PAC_SUMAVG_TENFOLDOPT
+	// Cascade with tenfold multiplier: applies 10^factor during cascade from 32->64
+	// This is needed because level 64 doesn't track tenfold factors
+	inline void Cascade32To64WithTenfold() {
+		const T32 *src = reinterpret_cast<const T32 *>(probabilistic_total32);
+		T64 *dst = reinterpret_cast<T64 *>(probabilistic_total64);
+		T64 multiplier =
+		    (tenfold[2] > 0 && tenfold[2] != TENFOLD_UNINITIALIZED) ? static_cast<T64>(POWERS_OF_10[tenfold[2]]) : 1;
+		constexpr int SRC_PER_U64 = 2; // 64/32
+		for (int bit = 0; bit < 64; bit++) {
+			int src_idx = (bit % 32) * SRC_PER_U64 + (bit / 32);
+			dst[bit] += static_cast<T64>(src[src_idx]) * multiplier;
+		}
+		tenfold[2] = TENFOLD_UNINITIALIZED; // Reset level 32's factor
+	}
+#endif // PAC_SUMAVG_TENFOLDOPT
+
 	// Flush32: cascade probabilistic_total32 to probabilistic_total64
 	AUTOVECTORIZE inline void Flush32(int64_t value, bool force) {
 		D_ASSERT(probabilistic_total32);
@@ -252,10 +326,24 @@ struct PacSumIntState {
 			if (would_overflow) {
 				exact_total64 = EnsureLevelAllocated(probabilistic_total64, 64, exact_total64);
 			}
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			// Get multiplier before cascade (which resets tenfold[2])
+			T64 multiplier =
+			    (tenfold[2] > 0 && tenfold[2] != TENFOLD_UNINITIALIZED) ? static_cast<T64>(POWERS_OF_10[tenfold[2]]) : 1;
+			// Use tenfold-aware cascade since level 64 doesn't track tenfold
+			Cascade32To64WithTenfold();
+			memset(probabilistic_total32, 0, 32 * sizeof(uint64_t));
+			// IMPORTANT: Flush the FULL total (current + incoming) with current multiplier,
+			// then reset to 0. This ensures exact_total32 doesn't retain values with a
+			// different tenfold factor than subsequent cascades might use.
+			Flush64(new_total * multiplier, force);
+			exact_total32 = 0;
+#else
 			CascadeToNextLevel<T32, T64, 32, 64>(probabilistic_total32, probabilistic_total64);
 			memset(probabilistic_total32, 0, 32 * sizeof(uint64_t));
 			Flush64(exact_total32, force);
 			exact_total32 = value;
+#endif
 		} else {
 			exact_total32 = new_total;
 		}
@@ -270,6 +358,25 @@ struct PacSumIntState {
 			if (would_overflow) {
 				exact_total32 = EnsureLevelAllocated(probabilistic_total32, 32, exact_total32);
 			}
+			// Check if cascading would overflow level 32 counters
+			// If exact_total32 + exact_total16 > INT32_MAX, level 32 counters could overflow
+			// during the cascade, so flush level 16 first
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			if (CHECK_BOUNDS_32(exact_total32 + exact_total16) ||
+			    (tenfold[2] != tenfold[1] && tenfold[2] != TENFOLD_UNINITIALIZED)) {
+#else
+			if (CHECK_BOUNDS_32(exact_total32 + exact_total16)) {
+#endif
+				// Must allocate level 64 before flushing level 32
+				exact_total64 = EnsureLevelAllocated(probabilistic_total64, 64, exact_total64);
+				Flush32(0, true);
+#ifdef PAC_SUMAVG_TENFOLDOPT
+#endif
+			}
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			tenfold[2] = tenfold[1];            // Level 32 adopts level 16's factor
+			// Don't reset tf[1] to UNINIT - keep it at current factor to prevent cycling
+#endif
 			CascadeToNextLevel<T16, T32, 16, 32>(probabilistic_total16, probabilistic_total32);
 			memset(probabilistic_total16, 0, 16 * sizeof(uint64_t));
 			Flush32(exact_total16, force);
@@ -288,6 +395,25 @@ struct PacSumIntState {
 			if (would_overflow) {
 				exact_total16 = EnsureLevelAllocated(probabilistic_total16, 16, exact_total16);
 			}
+			// Check if cascading would overflow level 16 counters
+			// If exact_total16 + exact_total8 > INT16_MAX, level 16 counters could overflow
+			// during the cascade, so flush level 16 first
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			if (CHECK_BOUNDS_16(exact_total16 + exact_total8) ||
+			    (tenfold[1] != tenfold[0] && tenfold[1] != TENFOLD_UNINITIALIZED)) {
+#else
+			if (CHECK_BOUNDS_16(exact_total16 + exact_total8)) {
+#endif
+				// Must allocate level 32 before flushing level 16
+				exact_total32 = EnsureLevelAllocated(probabilistic_total32, 32, exact_total32);
+				Flush16(0, true);
+			}
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			tenfold[1] = tenfold[0];            // Level 16 adopts level 8's factor
+			// Don't reset tf[0] to UNINIT - keep it at current factor to prevent cycling
+			// between tenfold/non-tenfold modes. If tf[0]=0, it stays 0 and rejects
+			// future tenfold values. If tf[0]>0, the normal insert path will set it to 0.
+#endif
 			CascadeToNextLevel<T8, T16, 8, 16>(probabilistic_total8, probabilistic_total16);
 			memset(probabilistic_total8, 0, 8 * sizeof(uint64_t));
 			Flush16(exact_total8, force);
@@ -298,22 +424,42 @@ struct PacSumIntState {
 	}
 
 	void Flush() {
+		// Cascade all allocated levels up to level 128
+		// We need to start from the lowest allocated level to ensure proper cascade chain
 		if (probabilistic_total8) {
 			Flush8(0LL, true);
+		} else if (probabilistic_total16) {
+			// Level 8 not allocated, start from level 16
+			Flush16(0LL, true);
+		} else if (probabilistic_total32) {
+			// Only level 32 allocated, start from there
+			Flush32(0LL, true);
+		} else if (probabilistic_total64) {
+			// Only level 64 allocated, start from there
+			Flush64(0LL, true);
 		}
+		// Level 128 doesn't need flushing - it's the final accumulator
 	}
 
 	// Convert SWAR packed subtotal to double[64] for finalization
 	// These read from the lowest allocated level and unpack to bit-position order
 	template <typename SRC_T>
-	static void UnpackSWARToDouble(const uint64_t *swar_data, int swar_size, double *dst) {
+	static void UnpackSWARToDouble(const uint64_t *swar_data, int swar_size, double *dst, double multiplier = 1.0) {
 		const SRC_T *src = reinterpret_cast<const SRC_T *>(swar_data);
 		constexpr int elements_per_u64 = sizeof(uint64_t) / sizeof(SRC_T);
 		for (int bit = 0; bit < 64; bit++) {
 			int src_idx = (bit % swar_size) * elements_per_u64 + (bit / swar_size);
-			dst[bit] = static_cast<double>(src[src_idx]);
+			dst[bit] = static_cast<double>(src[src_idx]) * multiplier;
 		}
 	}
+
+#ifdef PAC_SUMAVG_TENFOLDOPT
+	// Get tenfold multiplier for a given level index (0=lvl8, 1=lvl16, 2=lvl32)
+	double GetTenfoldMultiplier(int level_idx) const {
+		uint8_t tf = tenfold[level_idx];
+		return (tf > 0 && tf != TENFOLD_UNINITIALIZED) ? static_cast<double>(POWERS_OF_10[tf]) : 1.0;
+	}
+#endif
 
 	// Get the probabilistic total as doubles, reading from the highest allocated level
 	void GetTotalsAsDouble(double *dst) const {
@@ -325,11 +471,23 @@ struct PacSumIntState {
 				dst[i] = static_cast<double>(src[i]);
 			}
 		} else if (probabilistic_total32) {
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			UnpackSWARToDouble<T32>(probabilistic_total32, 32, dst, GetTenfoldMultiplier(2));
+#else
 			UnpackSWARToDouble<T32>(probabilistic_total32, 32, dst);
+#endif
 		} else if (probabilistic_total16) {
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			UnpackSWARToDouble<T16>(probabilistic_total16, 16, dst, GetTenfoldMultiplier(1));
+#else
 			UnpackSWARToDouble<T16>(probabilistic_total16, 16, dst);
+#endif
 		} else if (probabilistic_total8) {
+#ifdef PAC_SUMAVG_TENFOLDOPT
+			UnpackSWARToDouble<T8>(probabilistic_total8, 8, dst, GetTenfoldMultiplier(0));
+#else
 			UnpackSWARToDouble<T8>(probabilistic_total8, 8, dst);
+#endif
 		} else {
 			// No data allocated - return zeros
 			memset(dst, 0, 64 * sizeof(double));
