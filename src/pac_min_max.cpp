@@ -4,11 +4,11 @@ namespace duckdb {
 
 // Integer state alias: PacMinMaxIntState<SIGNED, IS_MAX, MAXLEVEL>
 template <bool SIGNED, bool IS_MAX, int MAXLEVEL = 5>
-using PacMinMaxIntState = PacMinMaxState<false, SIGNED, IS_MAX, MAXLEVEL>;
+using PacMinMaxIntState = PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL>;
 
-// Float state alias: PacMinMaxFloatState<IS_MAX, MAXLEVEL>
-template <bool IS_MAX, int MAXLEVEL = 2>
-using PacMinMaxFloatState = PacMinMaxState<true, true, IS_MAX, MAXLEVEL>;
+// Float/double state alias: uses simple PacMinMaxDoubleState (no cascading)
+template <bool IS_MAX>
+using PacMinMaxFloatState = PacMinMaxDoubleState<IS_MAX>;
 
 // ============================================================================
 // PacMinMaxUpdateOne - process one value into the aggregation state (64 extremes)
@@ -151,6 +151,9 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	std::mt19937_64 gen(seed);
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
 
+	// Get init value to detect never-updated counters (replace with 0 to avoid leaking type info)
+	double init_val = State::InitAsDouble();
+
 	for (idx_t i = 0; i < count; i++) {
 #ifdef PAC_MINMAX_UNSAFENULL
 		if (state[i]->seen_null) {
@@ -161,7 +164,12 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		double buf[64];
 		state[i]->GetTotalsAsDouble(buf);
 		for (int j = 0; j < 64; j++) {
-			buf[j] /= 2.0;
+			// Replace init values with 0 to avoid leaking domain/type information
+			if (buf[j] == init_val) {
+				buf[j] = 0.0;
+			} else {
+				buf[j] /= 2.0;
+			}
 		}
 		data[offset + i] = FromDouble<RESULT_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
 	}
@@ -207,11 +215,11 @@ INT_UPDATE_WRAPPER(PacMinMaxUpdateUHugeInt, false, 5, uhugeint_t)
 // Float/Double updates (MAXLEVEL=2: float+double cascading)
 template <bool IS_MAX>
 void PacMinMaxUpdateFloat(Vector in[], AggregateInputData &a, idx_t n, data_ptr_t s, idx_t c) {
-	PacMinMaxUpdate<PacMinMaxFloatState<IS_MAX, 2>, IS_MAX, float>(in, a, n, s, c);
+	PacMinMaxUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, float>(in, a, n, s, c);
 }
 template <bool IS_MAX>
 void PacMinMaxUpdateDoubleW(Vector in[], AggregateInputData &a, idx_t n, data_ptr_t s, idx_t c) {
-	PacMinMaxUpdate<PacMinMaxFloatState<IS_MAX, 2>, IS_MAX, double>(in, a, n, s, c);
+	PacMinMaxUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, double>(in, a, n, s, c);
 }
 
 // Integer scatter updates (MAXLEVEL: 4=int64, 5=hugeint)
@@ -237,11 +245,11 @@ INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUHugeInt, false, 5, uhugeint_t)
 // Float/Double scatter updates
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateFloat(Vector in[], AggregateInputData &a, idx_t n, Vector &s, idx_t c) {
-	PacMinMaxScatterUpdate<PacMinMaxFloatState<IS_MAX, 2>, IS_MAX, float>(in, a, n, s, c);
+	PacMinMaxScatterUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, float>(in, a, n, s, c);
 }
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateDoubleW(Vector in[], AggregateInputData &a, idx_t n, Vector &s, idx_t c) {
-	PacMinMaxScatterUpdate<PacMinMaxFloatState<IS_MAX, 2>, IS_MAX, double>(in, a, n, s, c);
+	PacMinMaxScatterUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, double>(in, a, n, s, c);
 }
 
 // Combine wrappers - one per (SIGNED, MAXLEVEL) combination
@@ -279,7 +287,7 @@ void PacMinMaxCombineInt64Unsigned(Vector &src, Vector &dst, AggregateInputData 
 }
 template <bool IS_MAX>
 void PacMinMaxCombineDoubleWrapper(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
-	PacMinMaxCombine<PacMinMaxFloatState<IS_MAX, 2>, IS_MAX>(src, dst, a, c);
+	PacMinMaxCombine<PacMinMaxFloatState<IS_MAX>, IS_MAX>(src, dst, a, c);
 }
 template <bool IS_MAX>
 void PacMinMaxCombineHugeIntSigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
@@ -380,21 +388,21 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 		break;
 
 	case PhysicalType::FLOAT:
-		function.state_size = PacMinMaxStateSize<PacMinMaxFloatState<IS_MAX, 2>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxFloatState<IS_MAX, 2>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxFloatState<IS_MAX>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxFloatState<IS_MAX>>;
 		function.update = PacMinMaxScatterUpdateFloat<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateFloat<IS_MAX>;
 		function.combine = PacMinMaxCombineDoubleWrapper<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxFloatState<IS_MAX, 2>, float>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxFloatState<IS_MAX>, float>;
 		break;
 
 	case PhysicalType::DOUBLE:
-		function.state_size = PacMinMaxStateSize<PacMinMaxFloatState<IS_MAX, 2>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxFloatState<IS_MAX, 2>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxFloatState<IS_MAX>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxFloatState<IS_MAX>>;
 		function.update = PacMinMaxScatterUpdateDoubleW<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateDoubleW<IS_MAX>;
 		function.combine = PacMinMaxCombineDoubleWrapper<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxFloatState<IS_MAX, 2>, double>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxFloatState<IS_MAX>, double>;
 		break;
 
 	case PhysicalType::INT128:

@@ -186,15 +186,16 @@ GROUP BY grp;
 
 # Test with single value - result depends on hash bit 41
 # hash('single') has bit 41 = 0, so counter[41] keeps initial value
+# Init values are replaced with 0 to avoid leaking type information
 query I
 SELECT pac_max(hash('single'), 42::integer, 0.0);
 ----
--128
+0
 
 query I
 SELECT pac_min(hash('single'), 42::integer, 0.0);
 ----
-127
+0
 
 # Test with large values (BIGINT)
 query I
