@@ -18,7 +18,7 @@ using PacMinMaxFloatState = PacMinMaxState<true, true, IS_MAX, MAXLEVEL>;
 template <class State, bool IS_MAX>
 AUTOVECTORIZE static inline void PacMinMaxUpdateOne(State &state, uint64_t key_hash, typename State::ValueType value,
                                                     ArenaAllocator &allocator) {
-#ifndef PAC_MINMAX_NONCASCADING
+#ifndef PAC_MINMAX_NONBANKED
 	if (!state.initialized) {
 		state.AllocateFirstLevel(allocator); // cascading mode allocates levels in increasing width, upgrades upon need
 	}
@@ -28,13 +28,11 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(State &state, uint64_t key_h
 		return;                                      // early out
 	}
 #endif
-#ifdef PAC_MINMAX_NONCASCADING
+#ifdef PAC_MINMAX_NONBANKED
 	UpdateExtremes<typename State::ValueType, IS_MAX>(state.extremes, key_hash, value);
 	state.RecomputeBound();
 #else
-	state.MaybeUpgrade(
-	    allocator,
-	    value); // Upgrade level if value doesn't fit in current level (only for values that pass bound check)
+	state.MaybeUpgrade(allocator, value);        // Upgrade level if value doesn't fit in current level
 	state.UpdateAtCurrentLevel(key_hash, value); // here the SIMD magic happens
 	state.RecomputeBound();                      // once every 2048 calls recomputes the bound
 #endif
@@ -128,7 +126,7 @@ AUTOVECTORIZE static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateIn
 			continue;
 		}
 #endif
-#ifdef PAC_MINMAX_NONCASCADING
+#ifdef PAC_MINMAX_NONBANKED
 		// States are already initialized by PacMinMaxInitialize
 		auto *s = src_state[i];
 		auto *d = dst_state[i];
@@ -178,7 +176,7 @@ static idx_t PacMinMaxStateSize(const AggregateFunction &) {
 template <class State>
 static void PacMinMaxInitialize(const AggregateFunction &, data_ptr_t p) {
 	memset(p, 0, State::StateSize());
-#ifdef PAC_MINMAX_NONCASCADING
+#ifdef PAC_MINMAX_NONBANKED
 	reinterpret_cast<State *>(p)->Initialize();
 #endif
 }

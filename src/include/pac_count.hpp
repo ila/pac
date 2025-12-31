@@ -12,188 +12,207 @@ namespace duckdb {
 
 void RegisterPacCountFunctions(ExtensionLoader &);
 
-// PAC_COUNT(key_hash) implements a COUNT aggregate that for each privacy-unit (identified by a key_hash)
-// computes 64 independent counts, where each independent count randomly (50% chance) includes a PU or not.
-// The observation is that the 64-bits of a hashed key of the PU are random (50% 0, 50% 1), so we can take
-// the 64 bits of the key to make 64 independent decisions.
+// PAC_COUNT uses SWAR (SIMD Within A Register) for efficient 64-counter updates.
+// Two levels: subtotal8 (inline, uint8_t[64] packed as uint64_t[8]) flushes to
+// banked total (uint16/32/64 depending on count magnitude).
 //
-// A COUNT() aggregate in its implementation simply performs total += 1
-//
-// PAC_COUNT() needs to do for(i=0; i<64; i++) total[i] += (key_hash >> i) & 1; (extract bit i)
-//
-// We want to do this in a SIMD-friendly way. Therefore, we want to create 64 subtotals of uint8_t (i.e. bytes),
-// and perform 64 byte-additions, because in the widest SIMD implementation, AVX512, this means that this
-// could be done in a *SINGLE* instruction (AVX512 has 64 lanes of uint8, as 64x8=512)
-//
-// But, to help auto-vectorizing, we use uint64_t probabilistic_total[8], rather than uint8_t probabilistic_total[64]
-// because key_hash is also uint64_t. We apply the below mask to key_hash to extract the lowest bit of each byte:
+// Bank layout for total:
+//   banks1: 2 banks (128 bytes) - fits uint16_t[64]
+//   banks2: 2 banks (128 bytes) - with banks1 = uint32_t[64]
+//   banks3: 4 banks (256 bytes) - with banks1+2 = uint64_t[64]
 
 #define PAC_COUNT_MASK                                                                                                 \
 	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
 
-// For each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
-// with a single uint64_t ADD to a uint64 subtotal.
-//
-// This technique is known as SWAR: SIMD Within A Register
-//
-// You can only add 255 times before the bytes in this uint64_t start touching each other (causing overflow).
-// So after 255 iterations, the probabilistic_total8[64] are added to uint16_t probabilistic_total[64] and reset to 0.
-// This repeats possibly in wider total types 16/32/64. We do the extra cascades to 16/32 because often these thinner
-// counters are enough to hold the data and that saves memory (we allocate the counter arrays on need only).
-//
-// The idea is that we get very fast performance 255 times and slower performance once every 256 only.
-// This SIMD-friendly implementation can make PAC counting almost as fast as normal counting.
-//
-// MEMORY OPTIMIZATION: We use lazy allocation with cascading levels (8->16->32->64 bits) to reduce
-// memory footprint. For small counts (< 255), only 64 bytes are needed instead of 576+ bytes.
-// Define PAC_COUNT_NONCASCADING to use simple fixed uint64_t[64] counters instead.
+//#define PAC_COUNT_NONBANKED 1
 
-//#define PAC_COUNT_NONCASCADING 1
-//#define PAC_COUNT_NONLAZY 1  // Pre-allocate all levels at initialization
-
-// State for pac_count: lazily allocated cascading counters (or fixed array if NONCASCADING)
-// Uses ArenaAllocator for memory management - arena handles cleanup when aggregate completes.
 struct PacCountState {
-#ifdef PAC_COUNT_NONCASCADING
-	uint64_t probabilistic_total[64]; // Simple fixed array of 64 counters
-
-	// NONCASCADING: dummy methods for uniform interface
-	void Flush() {
-	} // no-op
+#ifdef PAC_COUNT_NONBANKED
+	uint64_t probabilistic_total[64];
+	void Flush(ArenaAllocator &) {
+	}
 	void GetTotalsAsDouble(double *dst) const {
 		ToDoubleArray(probabilistic_total, dst);
 	}
 #else
-	// Exact (non-probabilistic) total for each level - kept to determine when a level could overflow
-	// Using smallest types that can hold max values before flush (saves memory with many groups)
-	uint8_t exact_total8;   // max 255 before flush to level 16
-	uint16_t exact_total16; // max 65535 before flush to level 32
-	uint32_t exact_total32; // max ~4G before flush to level 64
+	uint8_t subtotal8_count; // counts in subtotal8 before flush (max 255)
+	uint8_t total_level;     // 0=none, 16, 32, or 64
 
-	// Level 8 is always needed (inline), higher levels lazily allocated
-	uint64_t probabilistic_total8[8]; // 8 x uint64_t (64 bytes) - SWAR packed uint8_t subtotals
+	// Level 1: inline subtotal (SWAR uint8_t)
+	uint64_t probabilistic_subtotal8[8]; // 64 bytes
 
-	// Lazily allocated higher levels (nullptr if not allocated)
-	uint64_t *probabilistic_total16; // 16 x uint64_t (128 bytes) - SWAR packed uint16_t subtotals
-	uint64_t *probabilistic_total32; // 32 x uint64_t (256 bytes) - SWAR packed uint32_t subtotals
-	uint64_t *probabilistic_total64; // 64 x uint64_t (512 bytes) - full uint64_t total
+	// Level 2: banked total storage (lazily allocated)
+	uint8_t *banks1; // 2 banks (128 bytes)
+	uint8_t *banks2; // 2 banks (128 bytes)
+	uint8_t *banks3; // 4 banks (256 bytes)
 
-	// Lazily allocate a level's buffer if not yet allocated
-	// Returns 0 if newly allocated (and zeroed), otherwise returns exact_total unchanged
-	template <typename EXACT_T>
-	static inline EXACT_T EnsureLevelAllocated(ArenaAllocator &allocator, uint64_t *&buffer, idx_t count,
-	                                           EXACT_T exact_total) {
-		if (!buffer) {
-			buffer = reinterpret_cast<uint64_t *>(allocator.Allocate(count * sizeof(uint64_t)));
-			memset(buffer, 0, count * sizeof(uint64_t));
-			return 0;
-		}
-		return exact_total;
+	// Get bank pointer (0-7)
+	inline uint8_t *GetBank(int n) const {
+		if (n < 2)
+			return banks1 + n * 64;
+		if (n < 4)
+			return banks2 + (n - 2) * 64;
+		return banks3 + (n - 4) * 64;
 	}
 
-	// Cascade SWAR-packed counters from one level to the next with proper bit reordering
-	// SRC_T/DST_T: element types (uint8_t->uint16_t, uint16_t->uint32_t, uint32_t->uint64_t)
-	// SRC_SWAR/DST_SWAR: SWAR widths (8/16/32/64)
-	template <typename SRC_T, typename DST_T, int SRC_SWAR, int DST_SWAR>
-	static inline void CascadeToNextLevel(const uint64_t *src_buf, uint64_t *dst_buf) {
-		const SRC_T *src = reinterpret_cast<const SRC_T *>(src_buf);
-		DST_T *dst = reinterpret_cast<DST_T *>(dst_buf);
-		constexpr int SRC_PER_U64 = 64 / SRC_SWAR;
-		constexpr int DST_PER_U64 = 64 / DST_SWAR;
-		for (int bit = 0; bit < 64; bit++) {
-			int src_idx = (bit % SRC_SWAR) * SRC_PER_U64 + (bit / SRC_SWAR);
-			int dst_idx = (bit % DST_SWAR) * DST_PER_U64 + (bit / DST_SWAR);
-			dst[dst_idx] += src[src_idx];
+	// Number of banks for total level: 16->2, 32->4, 64->8
+	static constexpr int BanksForLevel(int level) {
+		return level / 8;
+	}
+
+	// Allocate banks for level (only allocates what's new)
+	void AllocateBanks(ArenaAllocator &allocator, int level) {
+		if (!banks1) {
+			banks1 = reinterpret_cast<uint8_t *>(allocator.Allocate(128));
+			memset(banks1, 0, 128);
+		}
+		if (level >= 32 && !banks2) {
+			banks2 = reinterpret_cast<uint8_t *>(allocator.Allocate(128));
+			memset(banks2, 0, 128);
+		}
+		if (level >= 64 && !banks3) {
+			banks3 = reinterpret_cast<uint8_t *>(allocator.Allocate(256));
+			memset(banks3, 0, 256);
 		}
 	}
 
-	// Flush32: cascade probabilistic_total32 to probabilistic_total64
-	AUTOVECTORIZE inline void Flush32(ArenaAllocator &allocator, uint32_t value, bool force) {
-		D_ASSERT(probabilistic_total32);
-		uint64_t new_total = static_cast<uint64_t>(value) + static_cast<uint64_t>(exact_total32);
-		bool would_overflow = (new_total > UINT32_MAX);
-		if (would_overflow || (force && probabilistic_total64)) {
-			if (would_overflow) {
-				EnsureLevelAllocated(allocator, probabilistic_total64, 64, 0);
+	// Upgrade total to wider type, preserving values
+	template <typename SRC_T, typename DST_T>
+	void UpgradeTotal(ArenaAllocator &allocator, int new_level) {
+		constexpr int SRC_PER_BANK = 64 / sizeof(SRC_T);
+		constexpr int DST_PER_BANK = 64 / sizeof(DST_T);
+		int old_banks = BanksForLevel(total_level);
+
+		// Gather old values
+		SRC_T old_values[64];
+		for (int b = 0; b < old_banks; b++) {
+			auto *src = reinterpret_cast<SRC_T *>(GetBank(b));
+			for (int i = 0; i < SRC_PER_BANK; i++)
+				old_values[b * SRC_PER_BANK + i] = src[i];
+		}
+
+		// Allocate new banks and scatter
+		AllocateBanks(allocator, new_level);
+		int new_banks = BanksForLevel(new_level);
+		for (int b = 0; b < new_banks; b++) {
+			auto *dst = reinterpret_cast<DST_T *>(GetBank(b));
+			for (int i = 0; i < DST_PER_BANK; i++) {
+				int idx = b * DST_PER_BANK + i;
+				dst[i] = (idx < 64) ? static_cast<DST_T>(old_values[idx]) : 0;
 			}
-			CascadeToNextLevel<uint32_t, uint64_t, 32, 64>(probabilistic_total32, probabilistic_total64);
-			memset(probabilistic_total32, 0, 32 * sizeof(uint64_t));
-			exact_total32 = value;
-		} else {
-			exact_total32 = static_cast<uint32_t>(new_total);
 		}
+		total_level = new_level;
 	}
 
-	// Flush16: cascade probabilistic_total16 to probabilistic_total32
-	AUTOVECTORIZE inline void Flush16(ArenaAllocator &allocator, uint16_t value, bool force) {
-		D_ASSERT(probabilistic_total16);
-		uint32_t new_total = static_cast<uint32_t>(value) + static_cast<uint32_t>(exact_total16);
-		bool would_overflow = (new_total > UINT16_MAX);
-		if (would_overflow || (force && probabilistic_total32)) {
-			if (would_overflow) {
-				exact_total32 = EnsureLevelAllocated(allocator, probabilistic_total32, 32, exact_total32);
+	// Add subtotal8 to total, upgrading if needed
+	template <typename T>
+	AUTOVECTORIZE void AddSubtotalToTotal() {
+		constexpr int ELEMS_PER_BANK = 64 / sizeof(T);
+		int num_banks = BanksForLevel(total_level);
+		auto *sub = reinterpret_cast<const uint8_t *>(probabilistic_subtotal8);
+
+		for (int b = 0; b < num_banks; b++) {
+			auto *dst = reinterpret_cast<T *>(GetBank(b));
+			for (int i = 0; i < ELEMS_PER_BANK; i++) {
+				dst[i] += static_cast<T>(sub[b * ELEMS_PER_BANK + i]);
 			}
-			Flush32(allocator, exact_total16, force);
-			CascadeToNextLevel<uint16_t, uint32_t, 16, 32>(probabilistic_total16, probabilistic_total32);
-			memset(probabilistic_total16, 0, 16 * sizeof(uint64_t));
-			exact_total16 = value;
-		} else {
-			exact_total16 = static_cast<uint16_t>(new_total);
 		}
 	}
 
-	// Flush8: cascade probabilistic_total8 to probabilistic_total16
-	AUTOVECTORIZE inline void Flush8(ArenaAllocator &allocator, uint8_t value, bool force) {
-		uint16_t new_total = static_cast<uint16_t>(value) + static_cast<uint16_t>(exact_total8);
-		bool would_overflow = (new_total > UINT8_MAX);
-		if (would_overflow || (force && probabilistic_total16)) {
-			if (would_overflow) {
-				exact_total16 = EnsureLevelAllocated(allocator, probabilistic_total16, 16, exact_total16);
-			}
-			Flush16(allocator, exact_total8, force);
-			CascadeToNextLevel<uint8_t, uint16_t, 8, 16>(probabilistic_total8, probabilistic_total16);
-			memset(probabilistic_total8, 0, 8 * sizeof(uint64_t));
-			exact_total8 = value;
-		} else {
-			exact_total8 = static_cast<uint8_t>(new_total);
-		}
+	// Check if adding subtotal8 would overflow current level
+	bool WouldOverflow(uint8_t add_count) const {
+		if (total_level == 0)
+			return false;
+		uint64_t new_count = static_cast<uint64_t>(subtotal8_count) + add_count;
+		if (total_level == 16)
+			return new_count > UINT16_MAX;
+		if (total_level == 32)
+			return new_count > UINT32_MAX;
+		return false; // uint64 can't overflow from uint8 additions
 	}
 
-	// Flush all levels (called before Combine or Finalize)
+	// Flush subtotal8 to total
 	void Flush(ArenaAllocator &allocator) {
-		Flush8(allocator, 0, true);
-	}
+		if (subtotal8_count == 0)
+			return;
 
-	// Convert SWAR packed counters to double[64] for finalization
-	template <typename SRC_T>
-	static void UnpackSWARToDouble(const uint64_t *swar_data, int swar_size, double *dst) {
-		const SRC_T *src = reinterpret_cast<const SRC_T *>(swar_data);
-		constexpr int elements_per_u64 = sizeof(uint64_t) / sizeof(SRC_T);
-		for (int bit = 0; bit < 64; bit++) {
-			int src_idx = (bit % swar_size) * elements_per_u64 + (bit / swar_size);
-			dst[bit] = static_cast<double>(src[src_idx]);
+		// Determine required level for new total
+		uint64_t new_total =
+		    (total_level == 0) ? subtotal8_count : static_cast<uint64_t>(subtotal8_count) + GetMaxPossibleCount();
+		int required = (new_total <= UINT16_MAX) ? 16 : (new_total <= UINT32_MAX) ? 32 : 64;
+
+		// Initialize or upgrade if needed
+		if (total_level == 0) {
+			AllocateBanks(allocator, required);
+			total_level = required;
+		} else if (required > total_level) {
+			if (total_level == 16)
+				UpgradeTotal<uint16_t, uint32_t>(allocator, 32);
+			if (required == 64 && total_level == 32)
+				UpgradeTotal<uint32_t, uint64_t>(allocator, 64);
 		}
+
+		// Add subtotal8 to total
+		if (total_level == 16)
+			AddSubtotalToTotal<uint16_t>();
+		else if (total_level == 32)
+			AddSubtotalToTotal<uint32_t>();
+		else
+			AddSubtotalToTotal<uint64_t>();
+
+		memset(probabilistic_subtotal8, 0, 64);
+		subtotal8_count = 0;
 	}
 
-	// Get the probabilistic total as doubles, reading from the highest allocated level
+	// Estimate max count in any counter (conservative: assumes all bits set)
+	uint64_t GetMaxPossibleCount() const {
+		if (total_level == 64) {
+			auto *p = reinterpret_cast<const uint64_t *>(banks1);
+			uint64_t m = p[0];
+			for (int i = 1; i < 64; i++)
+				m = std::max(m, GetTotalElement<uint64_t>(i));
+			return m;
+		}
+		if (total_level == 32) {
+			uint32_t m = 0;
+			for (int i = 0; i < 64; i++)
+				m = std::max(m, GetTotalElement<uint32_t>(i));
+			return m;
+		}
+		if (total_level == 16) {
+			uint16_t m = 0;
+			for (int i = 0; i < 64; i++)
+				m = std::max(m, GetTotalElement<uint16_t>(i));
+			return m;
+		}
+		return 0;
+	}
+
+	// Get element from banked total
+	template <typename T>
+	T GetTotalElement(int i) const {
+		constexpr int PER_BANK = 64 / sizeof(T);
+		int bank = i / PER_BANK, off = i % PER_BANK;
+		return reinterpret_cast<const T *>(GetBank(bank))[off];
+	}
+
 	void GetTotalsAsDouble(double *dst) const {
-		if (probabilistic_total64) {
-			ToDoubleArray(probabilistic_total64, dst);
-		} else if (probabilistic_total32) {
-			UnpackSWARToDouble<uint32_t>(probabilistic_total32, 32, dst);
-		} else if (probabilistic_total16) {
-			UnpackSWARToDouble<uint16_t>(probabilistic_total16, 16, dst);
-		} else {
-			UnpackSWARToDouble<uint8_t>(probabilistic_total8, 8, dst);
-		}
-	}
+		// First get subtotal8 values
+		auto *sub = reinterpret_cast<const uint8_t *>(probabilistic_subtotal8);
+		for (int i = 0; i < 64; i++)
+			dst[i] = static_cast<double>(sub[i]);
 
-	// Pre-allocate all levels (for NONLAZY mode)
-	void InitializeAllLevels(ArenaAllocator &allocator) {
-		// probabilistic_total8 is already inline
-		EnsureLevelAllocated(allocator, probabilistic_total16, 16, exact_total16);
-		EnsureLevelAllocated(allocator, probabilistic_total32, 32, exact_total32);
-		EnsureLevelAllocated(allocator, probabilistic_total64, 64, 0);
+		// Add total if present
+		if (total_level == 16) {
+			for (int i = 0; i < 64; i++)
+				dst[i] += GetTotalElement<uint16_t>(i);
+		} else if (total_level == 32) {
+			for (int i = 0; i < 64; i++)
+				dst[i] += GetTotalElement<uint32_t>(i);
+		} else if (total_level == 64) {
+			for (int i = 0; i < 64; i++)
+				dst[i] += GetTotalElement<uint64_t>(i);
+		}
 	}
 #endif
 };
