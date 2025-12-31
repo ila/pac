@@ -124,15 +124,14 @@ struct UpdateExtremesKernel {
 			buf.u64[i] = (key_hash >> i) & Traits::MASK; // process multiple T in one uint64 (SWAR)
 		}
 		for (int i = 0; i < 64; i++) {
-			UintT mask_u = static_cast<UintT>(-buf.bits[i]); // 1->0x00, 0->0xFF
-			T extreme = PAC_BETTER(value, result[i]);        // SIMD min/max
+			UintT mask = static_cast<UintT>(-buf.bits[i]); // 1->0x00, 0->0xFF
 			union { // this union is there to be able to combine integer masking operations with floating-point min/max
 				T val;      // could be float or double
 				UintT bits; // unsigned int type as wide as T
 			} extreme_u, result_u, out;
-			extreme_u.val = extreme;
+			extreme_u.val = PAC_BETTER(value, result[i]); // SIMD min/max
 			result_u.val = result[i];
-			out.bits = (extreme_u.bits & mask_u) | (result_u.bits & ~mask_u);
+			out.bits = (extreme_u.bits & mask) | (result_u.bits & ~mask);
 			result[i] = out.val;
 		}
 	}
@@ -349,11 +348,11 @@ struct PacMinMaxState {
 	ArenaAllocator *allocator;
 
 	// Pointer fields ordered by level - unused ones at the end won't be allocated
-	T1 *extremes_level1;
-	T2 *extremes_level2;
-	T3 *extremes_level3; // Only for integers (unused for float)
-	T4 *extremes_level4; // Only for integers (unused for float)
-	T5 *extremes_level5; // Only for integers (unused for float)
+	T1 *extremes_level1; // integers: [u]int8_t*,  floating point: float*
+	T2 *extremes_level2; // integers: [u]int16_t*, floating-point: double*
+	T3 *extremes_level3; // Only for integers: [u]int32_t* (unused for floating point)
+	T4 *extremes_level4; // Only for integers: [u]int64_t* (unused for floating point)
+	T5 *extremes_level5; // Only for integers: [u]int128_t* (unused for floaring point)
 
 	// Allocate a level's buffer
 	template <typename T>

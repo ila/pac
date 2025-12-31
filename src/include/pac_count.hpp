@@ -21,7 +21,7 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 //
 // PAC_COUNT() needs to do for(i=0; i<64; i++) total[i] += (key_hash >> i) & 1; (extract bit i)
 //
-// We want to do this in a SIMD-friendly way. Therefore, we want to create 64 subtotal of uint8_t (i.e. bytes),
+// We want to do this in a SIMD-friendly way. Therefore, we want to create 64 subtotals of uint8_t (i.e. bytes),
 // and perform 64 byte-additions, because in the widest SIMD implementation, AVX512, this means that this
 // could be done in a *SINGLE* instruction (AVX512 has 64 lanes of uint8, as 64x8=512)
 //
@@ -32,7 +32,7 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
 
 // For each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
-// with a single uint64_t ADD to a uint64 subtotal[].
+// with a single uint64_t ADD to a uint64 subtotal.
 //
 // This technique is known as SWAR: SIMD Within A Register
 //
@@ -55,8 +55,7 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 // Uses ArenaAllocator for memory management - arena handles cleanup when aggregate completes.
 struct PacCountState {
 #ifdef PAC_COUNT_NONCASCADING
-	// Simple fixed array of 64 counters
-	uint64_t probabilistic_total[64];
+	uint64_t probabilistic_total[64]; // Simple fixed array of 64 counters
 
 	// NONCASCADING: dummy methods for uniform interface
 	void Flush() {
@@ -65,19 +64,18 @@ struct PacCountState {
 		ToDoubleArray(probabilistic_total, dst);
 	}
 #else
-	// Pointer to DuckDB's arena allocator (set during first update)
-	ArenaAllocator *allocator;
+	ArenaAllocator *allocator; // Pointer to DuckDB's arena allocator (set during first update)
 
 	// Lazily allocated levels (nullptr if not allocated)
-	uint64_t *probabilistic_total8;  // 8 x uint64_t (64 bytes) - SWAR packed uint8_t counters
-	uint64_t *probabilistic_total16; // 16 x uint64_t (128 bytes) - SWAR packed uint16_t counters
-	uint64_t *probabilistic_total32; // 32 x uint64_t (256 bytes) - SWAR packed uint32_t counters
-	uint64_t *probabilistic_total64; // 64 x uint64_t (512 bytes) - full uint64_t counters
+	uint64_t *probabilistic_total8;  // 8 x uint64_t (64 bytes) - SWAR packed uint8_t subtotals
+	uint64_t *probabilistic_total16; // 16 x uint64_t (128 bytes) - SWAR packed uint16_t subtotals
+	uint64_t *probabilistic_total32; // 32 x uint64_t (256 bytes) - SWAR packed uint32_t subtotals
+	uint64_t *probabilistic_total64; // 64 x uint64_t (512 bytes) - full uint64_t total
 
-	// Exact subtotal for each level - flush when these would overflow the level's capacity
+	// Exact (non-probabilistic) total for each level - kept to determine when a level's could overflow
 	uint64_t exact_total8;  // max 255 before flush to level 16
 	uint64_t exact_total16; // max 65535 before flush to level 32
-	uint64_t exact_total32; // max ~4B before flush to level 64
+	uint64_t exact_total32; // max ~4G before flush to level 64
 	uint64_t exact_total64; // final level (no overflow possible within uint64_t range)
 
 	// Lazily allocate a level's buffer if not yet allocated

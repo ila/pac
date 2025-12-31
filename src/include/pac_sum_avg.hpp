@@ -160,9 +160,10 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
-#ifndef PAC_SUMAVG_NONCASCADING
-	// Pointer to DuckDB's arena allocator (set during first update)
-	ArenaAllocator *allocator;
+#ifdef PAC_SUMAVG_NONCASCADING
+	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
+#else
+	ArenaAllocator *allocator; // Pointer to DuckDB's arena allocator (set during first update)
 
 	// All levels lazily allocated via arena allocator (nullptr if not allocated)
 	uint64_t *probabilistic_total8;    // 8 x uint64_t (64 bytes) when allocated, each holds 8 packed T8
@@ -170,10 +171,7 @@ struct PacSumIntState {
 	uint64_t *probabilistic_total32;   // 32 x uint64_t (256 bytes) when allocated, each holds 2 packed T32
 	uint64_t *probabilistic_total64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
 	hugeint_t *probabilistic_total128; // 64 x hugeint_t (1024 bytes) when allocated
-#else
-	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
-#endif
-#ifndef PAC_SUMAVG_NONCASCADING
+
 	// these hold the exact subtotal of each aggregation level, we flush once we see this overflow
 	T64 exact_total8, exact_total16, exact_total32, exact_total64;
 #endif
@@ -181,11 +179,9 @@ struct PacSumIntState {
 #ifdef PAC_SUMAVG_UNSAFENULL
 	bool seen_null;
 #endif
-
 #ifdef PAC_SUMAVG_NONCASCADING
 	// NONCASCADING: dummy methods for uniform interface
-	void Flush() {
-	} // no-op
+	void Flush() { } // no-op
 	void GetTotalsAsDouble(double *dst) const {
 		ToDoubleArray(probabilistic_total128, dst);
 	}
