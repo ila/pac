@@ -20,46 +20,26 @@ PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSu
 #ifdef PAC_SUMAVG_NONLAZY
 	if (!state.probabilistic_total8) { // Use as proxy for "not yet initialized"
 		state.InitializeAllLevels(allocator);
-		state.min_allocated_level = 8;
 	}
 #endif
-	// Route to appropriate level based on value magnitude, skipping levels smaller than min_allocated_level
-	if (state.min_allocated_level <= 8 &&
-	    ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8)))) {
-		if (!state.probabilistic_total8) {
-			state.exact_total8 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8,
-			                                                                  state.exact_total8);
-			state.min_allocated_level = 8;
-		}
+	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
+		state.exact_total8 =
+		    PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8, state.exact_total8);
 		state.Flush8(allocator, value, false);
 		AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL>(state.probabilistic_total8, value, key_hash);
-	} else if (state.min_allocated_level <= 16 &&
-	           ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(16)) : (value < UPPERBOUND_BITWIDTH(16)))) {
-		if (!state.probabilistic_total16) {
-			state.exact_total16 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total16,
-			                                                                   16, state.exact_total16);
-			if (state.min_allocated_level == 0)
-				state.min_allocated_level = 16;
-		}
+	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(16)) : (value < UPPERBOUND_BITWIDTH(16))) {
+		state.exact_total16 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total16, 16,
+		                                                                   state.exact_total16);
 		state.Flush16(allocator, value, false);
 		AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL>(state.probabilistic_total16, value, key_hash);
-	} else if (state.min_allocated_level <= 32 &&
-	           ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(32)) : (value < UPPERBOUND_BITWIDTH(32)))) {
-		if (!state.probabilistic_total32) {
-			state.exact_total32 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total32,
-			                                                                   32, state.exact_total32);
-			if (state.min_allocated_level == 0)
-				state.min_allocated_level = 32;
-		}
+	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(32)) : (value < UPPERBOUND_BITWIDTH(32))) {
+		state.exact_total32 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total32, 32,
+		                                                                   state.exact_total32);
 		state.Flush32(allocator, value, false);
 		AddToTotalsSWAR<int32_t, uint32_t, 0x0000000100000001ULL>(state.probabilistic_total32, value, key_hash);
 	} else {
-		if (!state.probabilistic_total64) {
-			state.exact_total64 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total64,
-			                                                                   64, state.exact_total64);
-			if (state.min_allocated_level == 0)
-				state.min_allocated_level = 64;
-		}
+		state.exact_total64 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total64, 64,
+		                                                                   state.exact_total64);
 		state.Flush64(allocator, value, false);
 		AddToTotalsSimple(state.probabilistic_total64, value, key_hash);
 	}

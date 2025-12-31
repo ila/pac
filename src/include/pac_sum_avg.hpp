@@ -169,15 +169,13 @@ struct PacSumIntState {
 #else
 	// Field ordering optimized for memory layout:
 	// 1. seen_null (1 byte)
-	// 2. min_allocated_level (tracks smallest allocated level to avoid small-level allocation waste)
-	// 3. exact_totals (sized to fit level's range - value is always valid after flush)
-	// 4. exact_count
+	// 2. exact_totals (sized to fit level's range - value is always valid after flush)
+	// 3. exact_count
+	// 4. allocator pointer
 	// 5. probabilistic pointers (lazily allocated)
 #ifdef PAC_SUMAVG_UNSAFENULL
 	bool seen_null;
 #endif
-	uint8_t min_allocated_level; // smallest allocated level (0=none, 8, 16, 32, 64, 128)
-
 	// Exact subtotals for each level - sized to fit level's representable range.
 	// After any Flush, exact_totalN is either:
 	//   - the incoming `value` (which fits in TN since it was routed to level N), or
@@ -196,7 +194,6 @@ struct PacSumIntState {
 	uint64_t *probabilistic_total32;   // 32 x uint64_t (256 bytes) when allocated, each holds 2 packed T32
 	uint64_t *probabilistic_total64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
 	hugeint_t *probabilistic_total128; // 64 x hugeint_t (1024 bytes) when allocated
-
 #endif
 #ifdef PAC_SUMAVG_NONCASCADING
 	// NONCASCADING: dummy methods for uniform interface
