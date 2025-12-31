@@ -305,12 +305,11 @@ struct PacMinMaxState {
 	}
 
 	// ========== Common fields (defined once for both modes) ==========
+	uint16_t update_count;
 	bool initialized;
 #ifdef PAC_MINMAX_UNSAFENULL
 	bool seen_null;
 #endif
-	uint16_t update_count;
-	TMAX global_bound; // For MAX: min of all maxes; for MIN: max of all mins
 
 #ifdef PAC_MINMAX_NONCASCADING
 	// ========== Non-cascading mode: single fixed-width array ==========
@@ -345,19 +344,19 @@ struct PacMinMaxState {
 	// All pointers defined, but ordered so unused ones are at the end.
 	// DuckDB allocates only up to the needed pointer based on state_size.
 	uint8_t current_level; // 1, 2, 3, 4, or 5
-	ArenaAllocator *allocator;
+	TMAX global_bound;     // For MAX: min of all maxes; for MIN: max of all mins
 
 	// Pointer fields ordered by level - unused ones at the end won't be allocated
 	T1 *extremes_level1; // integers: [u]int8_t*,  floating point: float*
 	T2 *extremes_level2; // integers: [u]int16_t*, floating-point: double*
 	T3 *extremes_level3; // Only for integers: [u]int32_t* (unused for floating point)
 	T4 *extremes_level4; // Only for integers: [u]int64_t* (unused for floating point)
-	T5 *extremes_level5; // Only for integers: [u]int128_t* (unused for floaring point)
+	T5 *extremes_level5; // Only for integers: [u]int128_t* (unused for floating point)
 
 	// Allocate a level's buffer
 	template <typename T>
-	inline T *AllocateLevel(T init_value) {
-		T *buf = reinterpret_cast<T *>(allocator->Allocate(64 * sizeof(T)));
+	inline T *AllocateLevel(ArenaAllocator &allocator, T init_value) {
+		T *buf = reinterpret_cast<T *>(allocator.Allocate(64 * sizeof(T)));
 		for (int i = 0; i < 64; i++) {
 			buf[i] = init_value;
 		}
@@ -383,8 +382,8 @@ struct PacMinMaxState {
 	// Types <= 4 bytes use SWAR layout, types > 4 bytes use linear layout
 	// If src value equals src_init (never updated), use dst_init instead
 	template <typename SRC_T, typename DST_T>
-	inline DST_T *UpgradeLevel(SRC_T *src, SRC_T src_init, DST_T dst_init) {
-		DST_T *dst = reinterpret_cast<DST_T *>(allocator->Allocate(64 * sizeof(DST_T)));
+	inline DST_T *UpgradeLevel(ArenaAllocator &allocator, SRC_T *src, SRC_T src_init, DST_T dst_init) {
+		DST_T *dst = reinterpret_cast<DST_T *>(allocator.Allocate(64 * sizeof(DST_T)));
 		if (src) {
 			for (int i = 0; i < 64; i++) {
 				int src_idx = GetIndex<SRC_T>(i);
@@ -399,26 +398,25 @@ struct PacMinMaxState {
 		return dst;
 	}
 
-	void AllocateFirstLevel(ArenaAllocator &alloc) {
-		allocator = &alloc;
+	void AllocateFirstLevel(ArenaAllocator &allocator) {
 #ifdef PAC_MINMAX_NONLAZY
 		// Pre-allocate all levels that exist for this MAXLEVEL
-		extremes_level1 = AllocateLevel<T1>(TypeInit<T1>());
+		extremes_level1 = AllocateLevel<T1>(allocator, TypeInit<T1>());
 		if (MAXLEVEL >= 2) {
-			extremes_level2 = AllocateLevel<T2>(TypeInit<T2>());
+			extremes_level2 = AllocateLevel<T2>(allocator, TypeInit<T2>());
 		}
 		if (MAXLEVEL >= 3) {
-			extremes_level3 = AllocateLevel<T3>(TypeInit<T3>());
+			extremes_level3 = AllocateLevel<T3>(allocator, TypeInit<T3>());
 		}
 		if (MAXLEVEL >= 4) {
-			extremes_level4 = AllocateLevel<T4>(TypeInit<T4>());
+			extremes_level4 = AllocateLevel<T4>(allocator, TypeInit<T4>());
 		}
 		if (MAXLEVEL >= 5) {
-			extremes_level5 = AllocateLevel<T5>(TypeInit<T5>());
+			extremes_level5 = AllocateLevel<T5>(allocator, TypeInit<T5>());
 		}
 		current_level = MAXLEVEL;
 #else
-		extremes_level1 = AllocateLevel<T1>(TypeInit<T1>());
+		extremes_level1 = AllocateLevel<T1>(allocator, TypeInit<T1>());
 		current_level = 1;
 #endif
 		update_count = 0;
@@ -426,30 +424,30 @@ struct PacMinMaxState {
 		initialized = true;
 	}
 
-	void UpgradeToLevel2() {
+	void UpgradeToLevel2(ArenaAllocator &allocator) {
 		if (MAXLEVEL >= 2) {
-			extremes_level2 = UpgradeLevel<T1, T2>(extremes_level1, TypeInit<T1>(), TypeInit<T2>());
+			extremes_level2 = UpgradeLevel<T1, T2>(allocator, extremes_level1, TypeInit<T1>(), TypeInit<T2>());
 			current_level = 2;
 		}
 	}
 
-	void UpgradeToLevel3() {
+	void UpgradeToLevel3(ArenaAllocator &allocator) {
 		if (MAXLEVEL >= 3) {
-			extremes_level3 = UpgradeLevel<T2, T3>(extremes_level2, TypeInit<T2>(), TypeInit<T3>());
+			extremes_level3 = UpgradeLevel<T2, T3>(allocator, extremes_level2, TypeInit<T2>(), TypeInit<T3>());
 			current_level = 3;
 		}
 	}
 
-	void UpgradeToLevel4() {
+	void UpgradeToLevel4(ArenaAllocator &allocator) {
 		if (MAXLEVEL >= 4) {
-			extremes_level4 = UpgradeLevel<T3, T4>(extremes_level3, TypeInit<T3>(), TypeInit<T4>());
+			extremes_level4 = UpgradeLevel<T3, T4>(allocator, extremes_level3, TypeInit<T3>(), TypeInit<T4>());
 			current_level = 4;
 		}
 	}
 
-	void UpgradeToLevel5() {
+	void UpgradeToLevel5(ArenaAllocator &allocator) {
 		if (MAXLEVEL >= 5) {
-			extremes_level5 = UpgradeLevel<T4, T5>(extremes_level4, TypeInit<T4>(), TypeInit<T5>());
+			extremes_level5 = UpgradeLevel<T4, T5>(allocator, extremes_level4, TypeInit<T4>(), TypeInit<T5>());
 			current_level = 5;
 		}
 	}
@@ -507,19 +505,19 @@ struct PacMinMaxState {
 	}
 
 	// Upgrade level if value doesn't fit in current level
-	void MaybeUpgrade(TMAX value) {
+	void MaybeUpgrade(ArenaAllocator &allocator, TMAX value) {
 		if (current_level == 1 && !FitsInLevel1(value)) {
-			UpgradeToLevel2();
+			UpgradeToLevel2(allocator);
 		}
 		if (!IS_FLOAT) { // Levels 3-5: only for integers
 			if (MAXLEVEL >= 3 && current_level == 2 && !FitsInLevel2(value)) {
-				UpgradeToLevel3();
+				UpgradeToLevel3(allocator);
 			}
 			if (MAXLEVEL >= 4 && current_level == 3 && !FitsInLevel3(value)) {
-				UpgradeToLevel4();
+				UpgradeToLevel4(allocator);
 			}
 			if (MAXLEVEL >= 5 && current_level == 4 && !FitsInLevel4(value)) {
-				UpgradeToLevel5();
+				UpgradeToLevel5(allocator);
 			}
 		}
 	}
@@ -560,13 +558,12 @@ struct PacMinMaxState {
 	}
 
 	// Combine with another state (merge src into this)
-	void CombineWith(const PacMinMaxState &src, ArenaAllocator &alloc) {
+	void CombineWith(const PacMinMaxState &src, ArenaAllocator &allocator) {
 		if (!src.initialized) {
 			return;
 		}
 		if (!initialized) {
-			allocator = &alloc;
-			extremes_level1 = AllocateLevel<T1>(TypeInit<T1>());
+			extremes_level1 = AllocateLevel<T1>(allocator, TypeInit<T1>());
 			current_level = 1;
 			update_count = 0;
 			global_bound = TypeInit<TMAX>();
@@ -574,16 +571,16 @@ struct PacMinMaxState {
 		}
 		// Upgrade this state to match src level
 		if (MAXLEVEL >= 2 && current_level == 1 && current_level < src.current_level) {
-			UpgradeToLevel2();
+			UpgradeToLevel2(allocator);
 		}
 		if (!IS_FLOAT && MAXLEVEL >= 3 && current_level == 2 && current_level < src.current_level) {
-			UpgradeToLevel3();
+			UpgradeToLevel3(allocator);
 		}
 		if (!IS_FLOAT && MAXLEVEL >= 4 && current_level == 3 && current_level < src.current_level) {
-			UpgradeToLevel4();
+			UpgradeToLevel4(allocator);
 		}
 		if (!IS_FLOAT && MAXLEVEL >= 5 && current_level == 4 && current_level < src.current_level) {
-			UpgradeToLevel5();
+			UpgradeToLevel5(allocator);
 		}
 		// Combine at current level
 		if (current_level == 1) {

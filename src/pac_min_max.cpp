@@ -33,6 +33,7 @@ AUTOVECTORIZE static inline void PacMinMaxUpdateOne(State &state, uint64_t key_h
 	state.RecomputeBound();
 #else
 	state.MaybeUpgrade(
+	    allocator,
 	    value); // Upgrade level if value doesn't fit in current level (only for values that pass bound check)
 	state.UpdateAtCurrentLevel(key_hash, value); // here the SIMD magic happens
 	state.RecomputeBound();                      // once every 2048 calls recomputes the bound

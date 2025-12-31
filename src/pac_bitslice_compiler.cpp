@@ -119,7 +119,7 @@ static unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input
 
 // New helper: find the unique_ptr reference to a LogicalGet node by table name.
 // Returns a pointer to the owning unique_ptr so callers can replace/mutate it in-place.
-static unique_ptr<LogicalOperator>* FindNodeRefByTable(unique_ptr<LogicalOperator> *root,
+static unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root,
                                                        const std::string &table_name) {
 	if (!root || !root->get()) {
 		return nullptr;

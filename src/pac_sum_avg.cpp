@@ -17,28 +17,30 @@ PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSu
 #ifdef PAC_SUMAVG_NONCASCADING
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash);
 #else
-	// Store allocator pointer for use in Flush/EnsureLevelAllocated methods
-	if (!state.allocator) {
-		state.allocator = &allocator;
 #ifdef PAC_SUMAVG_NONLAZY
+	if (!state.probabilistic_total8) { // Use as proxy for "not yet initialized"
 		state.InitializeAllLevels(allocator);
-#endif
 	}
+#endif
 	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
-		state.exact_total8 = state.EnsureLevelAllocated(state.probabilistic_total8, 8, state.exact_total8);
-		state.Flush8(value, false);
+		state.exact_total8 =
+		    PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8, state.exact_total8);
+		state.Flush8(allocator, value, false);
 		AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL>(state.probabilistic_total8, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(16)) : (value < UPPERBOUND_BITWIDTH(16))) {
-		state.exact_total16 = state.EnsureLevelAllocated(state.probabilistic_total16, 16, state.exact_total16);
-		state.Flush16(value, false);
+		state.exact_total16 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total16, 16,
+		                                                                   state.exact_total16);
+		state.Flush16(allocator, value, false);
 		AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL>(state.probabilistic_total16, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(32)) : (value < UPPERBOUND_BITWIDTH(32))) {
-		state.exact_total32 = state.EnsureLevelAllocated(state.probabilistic_total32, 32, state.exact_total32);
-		state.Flush32(value, false);
+		state.exact_total32 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total32, 32,
+		                                                                   state.exact_total32);
+		state.Flush32(allocator, value, false);
 		AddToTotalsSWAR<int32_t, uint32_t, 0x0000000100000001ULL>(state.probabilistic_total32, value, key_hash);
 	} else {
-		state.exact_total64 = state.EnsureLevelAllocated(state.probabilistic_total64, 64, state.exact_total64);
-		state.Flush64(value, false);
+		state.exact_total64 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total64, 64,
+		                                                                   state.exact_total64);
+		state.Flush64(allocator, value, false);
 		AddToTotalsSimple(state.probabilistic_total64, value, key_hash);
 	}
 #endif
@@ -63,8 +65,7 @@ template <bool SIGNED>
 AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
                                           ArenaAllocator &allocator) {
 #ifndef PAC_SUMAVG_NONCASCADING
-	state.allocator = &allocator;
-	state.EnsureLevelAllocated(state.probabilistic_total128, idx_t(64));
+	PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total128, idx_t(64));
 #endif
 	for (int j = 0; j < 64; j++) {
 		if ((key_hash >> j) & 1ULL) {
@@ -144,19 +145,18 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		}
 	}
 }
-// Helper to combine src total into dst at a specific level
+// Helper to combine src array into dst at a specific level
 // If src is null, does nothing. If dst is null, moves pointer from src to dst.
-// BUF_T: buffer element type (uint64_t for levels 8-64, hugeint_t for level 128)
-// EXACT_T: exact_total type (pass dummy for level 128 which has no exact_total)
+// Note: exact_totals only used in move case (when both exist, they're handled separately)
 template <typename BUF_T, typename EXACT_T>
 static inline void CombineLevel(BUF_T *&src_buf, BUF_T *&dst_buf, EXACT_T &src_exact, EXACT_T &dst_exact, idx_t count) {
 	if (src_buf) {
-		if (dst_buf) { // Both have data - add element by element
+		if (dst_buf) {
 			for (idx_t j = 0; j < count; j++) {
 				dst_buf[j] += src_buf[j];
 			}
-			dst_exact += src_exact;
-		} else { // Move ownership from src to dst
+			// exact_totals handled separately (before this call) to avoid overflow
+		} else {
 			dst_buf = src_buf;
 			dst_exact = src_exact;
 			src_buf = nullptr;
@@ -188,27 +188,33 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 #else
 			auto *s = src_state[i];
 			auto *d = dst_state[i];
-			if (!d->allocator) {
-				d->allocator = &allocator; // Ensure dst has allocator pointer
-			}
 
-			// Before combining each level, check if dst would overflow - if so, flush dst first
-			// (if exact_total is non-zero, the level is allocated; if both are zero, no overflow)
-			if (CHECK_BOUNDS_8(s->exact_total8 + d->exact_total8)) {
-				d->Flush8(0, true);
+			// Handle exact_totals: if sum would overflow, flush dst (passing src's value so it becomes
+			// the new exact_total after flush). Otherwise just add. Both must be allocated to overflow.
+			// Note: we cast to int64_t for the overflow check to avoid truncation with small types.
+			if (CHECK_BOUNDS_8(static_cast<int64_t>(s->exact_total8) + d->exact_total8)) {
+				d->Flush8(allocator, s->exact_total8, true); // flushes d, sets d->exact_total8 = s->exact_total8
+			} else {
+				d->exact_total8 += s->exact_total8;
 			}
-			if (CHECK_BOUNDS_16(s->exact_total16 + d->exact_total16)) {
-				d->Flush16(0, true);
+			if (CHECK_BOUNDS_16(static_cast<int64_t>(s->exact_total16) + d->exact_total16)) {
+				d->Flush16(allocator, s->exact_total16, true);
+			} else {
+				d->exact_total16 += s->exact_total16;
 			}
-			if (CHECK_BOUNDS_32(s->exact_total32 + d->exact_total32)) {
-				d->Flush32(0, true);
+			if (CHECK_BOUNDS_32(static_cast<int64_t>(s->exact_total32) + d->exact_total32)) {
+				d->Flush32(allocator, s->exact_total32, true);
+			} else {
+				d->exact_total32 += s->exact_total32;
 			}
 			if (CHECK_BOUNDS_64(s->exact_total64 + d->exact_total64, s->exact_total64, d->exact_total64)) {
-				d->Flush64(0, true);
+				d->Flush64(allocator, s->exact_total64, true);
+			} else {
+				d->exact_total64 += s->exact_total64;
 			}
 
-			// Combine at each level (handles null checks and pointer moves internally)
-			hugeint_t dummy = 0; // level 128 has no exact_total
+			// Combine arrays at each level (exact_totals handled above, but passed for move case)
+			hugeint_t dummy = 0;
 			CombineLevel(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8, 8);
 			CombineLevel(s->probabilistic_total16, d->probabilistic_total16, s->exact_total16, d->exact_total16, 16);
 			CombineLevel(s->probabilistic_total32, d->probabilistic_total32, s->exact_total32, d->exact_total32, 32);
@@ -221,7 +227,7 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 }
 
 // Combine for double state
-AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t count) {
+AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t count, ArenaAllocator &allocator) {
 	auto src_state = FlatVector::GetData<PacSumDoubleState *>(src);
 	auto dst_state = FlatVector::GetData<PacSumDoubleState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
@@ -234,7 +240,7 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 		}
 #endif
 #ifdef PAC_SUMAVG_FLOAT_CASCADING
-		src_state[i]->Flush();
+		src_state[i]->Flush(allocator);
 #endif
 		dst_state[i]->exact_count += src_state[i]->exact_count;
 		for (int j = 0; j < 64; j++) {
@@ -263,7 +269,7 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 		}
 #endif
 		double buf[64];
-		state[i]->Flush();
+		state[i]->Flush(input.allocator);
 		state[i]->GetTotalsAsDouble(buf);
 		if (DIVIDE_BY_COUNT) {
 			double divisor = static_cast<double>(state[i]->exact_count) * scale_divisor;
@@ -359,8 +365,8 @@ void PacSumCombineSigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx
 void PacSumCombineUnsigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	PacSumCombineInt<false>(src, dst, count, aggr.allocator);
 }
-void PacSumCombineDoubleWrapper(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
-	PacSumCombineDouble(src, dst, count);
+void PacSumCombineDoubleWrapper(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
+	PacSumCombineDouble(src, dst, count, aggr.allocator);
 }
 
 // instantiate Finalize methods for pac_sum

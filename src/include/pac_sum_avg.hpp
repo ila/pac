@@ -161,9 +161,32 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
 #ifdef PAC_SUMAVG_NONCASCADING
+	uint64_t exact_count;                 // total count of values added (for pac_avg)
 	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
+#ifdef PAC_SUMAVG_UNSAFENULL
+	bool seen_null;
+#endif
 #else
-	ArenaAllocator *allocator; // Pointer to DuckDB's arena allocator (set during first update)
+	// Field ordering optimized for memory layout:
+	// 1. seen_null (1 byte)
+	// 2. exact_totals (sized to fit level's range - value is always valid after flush)
+	// 3. exact_count
+	// 4. allocator pointer
+	// 5. probabilistic pointers (lazily allocated)
+#ifdef PAC_SUMAVG_UNSAFENULL
+	bool seen_null;
+#endif
+	// Exact subtotals for each level - sized to fit level's representable range.
+	// After any Flush, exact_totalN is either:
+	//   - the incoming `value` (which fits in TN since it was routed to level N), or
+	//   - `new_total` which we verified fits in TN range before assigning
+	// Flush functions use int64_t for intermediate calculations to detect overflow.
+	T8 exact_total8;   // sum of values at level 8 since last flush (fits in T8 after flush)
+	T16 exact_total16; // sum of values at level 16 since last flush (fits in T16 after flush)
+	T32 exact_total32; // sum of values at level 32 since last flush (fits in T32 after flush)
+	T64 exact_total64; // sum of values at level 64 since last flush
+
+	uint64_t exact_count; // total count of values added (for pac_avg)
 
 	// All levels lazily allocated via arena allocator (nullptr if not allocated)
 	uint64_t *probabilistic_total8;    // 8 x uint64_t (64 bytes) when allocated, each holds 8 packed T8
@@ -171,17 +194,11 @@ struct PacSumIntState {
 	uint64_t *probabilistic_total32;   // 32 x uint64_t (256 bytes) when allocated, each holds 2 packed T32
 	uint64_t *probabilistic_total64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
 	hugeint_t *probabilistic_total128; // 64 x hugeint_t (1024 bytes) when allocated
-
-	// these hold the exact subtotal of each aggregation level, we flush once we see this overflow
-	T64 exact_total8, exact_total16, exact_total32, exact_total64;
-#endif
-	uint64_t exact_count; // total count of values added (for pac_avg)
-#ifdef PAC_SUMAVG_UNSAFENULL
-	bool seen_null;
 #endif
 #ifdef PAC_SUMAVG_NONCASCADING
 	// NONCASCADING: dummy methods for uniform interface
-	void Flush() { } // no-op
+	void Flush(ArenaAllocator &) {
+	} // no-op
 	void GetTotalsAsDouble(double *dst) const {
 		ToDoubleArray(probabilistic_total128, dst);
 	}
@@ -190,9 +207,10 @@ struct PacSumIntState {
 	// BUF_T: buffer element type (uint64_t for SWAR levels, hugeint_t for level 128)
 	// Returns 0 if allocated, otherwise returns exact_total unchanged
 	template <typename BUF_T, typename EXACT_T = int>
-	inline EXACT_T EnsureLevelAllocated(BUF_T *&buffer, idx_t count, EXACT_T exact_total = 0) {
+	static inline EXACT_T EnsureLevelAllocated(ArenaAllocator &allocator, BUF_T *&buffer, idx_t count,
+	                                           EXACT_T exact_total = 0) {
 		if (!buffer) {
-			buffer = reinterpret_cast<BUF_T *>(allocator->Allocate(count * sizeof(BUF_T)));
+			buffer = reinterpret_cast<BUF_T *>(allocator.Allocate(count * sizeof(BUF_T)));
 			memset(buffer, 0, count * sizeof(BUF_T));
 			return 0;
 		}
@@ -224,13 +242,13 @@ struct PacSumIntState {
 	}
 
 	// Flush64: cascade probabilistic_total64 to probabilistic_total128
-	AUTOVECTORIZE inline void Flush64(T64 value, bool force) {
+	AUTOVECTORIZE inline void Flush64(ArenaAllocator &allocator, T64 value, bool force) {
 		D_ASSERT(probabilistic_total64);
 		T64 new_total = value + exact_total64;
 		bool would_overflow = CHECK_BOUNDS_64(new_total, value, exact_total64);
 		if (would_overflow || (force && probabilistic_total128)) {
 			if (would_overflow) {
-				EnsureLevelAllocated(probabilistic_total128, idx_t(64));
+				EnsureLevelAllocated(allocator, probabilistic_total128, idx_t(64));
 			}
 			Cascade64To128();
 			exact_total64 = value;
@@ -240,16 +258,16 @@ struct PacSumIntState {
 	}
 
 	// Flush32: cascade probabilistic_total32 to probabilistic_total64
-	AUTOVECTORIZE inline void Flush32(int64_t value, bool force) {
+	AUTOVECTORIZE inline void Flush32(ArenaAllocator &allocator, int64_t value, bool force) {
 		D_ASSERT(probabilistic_total32);
 		int64_t new_total = value + exact_total32;
 		bool would_overflow = CHECK_BOUNDS_32(new_total);
 		if (would_overflow || (force && probabilistic_total64)) {
 			if (would_overflow) {
-				exact_total64 = EnsureLevelAllocated(probabilistic_total64, 64, exact_total64);
+				exact_total64 = EnsureLevelAllocated(allocator, probabilistic_total64, 64, exact_total64);
 			}
 			// Flush level 64 first (propagates exact_total32, ensures room for cascade)
-			Flush64(exact_total32, force);
+			Flush64(allocator, exact_total32, force);
 			CascadeToNextLevel<T32, T64, 32, 64>(probabilistic_total32, probabilistic_total64);
 			memset(probabilistic_total32, 0, 32 * sizeof(uint64_t));
 			exact_total32 = value;
@@ -259,16 +277,16 @@ struct PacSumIntState {
 	}
 
 	// Flush16: cascade probabilistic_total16 to probabilistic_total32
-	AUTOVECTORIZE inline void Flush16(int64_t value, bool force) {
+	AUTOVECTORIZE inline void Flush16(ArenaAllocator &allocator, int64_t value, bool force) {
 		D_ASSERT(probabilistic_total16);
 		int64_t new_total = value + exact_total16;
 		bool would_overflow = CHECK_BOUNDS_16(new_total);
 		if (would_overflow || (force && probabilistic_total32)) {
 			if (would_overflow) {
-				exact_total32 = EnsureLevelAllocated(probabilistic_total32, 32, exact_total32);
+				exact_total32 = EnsureLevelAllocated(allocator, probabilistic_total32, 32, exact_total32);
 			}
 			// Flush level 32 first (propagates exact_total16, ensures room for cascade)
-			Flush32(exact_total16, force);
+			Flush32(allocator, exact_total16, force);
 			CascadeToNextLevel<T16, T32, 16, 32>(probabilistic_total16, probabilistic_total32);
 			memset(probabilistic_total16, 0, 16 * sizeof(uint64_t));
 			exact_total16 = value;
@@ -278,16 +296,16 @@ struct PacSumIntState {
 	}
 
 	// Flush8: cascade probabilistic_total8 to probabilistic_total16
-	AUTOVECTORIZE inline void Flush8(int64_t value, bool force) {
+	AUTOVECTORIZE inline void Flush8(ArenaAllocator &allocator, int64_t value, bool force) {
 		D_ASSERT(probabilistic_total8);
 		int64_t new_total = value + exact_total8;
 		bool would_overflow = CHECK_BOUNDS_8(new_total);
 		if (would_overflow || (force && probabilistic_total16)) {
 			if (would_overflow) {
-				exact_total16 = EnsureLevelAllocated(probabilistic_total16, 16, exact_total16);
+				exact_total16 = EnsureLevelAllocated(allocator, probabilistic_total16, 16, exact_total16);
 			}
 			// Flush level 16 first (propagates exact_total8, ensures room for cascade)
-			Flush16(exact_total8, force);
+			Flush16(allocator, exact_total8, force);
 			CascadeToNextLevel<T8, T16, 8, 16>(probabilistic_total8, probabilistic_total16);
 			memset(probabilistic_total8, 0, 8 * sizeof(uint64_t));
 			exact_total8 = value;
@@ -296,17 +314,17 @@ struct PacSumIntState {
 		}
 	}
 
-	void Flush() {
+	void Flush(ArenaAllocator &allocator) {
 		// Start flushing from the lowest allocated level
 		// (data may have skipped lower levels if values were always large)
 		if (probabilistic_total8) {
-			Flush8(0LL, true);
+			Flush8(allocator, 0LL, true);
 		} else if (probabilistic_total16) {
-			Flush16(0LL, true);
+			Flush16(allocator, 0LL, true);
 		} else if (probabilistic_total32) {
-			Flush32(0LL, true);
+			Flush32(allocator, 0LL, true);
 		} else if (probabilistic_total64) {
-			Flush64(0LL, true);
+			Flush64(allocator, 0LL, true);
 		}
 	}
 
@@ -344,31 +362,31 @@ struct PacSumIntState {
 	}
 
 	// Pre-allocate all levels (for NONLAZY mode)
-	void InitializeAllLevels(ArenaAllocator &alloc) {
-		allocator = &alloc;
-		EnsureLevelAllocated(probabilistic_total8, 8);
-		EnsureLevelAllocated(probabilistic_total16, 16);
-		EnsureLevelAllocated(probabilistic_total32, 32);
-		EnsureLevelAllocated(probabilistic_total64, 64);
-		EnsureLevelAllocated(probabilistic_total128, idx_t(64));
+	void InitializeAllLevels(ArenaAllocator &allocator) {
+		EnsureLevelAllocated(allocator, probabilistic_total8, 8);
+		EnsureLevelAllocated(allocator, probabilistic_total16, 16);
+		EnsureLevelAllocated(allocator, probabilistic_total32, 32);
+		EnsureLevelAllocated(allocator, probabilistic_total64, 64);
+		EnsureLevelAllocated(allocator, probabilistic_total128, idx_t(64));
 	}
 #endif
 };
 
 // Double pac_sum state
 struct PacSumDoubleState {
+	// Field ordering optimized for memory layout
+#ifdef PAC_SUMAVG_UNSAFENULL
+	bool seen_null;
+#endif
+#ifdef PAC_SUMAVG_FLOAT_CASCADING
+	double exact_total;
+#endif
+	uint64_t exact_count; // total count of values added (for pac_avg)
 #ifdef PAC_SUMAVG_FLOAT_CASCADING
 	// Float cascading: accumulate small values in float subtotal, flush to double total
 	float probabilistic_total_float[64];
 #endif
 	double probabilistic_total[64];
-#ifdef PAC_SUMAVG_FLOAT_CASCADING
-	double exact_total;
-#endif
-	uint64_t exact_count; // total count of values added (for pac_avg)
-#ifdef PAC_SUMAVG_UNSAFENULL
-	bool seen_null;
-#endif
 
 	// Cascade constants for float cascading
 	static constexpr double MaxIncrementFloat32 = 1000000.0;
@@ -394,7 +412,8 @@ struct PacSumDoubleState {
 #endif
 	}
 
-	void Flush() {
+	void Flush(ArenaAllocator &) {
+		// Note: allocator unused - PacSumDoubleState doesn't do lazy allocation
 #ifdef PAC_SUMAVG_FLOAT_CASCADING
 		Flush32(0, true);
 #endif

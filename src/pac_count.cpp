@@ -50,19 +50,18 @@ PacCountUpdateHash(uint64_t key_hash, PacCountState &state) {
 #else
 AUTOVECTORIZE static inline void // worker function that probabilistically counts one hash into 64 subtotal
 PacCountUpdateHash(uint64_t key_hash, PacCountState &state, ArenaAllocator &allocator) {
-	if (!state.allocator) {
-		state.allocator = &allocator; // Ensure allocator is set and level8 is allocated
 #ifdef PAC_COUNT_NONLAZY
+	if (!state.probabilistic_total16) { // Use as proxy for "not yet initialized"
 		state.InitializeAllLevels(allocator);
-#endif
 	}
-	state.EnsureLevelAllocated(state.probabilistic_total8, 8);
+#endif
+	// Level 8 is inline (always available), no allocation needed
 	// the SIMD-friendly performance-critical loop: adding to bytecounters using SWAR
 	// prototyped here: https://godbolt.org/z/8r6x8s17P
 	for (int j = 0; j < 8; j++) {
 		state.probabilistic_total8[j] += (key_hash >> j) & PAC_COUNT_MASK; // Add to SWAR-packed uint8 counters
 	}
-	state.Flush8(1, false); // increment exact_total8 by 1, flush if needed
+	state.Flush8(allocator, 1, false); // increment exact_total8 by 1, flush if needed
 }
 #endif
 
@@ -221,8 +220,8 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 }
 #else
 // Helper to combine one level of counters (moves source pointer ownership to dest if dest is null)
-template <typename T>
-static inline void CombineLevel(uint64_t *&src_buf, uint64_t *&dst_buf, uint64_t &src_exact, uint64_t &dst_exact) {
+template <typename T, typename EXACT_T>
+static inline void CombineLevel(uint64_t *&src_buf, uint64_t *&dst_buf, EXACT_T &src_exact, EXACT_T &dst_exact) {
 	if (src_buf) {
 		if (dst_buf) { // Both have data - add element by element
 			T *src = reinterpret_cast<T *>(src_buf);
@@ -248,30 +247,31 @@ AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData 
 		auto *d = dst_state[i];
 
 		// Flush source to ensure all data is cascaded up
-		s->Flush();
-
-		// Ensure dst has allocator pointer
-		if (!d->allocator) {
-			d->allocator = &aggr.allocator;
-		}
+		s->Flush(aggr.allocator);
 
 		// Before combining each level, check if dst would overflow - if so, flush dst first
-		if (d->probabilistic_total8 && s->exact_total8 + d->exact_total8 > UINT8_MAX) {
-			d->Flush8(0, true);
+		// Level 8 is always present (inline)
+		if (static_cast<uint16_t>(s->exact_total8) + static_cast<uint16_t>(d->exact_total8) > UINT8_MAX) {
+			d->Flush8(aggr.allocator, 0, true);
 		}
-		if (d->probabilistic_total16 && s->exact_total16 + d->exact_total16 > UINT16_MAX) {
-			d->Flush16(0, true);
+		if (d->probabilistic_total16 &&
+		    static_cast<uint32_t>(s->exact_total16) + static_cast<uint32_t>(d->exact_total16) > UINT16_MAX) {
+			d->Flush16(aggr.allocator, 0, true);
 		}
-		if (d->probabilistic_total32 && s->exact_total32 + d->exact_total32 > UINT32_MAX) {
-			d->Flush32(0, true);
+		if (d->probabilistic_total32 &&
+		    static_cast<uint64_t>(s->exact_total32) + static_cast<uint64_t>(d->exact_total32) > UINT32_MAX) {
+			d->Flush32(aggr.allocator, 0, true);
 		}
 		// Level 64 cannot overflow within uint64_t range
 
-		// Combine at each level
-		CombineLevel<uint8_t>(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8);
+		// Combine at each level - use dummy pointers for inline level 8
+		uint64_t *src8 = s->probabilistic_total8, *dst8 = d->probabilistic_total8;
+		CombineLevel<uint8_t>(src8, dst8, s->exact_total8, d->exact_total8);
 		CombineLevel<uint16_t>(s->probabilistic_total16, d->probabilistic_total16, s->exact_total16, d->exact_total16);
 		CombineLevel<uint32_t>(s->probabilistic_total32, d->probabilistic_total32, s->exact_total32, d->exact_total32);
-		CombineLevel<uint64_t>(s->probabilistic_total64, d->probabilistic_total64, s->exact_total64, d->exact_total64);
+		// Level 64 has no exact_total tracking - use dummy
+		uint64_t dummy = 0;
+		CombineLevel<uint64_t>(s->probabilistic_total64, d->probabilistic_total64, dummy, dummy);
 	}
 }
 #endif
@@ -285,7 +285,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 
 	for (idx_t i = 0; i < count; i++) {
-		state[i]->Flush(); // force flush any remaining small total into the big total
+		state[i]->Flush(input.allocator); // force flush any remaining small total into the big total
 		double buf[64];
 		state[i]->GetTotalsAsDouble(buf);
 		data[offset + i] = // when choosing any one of the total we go for #42 (but one counts from 0 ofc)

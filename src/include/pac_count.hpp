@@ -64,26 +64,27 @@ struct PacCountState {
 		ToDoubleArray(probabilistic_total, dst);
 	}
 #else
-	ArenaAllocator *allocator; // Pointer to DuckDB's arena allocator (set during first update)
+	// Exact (non-probabilistic) total for each level - kept to determine when a level could overflow
+	// Using smallest types that can hold max values before flush (saves memory with many groups)
+	uint8_t exact_total8;   // max 255 before flush to level 16
+	uint16_t exact_total16; // max 65535 before flush to level 32
+	uint32_t exact_total32; // max ~4G before flush to level 64
 
-	// Lazily allocated levels (nullptr if not allocated)
-	uint64_t *probabilistic_total8;  // 8 x uint64_t (64 bytes) - SWAR packed uint8_t subtotals
+	// Level 8 is always needed (inline), higher levels lazily allocated
+	uint64_t probabilistic_total8[8]; // 8 x uint64_t (64 bytes) - SWAR packed uint8_t subtotals
+
+	// Lazily allocated higher levels (nullptr if not allocated)
 	uint64_t *probabilistic_total16; // 16 x uint64_t (128 bytes) - SWAR packed uint16_t subtotals
 	uint64_t *probabilistic_total32; // 32 x uint64_t (256 bytes) - SWAR packed uint32_t subtotals
 	uint64_t *probabilistic_total64; // 64 x uint64_t (512 bytes) - full uint64_t total
 
-	// Exact (non-probabilistic) total for each level - kept to determine when a level's could overflow
-	uint64_t exact_total8;  // max 255 before flush to level 16
-	uint64_t exact_total16; // max 65535 before flush to level 32
-	uint64_t exact_total32; // max ~4G before flush to level 64
-	uint64_t exact_total64; // final level (no overflow possible within uint64_t range)
-
 	// Lazily allocate a level's buffer if not yet allocated
 	// Returns 0 if newly allocated (and zeroed), otherwise returns exact_total unchanged
-	template <typename EXACT_T = int>
-	inline EXACT_T EnsureLevelAllocated(uint64_t *&buffer, idx_t count, EXACT_T exact_total = 0) {
+	template <typename EXACT_T>
+	static inline EXACT_T EnsureLevelAllocated(ArenaAllocator &allocator, uint64_t *&buffer, idx_t count,
+	                                           EXACT_T exact_total) {
 		if (!buffer) {
-			buffer = reinterpret_cast<uint64_t *>(allocator->Allocate(count * sizeof(uint64_t)));
+			buffer = reinterpret_cast<uint64_t *>(allocator.Allocate(count * sizeof(uint64_t)));
 			memset(buffer, 0, count * sizeof(uint64_t));
 			return 0;
 		}
@@ -107,13 +108,13 @@ struct PacCountState {
 	}
 
 	// Flush32: cascade probabilistic_total32 to probabilistic_total64
-	AUTOVECTORIZE inline void Flush32(uint64_t value, bool force) {
+	AUTOVECTORIZE inline void Flush32(ArenaAllocator &allocator, uint32_t value, bool force) {
 		D_ASSERT(probabilistic_total32);
-		uint64_t new_total = value + exact_total32;
+		uint64_t new_total = static_cast<uint64_t>(value) + static_cast<uint64_t>(exact_total32);
 		bool would_overflow = (new_total > UINT32_MAX);
 		if (would_overflow || (force && probabilistic_total64)) {
 			if (would_overflow) {
-				EnsureLevelAllocated(probabilistic_total64, 64);
+				EnsureLevelAllocated(allocator, probabilistic_total64, 64, 0);
 			}
 			CascadeToNextLevel<uint32_t, uint64_t, 32, 64>(probabilistic_total32, probabilistic_total64);
 			memset(probabilistic_total32, 0, 32 * sizeof(uint64_t));
@@ -124,15 +125,15 @@ struct PacCountState {
 	}
 
 	// Flush16: cascade probabilistic_total16 to probabilistic_total32
-	AUTOVECTORIZE inline void Flush16(uint32_t value, bool force) {
+	AUTOVECTORIZE inline void Flush16(ArenaAllocator &allocator, uint16_t value, bool force) {
 		D_ASSERT(probabilistic_total16);
-		uint32_t new_total = value + exact_total16;
+		uint32_t new_total = static_cast<uint32_t>(value) + static_cast<uint32_t>(exact_total16);
 		bool would_overflow = (new_total > UINT16_MAX);
 		if (would_overflow || (force && probabilistic_total32)) {
 			if (would_overflow) {
-				exact_total32 = EnsureLevelAllocated(probabilistic_total32, 32, exact_total32);
+				exact_total32 = EnsureLevelAllocated(allocator, probabilistic_total32, 32, exact_total32);
 			}
-			Flush32(exact_total16, force);
+			Flush32(allocator, exact_total16, force);
 			CascadeToNextLevel<uint16_t, uint32_t, 16, 32>(probabilistic_total16, probabilistic_total32);
 			memset(probabilistic_total16, 0, 16 * sizeof(uint64_t));
 			exact_total16 = value;
@@ -142,15 +143,14 @@ struct PacCountState {
 	}
 
 	// Flush8: cascade probabilistic_total8 to probabilistic_total16
-	AUTOVECTORIZE inline void Flush8(uint32_t value, bool force) {
-		D_ASSERT(probabilistic_total8);
-		uint32_t new_total = value + exact_total8;
+	AUTOVECTORIZE inline void Flush8(ArenaAllocator &allocator, uint8_t value, bool force) {
+		uint16_t new_total = static_cast<uint16_t>(value) + static_cast<uint16_t>(exact_total8);
 		bool would_overflow = (new_total > UINT8_MAX);
 		if (would_overflow || (force && probabilistic_total16)) {
 			if (would_overflow) {
-				exact_total16 = EnsureLevelAllocated(probabilistic_total16, 16, exact_total16);
+				exact_total16 = EnsureLevelAllocated(allocator, probabilistic_total16, 16, exact_total16);
 			}
-			Flush16(exact_total8, force);
+			Flush16(allocator, exact_total8, force);
 			CascadeToNextLevel<uint8_t, uint16_t, 8, 16>(probabilistic_total8, probabilistic_total16);
 			memset(probabilistic_total8, 0, 8 * sizeof(uint64_t));
 			exact_total8 = value;
@@ -160,10 +160,8 @@ struct PacCountState {
 	}
 
 	// Flush all levels (called before Combine or Finalize)
-	void Flush() {
-		if (probabilistic_total8) {
-			Flush8(0, true);
-		}
+	void Flush(ArenaAllocator &allocator) {
+		Flush8(allocator, 0, true);
 	}
 
 	// Convert SWAR packed counters to double[64] for finalization
@@ -185,21 +183,17 @@ struct PacCountState {
 			UnpackSWARToDouble<uint32_t>(probabilistic_total32, 32, dst);
 		} else if (probabilistic_total16) {
 			UnpackSWARToDouble<uint16_t>(probabilistic_total16, 16, dst);
-		} else if (probabilistic_total8) {
-			UnpackSWARToDouble<uint8_t>(probabilistic_total8, 8, dst);
 		} else {
-			// No data allocated - return zeros
-			memset(dst, 0, 64 * sizeof(double));
+			UnpackSWARToDouble<uint8_t>(probabilistic_total8, 8, dst);
 		}
 	}
 
 	// Pre-allocate all levels (for NONLAZY mode)
-	void InitializeAllLevels(ArenaAllocator &alloc) {
-		allocator = &alloc;
-		EnsureLevelAllocated(probabilistic_total8, 8);
-		EnsureLevelAllocated(probabilistic_total16, 16);
-		EnsureLevelAllocated(probabilistic_total32, 32);
-		EnsureLevelAllocated(probabilistic_total64, 64);
+	void InitializeAllLevels(ArenaAllocator &allocator) {
+		// probabilistic_total8 is already inline
+		EnsureLevelAllocated(allocator, probabilistic_total16, 16, exact_total16);
+		EnsureLevelAllocated(allocator, probabilistic_total32, 32, exact_total32);
+		EnsureLevelAllocated(allocator, probabilistic_total64, 64, 0);
 	}
 #endif
 };
