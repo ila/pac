@@ -30,6 +30,14 @@ void RegisterPacMaxFunctions(ExtensionLoader &loader);
 // we lazily allocate the various arrays of a certain width, so if we do not need
 // huge aggregates, then we never allocate them (memory saving).
 //
+// when upgrading the size (e.g. 16->32-bits) we want to keep using the memory used for 16-bits
+// therefore, memory is organized in "banks"of the size needed for 8-bits, and when upgrading 
+// we progressivly allocate more banks, re-using the old ones also for the bigger size;
+//
+// Cascading/banking is only implemented for integers.
+// Floating-point directly aggregate in their own datatyue (float,double): double does not
+// attempt to use float for small values. This is done to make the code less complex.
+//
 // some #defines to demonstrate the effects of our optimizations:
 // Define PAC_MINMAX_NONBANKED to use fixed-width contiguous arrays (no bank splitting).
 // Define PAC_MINMAX_NONLAZY to pre-allocate all levels at initialization (and suffer the consequences)
@@ -227,28 +235,29 @@ AUTOVECTORIZE static inline BOUND_T ComputeGlobalBound(const T *extremes) {
 }
 
 // ============================================================================
-// Simple state for float/double - no cascading, no banks, just double[64]
+// Simple state for float/double - no cascading, no banks
+// T = float (256 bytes) or double (512 bytes)
 // ============================================================================
-template <bool IS_MAX>
-struct PacMinMaxDoubleState {
-	double global_bound;
+template <typename T, bool IS_MAX>
+struct PacMinMaxFloatingState {
+	T global_bound;
 	uint16_t update_count;
 	bool initialized;
 #ifdef PAC_MINMAX_UNSAFENULL
 	bool seen_null;
 #endif
-	double extremes[64]; // 512 bytes direct
+	T extremes[64]; // 256 bytes for float, 512 bytes for double
 
-	using TMAX = double;
-	using ValueType = double;
+	using TMAX = T;
+	using ValueType = T;
 
-	static inline double TypeInit() {
-		return IS_MAX ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
+	static inline T TypeInit() {
+		return IS_MAX ? -std::numeric_limits<T>::infinity() : std::numeric_limits<T>::infinity();
 	}
 
 	// Returns the init value as double (for detecting never-updated counters)
 	static double InitAsDouble() {
-		return TypeInit();
+		return static_cast<double>(TypeInit());
 	}
 
 	void Initialize() {
@@ -262,7 +271,7 @@ struct PacMinMaxDoubleState {
 
 	void GetTotalsAsDouble(double *dst) const {
 		for (int i = 0; i < 64; i++) {
-			dst[i] = extremes[i];
+			dst[i] = static_cast<double>(extremes[i]);
 		}
 	}
 
@@ -270,7 +279,7 @@ struct PacMinMaxDoubleState {
 #ifndef PAC_MINMAX_NOBOUNDOPT
 		if (++update_count == BOUND_RECOMPUTE_INTERVAL) {
 			update_count = 0;
-			global_bound = ComputeGlobalBound<double, double, IS_MAX>(extremes);
+			global_bound = ComputeGlobalBound<T, T, IS_MAX>(extremes);
 		}
 #endif
 	}
@@ -282,16 +291,16 @@ struct PacMinMaxDoubleState {
 		}
 	}
 
-	void MaybeUpgrade(ArenaAllocator &, double) {
-		// No cascading for double state - always uses double[64]
+	void MaybeUpgrade(ArenaAllocator &, T) {
+		// No cascading for floating-point state
 	}
 
-	AUTOVECTORIZE void UpdateAtCurrentLevel(uint64_t key_hash, double value) {
-		UpdateExtremesKernel<double, IS_MAX>::update(extremes, key_hash, value, 0, 64);
+	AUTOVECTORIZE void UpdateAtCurrentLevel(uint64_t key_hash, T value) {
+		UpdateExtremesKernel<T, IS_MAX>::update(extremes, key_hash, value, 0, 64);
 	}
 
 	// Combine with another state (allocator unused, present for interface compatibility)
-	void CombineWith(const PacMinMaxDoubleState &src, ArenaAllocator &) {
+	void CombineWith(const PacMinMaxFloatingState &src, ArenaAllocator &) {
 		if (!src.initialized) {
 			return;
 		}
@@ -305,7 +314,7 @@ struct PacMinMaxDoubleState {
 	}
 
 	static idx_t StateSize() {
-		return sizeof(PacMinMaxDoubleState);
+		return sizeof(PacMinMaxFloatingState);
 	}
 };
 
@@ -317,10 +326,10 @@ struct PacMinMaxDoubleState {
 // MAXLEVEL: maximum cascading level (1-5)
 //
 // Level abstraction:
-//   Level 1: int8/uint8 (1 byte, uses SWAR)
-//   Level 2: int16/uint16 (2 bytes, uses SWAR)
-//   Level 3: int32/uint32 (4 bytes, uses SWAR)
-//   Level 4: int64/uint64 (8 bytes, linear)
+//   Level 1: int8/uint8       ( 1 byte,  uses SWAR)
+//   Level 2: int16/uint16     ( 2 bytes, uses SWAR)
+//   Level 3: int32/uint32     ( 4 bytes, uses SWAR)
+//   Level 4: int64/uint64     ( 8 bytes, linear)
 //   Level 5: hugeint/uhugeint (16 bytes, linear)
 //
 // All pointer fields are always defined but ordered by level at the end of the struct.
@@ -445,8 +454,8 @@ struct PacMinMaxState {
 	//   banks4: 8×64 bytes (allocated for level 5)
 	//
 	// Total banks per level:
-	//   Level 1 (int8/float):   1 bank  =  64 bytes
-	//   Level 2 (int16/double): 2 banks = 128 bytes
+	//   Level 1 (int8):         1 bank  =  64 bytes
+	//   Level 2 (int16):        2 banks = 128 bytes
 	//   Level 3 (int32):        4 banks = 256 bytes
 	//   Level 4 (int64):        8 banks = 512 bytes
 	//   Level 5 (hugeint):     16 banks = 1024 bytes

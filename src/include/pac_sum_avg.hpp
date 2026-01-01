@@ -160,22 +160,13 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
+#ifdef PAC_SUMAVG_UNSAFENULL
+	bool seen_null;
+#endif
 #ifdef PAC_SUMAVG_NONCASCADING
 	uint64_t exact_count;                 // total count of values added (for pac_avg)
 	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
-#ifdef PAC_SUMAVG_UNSAFENULL
-	bool seen_null;
-#endif
 #else
-	// Field ordering optimized for memory layout:
-	// 1. seen_null (1 byte)
-	// 2. exact_totals (sized to fit level's range - value is always valid after flush)
-	// 3. exact_count
-	// 4. allocator pointer
-	// 5. probabilistic pointers (lazily allocated)
-#ifdef PAC_SUMAVG_UNSAFENULL
-	bool seen_null;
-#endif
 	// Exact subtotals for each level - sized to fit level's representable range.
 	// After any Flush, exact_totalN is either:
 	//   - the incoming `value` (which fits in TN since it was routed to level N), or

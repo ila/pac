@@ -12,19 +12,58 @@ namespace duckdb {
 
 void RegisterPacCountFunctions(ExtensionLoader &);
 
-// PAC_COUNT uses SWAR (SIMD Within A Register) for efficient 64-counter updates.
-// Two levels: subtotal8 (inline, uint8_t[64] packed as uint64_t[8]) flushes to
-// banked total (uint16/32/64 depending on count magnitude).
+// PAC_COUNT(key_hash) implements a COUNT aggregate that for each privacy-unit (identified by a key_hash)
+// computes 64 independent counts, where each independent count randomly (50% chance) includes a PU or not.
+// The observation is that the 64-bits of a hashed key of the PU are random (50% 0, 50% 1), so we can take
+// the 64 bits of the key to make 64 independent decisions.
+//
+// A COUNT() aggregate in its implementation simply performs total += 1
+//
+// PAC_COUNT() needs to do for(i=0; i<64; i++) total[i] += (key_hash >> i) & 1; (extract bit i)
+//
+// We want to do this in a SIMD-friendly way. Therefore, we want to create 64 subtotal of uint8_t (i.e. bytes),
+// and perform 64 byte-additions, because in the widest SIMD implementation, AVX512, this means that this
+// could be done in a *SINGLE* instruction (AVX512 has 64 lanes of uint8, as 64x8=512)
+//
+// But, to help auto-vectorizing, we use uint64_t probabilistic_total[8], rather than uint8_t probabilistic_total[64]
+// because key_hash is also uint64_t. We apply the below mask to key_hash to extract the lowest bit of each byte:
+
+#define PAC_COUNT_MASK                                                                                                 \
+	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
+
+// For each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
+// with a single uint64_t ADD to a uint64 subtotal[].
+//
+// This technique is known as SWAR: SIMD Within A Register
+//
+// You can only add 255 times before the bytes in this uint64_t start touching each other (causing overflow).
+// So after 255 iterations, the probabilistic_total8[64] are added to uint16_t probabilistic_total16 and reset to 0.
+// This repeats possibly in wider total types 16/32/64. We do the extra cascades to 16/32 because often these thinner
+// counters are enough to hold the data and that saves memory (we allocate the counter arrays on need only).
+//
+// The idea is that we get very fast performance 255 times and slower performance once every 256 only.
+// This SIMD-friendly implementation can make PAC counting almost as fast as normal counting.
+//
+// MEMORY OPTIMIZATION: We use lazy allocation with cascading levels (8->16->32->64 bits) to reduce
+// Define PAC_COUNT_NONCASCADING to use simple fixed uint64_t[64] counters instead.
+//
+// If we enlarge to uint16_t and allocate uint16_t probabilistic_total16[64] for that, and later enlarge to uint32_t
+// and allocate uint32_t probabilistic_total32[64], we are wasting/leaking the previously used uint8 and uint16 memory.
+//
+// To avoid that, the uint8 memory is now one "bank" (64 bytes). If int16 is needed, a second bank gets allocated
+// of again 64 bytes (128 bytes total). And when uint32_t is needed, we allocate two more banks and for 64bits 4 more.
+// The count kernels now iterates over banks. Using banked allocations, no memory gets wasted.
 //
 // Bank layout for total:
 //   banks1: 2 banks (128 bytes) - fits uint16_t[64]
 //   banks2: 2 banks (128 bytes) - with banks1 = uint32_t[64]
 //   banks3: 4 banks (256 bytes) - with banks1+2 = uint64_t[64]
 
-#define PAC_COUNT_MASK                                                                                                 \
-	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
+//#define PAC_COUNT_NONLAZY 1  // Pre-allocate all levels at initialization
+//#define PAC_COUNT_NONBANKED 1 // will directly aggregate in uint64_t probabilistic_total[64] (no cascading/banking)
 
-//#define PAC_COUNT_NONBANKED 1
+// Two levels: subtotal8 (inline, uint8_t[64] packed as uint64_t[8]) flushes to banked total (uint16/32/64 depending 
+// on count magnitude).
 
 struct PacCountState {
 #ifdef PAC_COUNT_NONBANKED
@@ -42,9 +81,9 @@ struct PacCountState {
 	uint64_t probabilistic_subtotal8[8]; // 64 bytes
 
 	// Level 2: banked total storage (lazily allocated)
-	uint8_t *banks1; // 2 banks (128 bytes)
-	uint8_t *banks2; // 2 banks (128 bytes)
-	uint8_t *banks3; // 4 banks (256 bytes)
+	uint8_t *banks1; // 2 banks (128 bytes) needed for "probabilistic_subtotal16"
+	uint8_t *banks2; // 2 banks (128 bytes) needed for "probabilistic_subtotal32"
+	uint8_t *banks3; // 4 banks (256 bytes) needed for "probabilistic_subtotal64"
 
 	// Get bank pointer (0-7)
 	inline uint8_t *GetBank(int n) const {

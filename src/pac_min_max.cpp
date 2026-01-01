@@ -6,9 +6,13 @@ namespace duckdb {
 template <bool SIGNED, bool IS_MAX, int MAXLEVEL = 5>
 using PacMinMaxIntState = PacMinMaxState<SIGNED, IS_MAX, MAXLEVEL>;
 
-// Float/double state alias: uses simple PacMinMaxDoubleState (no cascading)
+// Float state: uses float[64] (256 bytes)
 template <bool IS_MAX>
-using PacMinMaxFloatState = PacMinMaxDoubleState<IS_MAX>;
+using PacMinMaxFloatState = PacMinMaxFloatingState<float, IS_MAX>;
+
+// Double state: uses double[64] (512 bytes)
+template <bool IS_MAX>
+using PacMinMaxDoubleState = PacMinMaxFloatingState<double, IS_MAX>;
 
 // ============================================================================
 // PacMinMaxUpdateOne - process one value into the aggregation state (64 extremes)
@@ -212,14 +216,16 @@ INT_UPDATE_WRAPPER(PacMinMaxUpdateHugeInt, true, 5, hugeint_t)
 INT_UPDATE_WRAPPER(PacMinMaxUpdateUHugeInt, false, 5, uhugeint_t)
 #undef INT_UPDATE_WRAPPER
 
-// Float/Double updates (MAXLEVEL=2: float+double cascading)
+// Float updates (uses float[64] state)
 template <bool IS_MAX>
 void PacMinMaxUpdateFloat(Vector in[], AggregateInputData &a, idx_t n, data_ptr_t s, idx_t c) {
 	PacMinMaxUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, float>(in, a, n, s, c);
 }
+
+// Double updates (uses double[64] state)
 template <bool IS_MAX>
 void PacMinMaxUpdateDoubleW(Vector in[], AggregateInputData &a, idx_t n, data_ptr_t s, idx_t c) {
-	PacMinMaxUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, double>(in, a, n, s, c);
+	PacMinMaxUpdate<PacMinMaxDoubleState<IS_MAX>, IS_MAX, double>(in, a, n, s, c);
 }
 
 // Integer scatter updates (MAXLEVEL: 4=int64, 5=hugeint)
@@ -242,14 +248,16 @@ INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateHugeInt, true, 5, hugeint_t)
 INT_SCATTER_WRAPPER(PacMinMaxScatterUpdateUHugeInt, false, 5, uhugeint_t)
 #undef INT_SCATTER_WRAPPER
 
-// Float/Double scatter updates
+// Float scatter updates (uses float[64] state)
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateFloat(Vector in[], AggregateInputData &a, idx_t n, Vector &s, idx_t c) {
 	PacMinMaxScatterUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, float>(in, a, n, s, c);
 }
+
+// Double scatter updates (uses double[64] state)
 template <bool IS_MAX>
 void PacMinMaxScatterUpdateDoubleW(Vector in[], AggregateInputData &a, idx_t n, Vector &s, idx_t c) {
-	PacMinMaxScatterUpdate<PacMinMaxFloatState<IS_MAX>, IS_MAX, double>(in, a, n, s, c);
+	PacMinMaxScatterUpdate<PacMinMaxDoubleState<IS_MAX>, IS_MAX, double>(in, a, n, s, c);
 }
 
 // Combine wrappers - one per (SIGNED, MAXLEVEL) combination
@@ -286,8 +294,12 @@ void PacMinMaxCombineInt64Unsigned(Vector &src, Vector &dst, AggregateInputData 
 	PacMinMaxCombine<PacMinMaxIntState<false, IS_MAX, 4>, IS_MAX>(src, dst, a, c);
 }
 template <bool IS_MAX>
-void PacMinMaxCombineDoubleWrapper(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+void PacMinMaxCombineFloat(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
 	PacMinMaxCombine<PacMinMaxFloatState<IS_MAX>, IS_MAX>(src, dst, a, c);
+}
+template <bool IS_MAX>
+void PacMinMaxCombineDouble(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
+	PacMinMaxCombine<PacMinMaxDoubleState<IS_MAX>, IS_MAX>(src, dst, a, c);
 }
 template <bool IS_MAX>
 void PacMinMaxCombineHugeIntSigned(Vector &src, Vector &dst, AggregateInputData &a, idx_t c) {
@@ -392,17 +404,17 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 		function.initialize = PacMinMaxInitialize<PacMinMaxFloatState<IS_MAX>>;
 		function.update = PacMinMaxScatterUpdateFloat<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateFloat<IS_MAX>;
-		function.combine = PacMinMaxCombineDoubleWrapper<IS_MAX>;
+		function.combine = PacMinMaxCombineFloat<IS_MAX>;
 		function.finalize = PacMinMaxFinalize<PacMinMaxFloatState<IS_MAX>, float>;
 		break;
 
 	case PhysicalType::DOUBLE:
-		function.state_size = PacMinMaxStateSize<PacMinMaxFloatState<IS_MAX>>;
-		function.initialize = PacMinMaxInitialize<PacMinMaxFloatState<IS_MAX>>;
+		function.state_size = PacMinMaxStateSize<PacMinMaxDoubleState<IS_MAX>>;
+		function.initialize = PacMinMaxInitialize<PacMinMaxDoubleState<IS_MAX>>;
 		function.update = PacMinMaxScatterUpdateDoubleW<IS_MAX>;
 		function.simple_update = PacMinMaxUpdateDoubleW<IS_MAX>;
-		function.combine = PacMinMaxCombineDoubleWrapper<IS_MAX>;
-		function.finalize = PacMinMaxFinalize<PacMinMaxFloatState<IS_MAX>, double>;
+		function.combine = PacMinMaxCombineDouble<IS_MAX>;
+		function.finalize = PacMinMaxFinalize<PacMinMaxDoubleState<IS_MAX>, double>;
 		break;
 
 	case PhysicalType::INT128:
@@ -530,7 +542,8 @@ INST_C(PacMinMaxCombineInt8Unsigned);
 INST_C(PacMinMaxCombineInt16Unsigned);
 INST_C(PacMinMaxCombineInt32Unsigned);
 INST_C(PacMinMaxCombineInt64Unsigned);
-INST_C(PacMinMaxCombineDoubleWrapper);
+INST_C(PacMinMaxCombineFloat);
+INST_C(PacMinMaxCombineDouble);
 INST_C(PacMinMaxCombineHugeIntSigned);
 INST_C(PacMinMaxCombineHugeIntUnsigned);
 } // namespace duckdb
