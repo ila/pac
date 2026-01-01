@@ -109,13 +109,15 @@ struct SWARTraits<16> { // hugeint - linear layout
 };
 
 // Unified SIMD Min/Max update kernel that works for all integers <=64 and double,float even
+// Updates `count` elements in result[], using bits [start_bit..start_bit+count) from key_hash
 template <typename T, bool IS_MAX, int SIZE = sizeof(T)>
 struct UpdateExtremesKernel {
 	using Traits = SWARTraits<SIZE>;
 	using BitsT = typename Traits::BitsT;
 	using UintT = typename Traits::UintT;
 
-	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value) {
+	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value, int start_bit,
+	                                        int count) {
 		union {
 			uint64_t u64[Traits::SHIFTS]; // keyhash as uint64
 			BitsT bits[64];               // signed int type as wide as T (we want 0x00 - 1 to become 0xFF)
@@ -123,8 +125,9 @@ struct UpdateExtremesKernel {
 		for (int i = 0; i < Traits::SHIFTS; i++) {
 			buf.u64[i] = (key_hash >> i) & Traits::MASK; // process multiple T in one uint64 (SWAR)
 		}
-		for (int i = 0; i < 64; i++) {
-			UintT mask = static_cast<UintT>(-buf.bits[i]); // 1->0x00, 0->0xFF
+		for (int i = 0; i < count; i++) {
+			int bit_idx = start_bit + i;
+			UintT mask = static_cast<UintT>(-buf.bits[bit_idx]); // 1->0x00, 0->0xFF
 			union { // this union is there to be able to combine integer masking operations with floating-point min/max
 				T val;      // could be float or double
 				UintT bits; // unsigned int type as wide as T
@@ -140,14 +143,16 @@ struct UpdateExtremesKernel {
 // Specialization for uint8_t MAX: turns out to be faster to mask value first (only possible for unsigned)
 template <>
 struct UpdateExtremesKernel<uint8_t, true, 1> {
-	AUTOVECTORIZE static inline void update(uint8_t *__restrict__ result, uint64_t key_hash, uint8_t value) {
+	AUTOVECTORIZE static inline void update(uint8_t *__restrict__ result, uint64_t key_hash, uint8_t value,
+	                                        int start_bit, int count) {
 		uint64_t buf[8];
 		for (int i = 0; i < 8; i++) {
 			buf[i] = (key_hash >> i) & 0x0101010101010101ULL;
 		}
 		int8_t *__restrict__ bits = reinterpret_cast<int8_t *>(buf);
-		for (int i = 0; i < 64; i++) {
-			uint8_t mask = static_cast<uint8_t>(-bits[i]);
+		for (int i = 0; i < count; i++) {
+			int bit_idx = start_bit + i;
+			uint8_t mask = static_cast<uint8_t>(-bits[bit_idx]);
 			result[i] = std::max(static_cast<uint8_t>(value & mask), result[i]);
 		}
 	}
@@ -156,101 +161,32 @@ struct UpdateExtremesKernel<uint8_t, true, 1> {
 // Specialization for [u]hugeint - scalar comparison, no bitwise tricks, use IF..THEN to avoid slow hugeint calculations
 template <typename T, bool IS_MAX>
 struct UpdateExtremesKernel<T, IS_MAX, 16> {
-	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value) {
-		for (int i = 0; i < 64; i++) {
-			if (((key_hash >> i) & 1ULL) && PAC_IS_BETTER(value, result[i])) {
+	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value, int start_bit,
+	                                        int count) {
+		for (int i = 0; i < count; i++) {
+			int bit_idx = start_bit + i;
+			if (((key_hash >> bit_idx) & 1ULL) && PAC_IS_BETTER(value, result[i])) {
 				result[i] = value;
 			}
 		}
 	}
 };
-
-// ============================================================================
-// Per-bank update kernel for banked mode
-// ============================================================================
-// Processes one bank's worth of elements (64 bytes = one AVX-512 register).
-// bank_idx: which bank (0..NUM_BANKS-1)
-// ELEMS_PER_BANK: elements in each bank (64/sizeof(T))
-#ifndef PAC_MINMAX_NONBANKED
-template <typename T, bool IS_MAX, int ELEMS_PER_BANK>
-struct UpdateExtremesBankKernel {
-	using Traits = SWARTraits<sizeof(T)>;
-	using BitsT = typename Traits::BitsT;
-	using UintT = typename Traits::UintT;
-
-	AUTOVECTORIZE static inline void update(T *__restrict__ result, uint64_t key_hash, T value, int bank_idx) {
-		// Precompute bit masks for all 64 positions (SWAR layout)
-		union {
-			uint64_t u64[Traits::SHIFTS];
-			BitsT bits[64];
-		} buf;
-		for (int i = 0; i < Traits::SHIFTS; i++) {
-			buf.u64[i] = (key_hash >> i) & Traits::MASK;
-		}
-
-		// Process only this bank's elements
-		const int start_elem = bank_idx * ELEMS_PER_BANK;
-		for (int i = 0; i < ELEMS_PER_BANK; i++) {
-			int linear_idx = start_elem + i;
-			UintT mask = static_cast<UintT>(-buf.bits[linear_idx]);
-			union {
-				T val;
-				UintT bits;
-			} extreme_u, result_u, out;
-			extreme_u.val = PAC_BETTER(value, result[i]);
-			result_u.val = result[i];
-			out.bits = (extreme_u.bits & mask) | (result_u.bits & ~mask);
-			result[i] = out.val;
-		}
-	}
-};
-
-// Specialization for hugeint - scalar comparison per bank
-template <bool IS_MAX, int ELEMS_PER_BANK>
-struct UpdateExtremesBankKernel<hugeint_t, IS_MAX, ELEMS_PER_BANK> {
-	AUTOVECTORIZE static inline void update(hugeint_t *__restrict__ result, uint64_t key_hash, hugeint_t value,
-	                                        int bank_idx) {
-		const int start_elem = bank_idx * ELEMS_PER_BANK;
-		for (int i = 0; i < ELEMS_PER_BANK; i++) {
-			int linear_idx = start_elem + i;
-			if (((key_hash >> linear_idx) & 1ULL) && PAC_IS_BETTER(value, result[i])) {
-				result[i] = value;
-			}
-		}
-	}
-};
-
-template <bool IS_MAX, int ELEMS_PER_BANK>
-struct UpdateExtremesBankKernel<uhugeint_t, IS_MAX, ELEMS_PER_BANK> {
-	AUTOVECTORIZE static inline void update(uhugeint_t *__restrict__ result, uint64_t key_hash, uhugeint_t value,
-	                                        int bank_idx) {
-		const int start_elem = bank_idx * ELEMS_PER_BANK;
-		for (int i = 0; i < ELEMS_PER_BANK; i++) {
-			int linear_idx = start_elem + i;
-			if (((key_hash >> linear_idx) & 1ULL) && PAC_IS_BETTER(value, result[i])) {
-				result[i] = value;
-			}
-		}
-	}
-};
-#endif
 
 // Unified update function - banked or non-banked depending on compile flag
 #ifdef PAC_MINMAX_NONBANKED
-// Non-banked: single contiguous array, call kernel directly
+// Non-banked: single contiguous array
 template <typename T, bool IS_MAX>
 AUTOVECTORIZE static inline void UpdateExtremes(T *__restrict__ result, uint64_t key_hash, T value) {
-	UpdateExtremesKernel<T, IS_MAX>::update(result, key_hash, value);
+	UpdateExtremesKernel<T, IS_MAX>::update(result, key_hash, value, 0, 64);
 }
 #else
-// Banked: iterate over banks, calling per-bank kernel
+// Banked: iterate over banks, calling kernel once per bank
 template <typename T, bool IS_MAX>
 AUTOVECTORIZE static inline void UpdateExtremes(uint8_t **banks, uint64_t key_hash, T value) {
-	constexpr int NUM_BANKS = sizeof(T);
 	constexpr int ELEMS_PER_BANK = 64 / sizeof(T);
-	for (int b = 0; b < NUM_BANKS; b++) {
+	for (int b = 0; b < static_cast<int>(sizeof(T)); b++) {
 		T *bank_data = reinterpret_cast<T *>(banks[b]);
-		UpdateExtremesBankKernel<T, IS_MAX, ELEMS_PER_BANK>::update(bank_data, key_hash, value, b);
+		UpdateExtremesKernel<T, IS_MAX>::update(bank_data, key_hash, value, b * ELEMS_PER_BANK, ELEMS_PER_BANK);
 	}
 }
 #endif
@@ -351,7 +287,7 @@ struct PacMinMaxDoubleState {
 	}
 
 	AUTOVECTORIZE void UpdateAtCurrentLevel(uint64_t key_hash, double value) {
-		UpdateExtremesKernel<double, IS_MAX>::update(extremes, key_hash, value);
+		UpdateExtremesKernel<double, IS_MAX>::update(extremes, key_hash, value, 0, 64);
 	}
 
 	// Combine with another state (allocator unused, present for interface compatibility)
