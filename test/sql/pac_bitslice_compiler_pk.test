@@ -63,6 +63,19 @@ ORDER BY grp
 3	22
 4	43
 
+# 2b) Multiple aggregates (SUM and COUNT) on single-PK table
+query III
+SELECT grp, SUM(val), COUNT(val)
+FROM bitslice_pk_single
+GROUP BY grp
+ORDER BY grp
+----
+0	15	5
+1	21	7
+2	22	5
+3	22	4
+4	43	4
+
 # 3) GROUP BY on composite-PK table (non-projected PKs)
 query II
 SELECT grp, SUM(val)
@@ -114,4 +127,3 @@ DROP TABLE bitslice_pk_single
 
 statement ok
 DROP TABLE bitslice_pk_many
-

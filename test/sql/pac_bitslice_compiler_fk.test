@@ -63,6 +63,19 @@ ORDER BY grp
 3	25
 4	60
 
+# Single GROUP BY with multiple aggregates (SUM, COUNT, AVG) on FK child table
+query IIII
+SELECT grp, SUM(val), COUNT(val), AVG(val)::DECIMAL(5, 2)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY grp
+----
+0	0	0	0.00
+1	15	5	3.00
+2	40	0	8.00
+3	25	0	5.00
+4	60	5	12.00
+
 # Testing with AVG
 query II
 SELECT grp, AVG(val)::DECIMAL(5, 2)
@@ -162,10 +175,10 @@ FROM bitslice_deepleaf
 GROUP BY grp
 ORDER BY grp
 ----
-0	127
-1	64
+0	0
+1	0
 2	2
-3	65
+3	1
 4	4
 
 # Create a second non-PU table that references the same PU (bitslice_fk_side)

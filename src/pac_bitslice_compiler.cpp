@@ -442,57 +442,59 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 	// Now we need to edit the aggregate node to use pac functions
 	auto *agg = FindTopAggregate(plan);
-	if (agg->expressions.size() > 1) {
-		throw NotImplementedException("PacBitsliceQuery does not support multiple aggregations!");
-	}
+
+	// Build the hash expression once (will be copied/reused for each aggregate)
 	// We create a hash expression over the XOR of PK columns from the privacy unit table
-	// Return type is double
-	unique_ptr<Expression> hash_input_expr;
+	unique_ptr<Expression> hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
 
-	// Build XOR(pk1, pk2, ...) as a scalar expression then hash(...)
-	hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
+	FunctionBinder function_binder(input.context);
 
-	// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
-	// Hardcoded for now! Assumes only one aggregate expression (fixme)
-	unique_ptr<Expression> value_child;
-	string function_name;
-	if (agg->expressions[0]->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
-		auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
-		function_name = old_aggr.function.name;
+	// Process each aggregate expression
+	for (idx_t i = 0; i < agg->expressions.size(); i++) {
+		if (agg->expressions[i]->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+			throw NotImplementedException("Not found expected aggregate expression in PAC compiler");
+		}
+
+		auto &old_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		string function_name = old_aggr.function.name;
+
+		// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
+		unique_ptr<Expression> value_child;
 		if (old_aggr.children.empty()) {
 			throw InternalException("PAC compiler: expected aggregate to have a child expression");
 		}
 		value_child = old_aggr.children[0]->Copy();
-	} else {
-		throw NotImplementedException("Not found expected aggregate expression in PAC compiler");
+
+		// Get PAC function name
+		string pac_function_name = GetPacAggregateFunctionName(function_name);
+
+		// Bind the PAC aggregate function
+		ErrorData error;
+		vector<LogicalType> arg_types;
+		arg_types.push_back(hash_input_expr->return_type);
+		arg_types.push_back(value_child->return_type);
+
+		auto &entry = Catalog::GetSystemCatalog(input.context)
+		                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);
+		auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
+
+		auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
+		if (!best.IsValid()) {
+			throw InternalException("PAC compiler: failed to bind pac aggregate for given argument types");
+		}
+		auto bound_aggr_func = aggr_catalog.functions.GetFunctionByOffset(best.GetIndex());
+
+		// Build arguments for this aggregate (copy hash expression for each aggregate)
+		vector<unique_ptr<Expression>> aggr_children;
+		aggr_children.push_back(hash_input_expr->Copy());
+		aggr_children.push_back(std::move(value_child));
+
+		auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
+		                                                      AggregateType::NON_DISTINCT);
+
+		agg->expressions[i] = std::move(new_aggr);
 	}
 
-	FunctionBinder function_binder(input.context);
-	ErrorData error;
-	vector<LogicalType> arg_types;
-	arg_types.push_back(hash_input_expr->return_type);
-	arg_types.push_back(value_child->return_type);
-
-	string pac_function_name = GetPacAggregateFunctionName(function_name);
-
-	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);
-	auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
-
-	auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
-	if (!best.IsValid()) {
-		throw InternalException("PAC compiler: failed to bind pac aggregate for given argument types");
-	}
-	auto bound_aggr_func = aggr_catalog.functions.GetFunctionByOffset(best.GetIndex());
-
-	vector<unique_ptr<Expression>> aggr_children;
-	aggr_children.push_back(std::move(hash_input_expr));
-	aggr_children.push_back(std::move(value_child));
-
-	auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
-	                                                      AggregateType::NON_DISTINCT);
-
-	agg->expressions[0] = std::move(new_aggr);
 	agg->ResolveOperatorTypes();
 }
 
@@ -510,12 +512,9 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 	// Now we need to edit the aggregate node to use pac functions
 	auto *agg = FindTopAggregate(plan);
-	if (agg->expressions.size() > 1) {
-		throw NotImplementedException("PacBitsliceQuery does not support multiple aggregations!");
-	}
 
 	// We create a hash expression over either the row id or the XOR of PK columns
-	// Return type is double
+	// Build the hash expression once (will be copied/reused for each aggregate)
 	unique_ptr<Expression> hash_input_expr;
 	if (use_rowid) {
 		// rowid is the last column added
@@ -528,47 +527,53 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		hash_input_expr = BuildXorHashFromPKs(input, get, pks);
 	}
 
-	// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
-	// Hardcoded for now! Assumes only one aggregate expression (fixme)
-	unique_ptr<Expression> value_child;
-	string function_name;
-	if (agg->expressions[0]->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
-		auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
-		function_name = old_aggr.function.name;
+	FunctionBinder function_binder(input.context);
+
+	// Process each aggregate expression
+	for (idx_t i = 0; i < agg->expressions.size(); i++) {
+		if (agg->expressions[i]->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+			throw NotImplementedException("Not found expected aggregate expression in PAC compiler");
+		}
+
+		auto &old_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		string function_name = old_aggr.function.name;
+
+		// Extract the original aggregate's value child expression (e.g., the `val` in SUM(val))
+		unique_ptr<Expression> value_child;
 		if (old_aggr.children.empty()) {
 			throw InternalException("PAC compiler: expected aggregate to have a child expression");
 		}
 		value_child = old_aggr.children[0]->Copy();
-	} else {
-		throw NotImplementedException("Not found expected aggregate expression in PAC compiler");
+
+		// Get PAC function name
+		string pac_function_name = GetPacAggregateFunctionName(function_name);
+
+		// Bind the PAC aggregate function
+		ErrorData error;
+		vector<LogicalType> arg_types;
+		arg_types.push_back(hash_input_expr->return_type);
+		arg_types.push_back(value_child->return_type);
+
+		auto &entry = Catalog::GetSystemCatalog(input.context)
+		                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);
+		auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
+
+		auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
+		if (!best.IsValid()) {
+			throw InternalException("PAC compiler: failed to bind pac aggregate for given argument types");
+		}
+		auto bound_aggr_func = aggr_catalog.functions.GetFunctionByOffset(best.GetIndex());
+
+		vector<unique_ptr<Expression>> aggr_children;
+		aggr_children.push_back(hash_input_expr->Copy());
+		aggr_children.push_back(std::move(value_child));
+
+		auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
+		                                                      AggregateType::NON_DISTINCT);
+
+		agg->expressions[i] = std::move(new_aggr);
 	}
 
-	FunctionBinder function_binder(input.context);
-	ErrorData error;
-	vector<LogicalType> arg_types;
-	arg_types.push_back(hash_input_expr->return_type);
-	arg_types.push_back(value_child->return_type);
-
-	string pac_function_name = GetPacAggregateFunctionName(function_name);
-
-	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_function_name);
-	auto &aggr_catalog = entry.Cast<AggregateFunctionCatalogEntry>();
-
-	auto best = function_binder.BindFunction(aggr_catalog.name, aggr_catalog.functions, arg_types, error);
-	if (!best.IsValid()) {
-		throw InternalException("PAC compiler: failed to bind pac aggregate for given argument types");
-	}
-	auto bound_aggr_func = aggr_catalog.functions.GetFunctionByOffset(best.GetIndex());
-
-	vector<unique_ptr<Expression>> aggr_children;
-	aggr_children.push_back(std::move(hash_input_expr));
-	aggr_children.push_back(std::move(value_child));
-
-	auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
-	                                                      AggregateType::NON_DISTINCT);
-
-	agg->expressions[0] = std::move(new_aggr);
 	agg->ResolveOperatorTypes();
 }
 
