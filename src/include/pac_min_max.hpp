@@ -327,7 +327,8 @@ struct PacMinMaxState {
 	    L == 128, T128,
 	    typename std::conditional<
 	        L == 64, T64,
-	        typename std::conditional<L == 32, T32, typename std::conditional<L == 16, T16, T8>::type>::type>::type>::type;
+	        typename std::conditional<L == 32, T32, typename std::conditional<L == 16, T16, T8>::type>::type>::type>::
+	    type;
 	using TMAX = TAtLevel<MAXLEVEL>;
 	using ValueType = TMAX;
 
@@ -425,10 +426,10 @@ struct PacMinMaxState {
 
 	// Bank storage - inline bank0 + pointers to additional banks
 	uint8_t bank0[64]; // Always present (level 8)
-	uint8_t *banks1;               // 1 bank (64 bytes) for level 16+
-	uint8_t *banks2;               // 2 banks (128 bytes) for level 32+
-	uint8_t *banks3;               // 4 banks (256 bytes) for level 64+
-	uint8_t *banks4;               // 8 banks (512 bytes) for level 128
+	uint8_t *banks1;   // 1 bank (64 bytes) for level 16+
+	uint8_t *banks2;   // 2 banks (128 bytes) for level 32+
+	uint8_t *banks3;   // 4 banks (256 bytes) for level 64+
+	uint8_t *banks4;   // 8 banks (512 bytes) for level 128
 
 	// Get pointer to bank n (0-15)
 	inline uint8_t *GetBank(int n) const {
