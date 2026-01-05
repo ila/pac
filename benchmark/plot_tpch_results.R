@@ -99,16 +99,19 @@ if (length(query_order) == 0) query_order <- unique(summary_df$query)
 
 summary_df$query <- factor(summary_df$query, levels = query_order)
 
+# Provide a plotting-safe mean time for log scale (replace non-positive values with a tiny positive number)
+summary_df <- summary_df %>% mutate(mean_time_plot = ifelse(mean_time <= 0 | is.na(mean_time), 1e-3, mean_time))
+
 # Choose palette for common modes; if unknown modes are present they'll get default ggplot colors
 method_colors <- c("baseline" = "#1f77b4", "SIMD PAC" = "#ff7f0e", "naive PAC" = "#2ca02c")
 
 # Build a plotting function so we can save two variants (with/without Q01)
 build_plot <- function(df, out_file, plot_title, width = 18, height = 8, base_size = 40, base_family = "sans") {
-  p <- ggplot(df, aes(x = query, y = mean_time, fill = mode)) +
+  p <- ggplot(df, aes(x = query, y = mean_time_plot, fill = mode)) +
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
     scale_fill_manual(values = method_colors, name = "Mode") +
-    scale_y_continuous(labels = scales::comma) +
-    labs(x = "Query", y = "Time (ms)", fill = "Mode") +
+    scale_y_log10(labels = scales::comma) +
+    labs(x = "Query", y = "Time (ms, log scale)", fill = "Mode") +
     theme_bw(base_size = base_size, base_family = base_family) +
     theme(
       panel.grid.major = element_line(linewidth = 1.0),
@@ -135,18 +138,8 @@ plot_title_all <- paste0("TPC-H Benchmark, ", title_sf, ", runs=", n_runs_text)
 # Output file names
 sf_for_name <- ifelse(is.na(sf_str), "unknown", gsub("\\.", "_", sf_str))
 out_file_all <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, "_all.png"))
-out_file_no_q01 <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, "_no_q01.png"))
 
 # 1) Full plot (all queries)
 build_plot(summary_df, out_file_all, plot_title_all)
-
-# 2) Exclude query 1 (support q01/Q1 formats)
-summary_no_q1 <- summary_df %>% filter(is.na(qnum) | qnum != 1)
-if (nrow(summary_no_q1) > 0) {
-  plot_title_noq1 <- paste0(plot_title_all, " (excluding Q1)")
-  build_plot(summary_no_q1, out_file_no_q01, plot_title_noq1)
-} else {
-  message("No queries remain after excluding Q1; skipping no-Q1 plot.")
-}
 
 # End of script
