@@ -63,6 +63,19 @@ ORDER BY grp
 3	22
 4	43
 
+# 2b) Multiple aggregates (SUM and COUNT) on single-PK table
+query III
+SELECT grp, SUM(val), COUNT(val)
+FROM bitslice_pk_single
+GROUP BY grp
+ORDER BY grp
+----
+0	15	5
+1	21	7
+2	22	5
+3	22	4
+4	43	4
+
 # 3) GROUP BY on composite-PK table (non-projected PKs)
 query II
 SELECT grp, SUM(val)
@@ -108,10 +121,67 @@ FROM bitslice_pk_single a JOIN bitslice_pk_many b ON a.grp = b.grp
 ----
 475
 
+# ========== LEFT JOIN TEST CASES ==========
+
+# Test LEFT JOIN with composite PK table on left
+query III
+SELECT b.grp, COUNT(*), SUM(COALESCE(a.val, 0))
+FROM bitslice_pk_many b
+LEFT JOIN bitslice_pk_single a ON b.grp = a.grp
+GROUP BY b.grp
+ORDER BY b.grp
+----
+0	15	50
+1	20	75
+2	20	100
+3	30	100
+4	15	150
+
+# Test LEFT JOIN with aggregate on right table (composite PK)
+query III
+SELECT a.grp, SUM(a.val), COUNT(b.pk1)
+FROM bitslice_pk_single a
+LEFT JOIN bitslice_pk_many b ON a.grp = b.grp AND b.grp > 2
+GROUP BY a.grp
+ORDER BY a.grp
+----
+0	20	0
+1	30	0
+2	40	0
+3	100	30
+4	150	15
+
+# Test multiple LEFT JOINs with PK tables
+query II
+SELECT a.grp, SUM(a.val)
+FROM bitslice_pk_single a
+LEFT JOIN bitslice_pk_many b ON a.grp = b.grp
+LEFT JOIN bitslice_pk_single c ON a.grp2 = c.grp2
+GROUP BY a.grp
+ORDER BY a.grp
+LIMIT 3
+----
+0	425
+1	635
+2	810
+
+# Test RIGHT JOIN with composite PK table on right, aggregating with condition
+query III
+SELECT b.grp, COUNT(*), SUM(COALESCE(a.val, 0))
+FROM bitslice_pk_single a
+RIGHT JOIN bitslice_pk_many b ON a.grp = b.grp AND a.val > 3
+GROUP BY b.grp
+ORDER BY b.grp
+----
+0	6	50
+1	8	60
+2	8	70
+3	12	64
+4	15	150
+
 # Cleanup
 statement ok
 DROP TABLE bitslice_pk_single
 
 statement ok
 DROP TABLE bitslice_pk_many
-

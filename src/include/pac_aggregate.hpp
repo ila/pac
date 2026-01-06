@@ -2,7 +2,6 @@
 #define PAC_AGGREGATE_HPP
 
 #include "duckdb.hpp"
-#include <vector>
 
 // Enable AVX2 vectorization for functions that get this preappended (useful for x86, harmless for arm)
 // Only use __attribute__ on x86 with GCC/Clang - MSVC doesn't support this syntax
@@ -24,7 +23,7 @@ struct PacAggregateLocalState;
 
 // Compute the PAC noise variance (delta) from per-sample values and mutual information budget mi.
 // Throws InvalidInputException if mi < 0.
-double ComputeDeltaFromValues(const std::vector<double> &values, double mi);
+double ComputeDeltaFromValues(const vector<double> &values, double mi);
 
 // Initialize thread-local state for pac_aggregate (reads pac_seed setting).
 unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &expr,

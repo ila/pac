@@ -5,25 +5,34 @@
 #ifndef PAC_COMPILER_HELPERS_HPP
 #define PAC_COMPILER_HELPERS_HPP
 
-#include <string>
 #include "duckdb.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
+#include "pac_compatibility_check.hpp"
+#include "pac_expression_builder.hpp"
+#include "pac_plan_traversal.hpp"
 
 namespace duckdb {
 
 // Replan the provided SQL query into `plan` after disabling several optimizers. The function
 // performs the SET transaction, reparses and replans, and prints the resulting plan if present.
-void ReplanWithoutOptimizers(ClientContext &context, const std::string &query, unique_ptr<LogicalOperator> &plan);
+void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan);
 
-// Find the first LogicalGet node in `plan`. Returns a pointer to the unique_ptr that holds the
-// found node (so it can be replaced) and sets out_table_idx to the LogicalGet.table_index.
-// If not found, returns nullptr and sets out_table_idx to DConstants::INVALID_INDEX.
-unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> &plan);
+// Build join conditions from FK columns to PK columns
+void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vector<string> &left_cols,
+                         const vector<string> &right_cols, const string &left_table_name,
+                         const string &right_table_name, vector<JoinCondition> &conditions);
 
-void AddRowIDColumn(LogicalGet &get);
+// Create a logical join operator based on FK relationships in the compatibility check metadata
+unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &check, ClientContext &context,
+                                              unique_ptr<LogicalOperator> left_operator, unique_ptr<LogicalGet> right);
 
-LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op);
+// Create a LogicalGet operator for a table by name
+unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<LogicalOperator> &plan, const string &table,
+                                        idx_t idx);
 
-LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child);
+// Examine PACCompatibilityResult.fk_paths and populate gets_present / gets_missing
+void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
+                            vector<string> &gets_missing, string &start_table_out, string &target_pu_out);
 
 } // namespace duckdb
 

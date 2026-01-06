@@ -96,12 +96,6 @@ SELECT MIN(a) FROM t1;
 ----
 1
 
-# Not PAC-compatible: OUTER JOIN
-statement error
-SELECT SUM(b) FROM t1 LEFT OUTER JOIN t2 ON t1.a = t2.x;
-----
-PAC rewrite: only INNER JOINs are supported for PAC compilation
-
 # PAC-compatible: multiple joins
 statement ok
 CREATE TABLE t3(m INTEGER, n INTEGER);
@@ -114,18 +108,6 @@ SELECT t1.a, SUM(t3.n) FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.
 ----
 1	1000
 2	2000
-
-# Not PAC-compatible: INNER JOIN with other types of joins
-statement error
-SELECT SUM(b) FROM t1 INNER JOIN t2 ON t1.a = t2.x LEFT OUTER JOIN t3 ON t2.x = t3.m;
-----
-PAC rewrite: only INNER JOINs are supported for PAC compilation
-
-# Not PAC-compatible: DISTINCT
-statement error
-SELECT COUNT(DISTINCT a) FROM t1;
-----
-PAC rewrite: DISTINCT is not supported for PAC compilation
 
 # Not PAC-compatible: window function
 statement error

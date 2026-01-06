@@ -38,12 +38,12 @@ string Sanitize(const string &in) {
 	return out;
 }
 
-std::string NormalizeQueryForHash(const std::string &query) {
-	std::string s = query;
+string NormalizeQueryForHash(const string &query) {
+	string s = query;
 	std::replace(s.begin(), s.end(), '\n', ' ');
 	std::replace(s.begin(), s.end(), '\r', ' ');
 	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-	std::string out;
+	string out;
 	out.reserve(s.size());
 	bool in_space = false;
 	for (char c : s) {
@@ -67,8 +67,8 @@ std::string NormalizeQueryForHash(const std::string &query) {
 	return out;
 }
 
-std::string HashStringToHex(const std::string &input) {
-	size_t h = std::hash<std::string> {}(input);
+string HashStringToHex(const string &input) {
+	size_t h = std::hash<string> {}(input);
 	std::stringstream ss;
 	ss << std::hex << h;
 	return ss.str();
@@ -292,7 +292,7 @@ static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_m
 // Find the primary key column name for a given table. Searches the client's catalog search path
 // for the table and returns the first column name of the primary key constraint (if any).
 // Returns empty string when no primary key exists.
-vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &table_name) {
+vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) {
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
@@ -323,9 +323,9 @@ vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &ta
 
 	// If schema-qualified name is provided (schema.table), prefer that exact lookup
 	auto dot_pos = table_name.find('.');
-	if (dot_pos != std::string::npos) {
-		std::string schema = table_name.substr(0, dot_pos);
-		std::string tbl = table_name.substr(dot_pos + 1);
+	if (dot_pos != string::npos) {
+		string schema = table_name.substr(0, dot_pos);
+		string tbl = table_name.substr(dot_pos + 1);
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
 		if (!entry)
 			return {};
@@ -389,11 +389,10 @@ vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &ta
 // Find foreign key constraints declared on the given table. Mirrors FindPrimaryKey's lookup logic
 // and returns a vector of (referenced_table_name, fk_column_names) pairs for every FOREIGN KEY
 // constraint defined on the table (i.e., where this table is the foreign-key side).
-vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContext &context,
-                                                                    const std::string &table_name) {
+vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name) {
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
-	vector<std::pair<std::string, vector<std::string>>> result;
+	vector<std::pair<string, vector<string>>> result;
 
 	auto process_entry = [&](CatalogEntry *entry_ptr) {
 		if (!entry_ptr) {
@@ -423,9 +422,9 @@ vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContex
 
 	// If schema-qualified name is provided (schema.table), prefer that exact lookup
 	auto dot_pos = table_name.find('.');
-	if (dot_pos != std::string::npos) {
-		std::string schema = table_name.substr(0, dot_pos);
-		std::string tbl = table_name.substr(dot_pos + 1);
+	if (dot_pos != string::npos) {
+		string schema = table_name.substr(0, dot_pos);
+		string tbl = table_name.substr(dot_pos + 1);
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
 		if (!entry)
 			return {};
@@ -453,19 +452,18 @@ vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContex
 // table to any privacy unit. Returns a map from the original start table string to the path
 // (vector of table names from start to privacy unit inclusive). NOTE: table names are returned
 // unqualified (no schema prefix) to keep logic simple.
-std::unordered_map<std::string, std::vector<std::string>>
-FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &privacy_units,
-                      const std::vector<std::string> &table_names) {
+std::unordered_map<string, vector<string>>
+FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_units, const vector<string> &table_names) {
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 
-	auto ResolveQualified = [&](const std::string &tbl_name) -> std::string {
+	auto ResolveQualified = [&](const string &tbl_name) -> string {
 		// If schema-qualified name is provided (schema.table), prefer that exact lookup but return
 		// only the unqualified table name (tbl).
 		auto dot_pos = tbl_name.find('.');
-		if (dot_pos != std::string::npos) {
-			std::string schema = tbl_name.substr(0, dot_pos);
-			std::string tbl = tbl_name.substr(dot_pos + 1);
+		if (dot_pos != string::npos) {
+			string schema = tbl_name.substr(0, dot_pos);
+			string tbl = tbl_name.substr(dot_pos + 1);
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
 			if (entry)
 				return tbl;  // return unqualified table name
@@ -483,34 +481,34 @@ FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &pr
 	};
 
 	// canonicalize privacy units (use unqualified names)
-	std::unordered_set<std::string> privacy_set;
+	std::unordered_set<string> privacy_set;
 	for (auto &pu : privacy_units) {
 		privacy_set.insert(ResolveQualified(pu));
 	}
 
-	std::unordered_map<std::string, std::vector<std::string>> result;
+	std::unordered_map<string, vector<string>> result;
 
 	for (auto &start : table_names) {
-		std::string start_name = ResolveQualified(start);
+		string start_name = ResolveQualified(start);
 		// BFS queue of unqualified table names
-		std::queue<std::string> q;
-		std::unordered_set<std::string> visited;
-		std::unordered_map<std::string, std::string> parent;
+		std::queue<string> q;
+		std::unordered_set<string> visited;
+		std::unordered_map<string, string> parent;
 
 		visited.insert(start_name);
 		q.push(start_name);
 
 		bool found = false;
-		std::string found_target;
+		string found_target;
 
 		while (!q.empty() && !found) {
-			std::string cur = q.front();
+			string cur = q.front();
 			q.pop();
 			// Find outgoing FK edges from cur
 			auto fks = FindForeignKeys(context, cur);
 			for (auto &p : fks) {
-				std::string neighbor = p.first; // referenced table name (unqualified now)
-				std::string neighbor_name = ResolveQualified(neighbor);
+				string neighbor = p.first; // referenced table name (unqualified now)
+				string neighbor_name = ResolveQualified(neighbor);
 				if (visited.find(neighbor_name) != visited.end()) {
 					continue;
 				}
@@ -527,8 +525,8 @@ FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &pr
 
 		if (found) {
 			// reconstruct path from start_name to found_target
-			std::vector<std::string> path;
-			std::string cur = found_target;
+			std::vector<string> path;
+			string cur = found_target;
 			while (true) {
 				path.push_back(cur);
 				if (cur == start_name)
@@ -562,7 +560,7 @@ ReplanGuard::~ReplanGuard() {
 }
 
 // Configuration helpers
-std::string GetPacPrivacyFile(ClientContext &context, const std::string &default_filename) {
+string GetPacPrivacyFile(ClientContext &context, const string &default_filename) {
 	Value v;
 	context.TryGetCurrentSetting("pac_privacy_file", v);
 	if (!v.IsNull())
@@ -570,10 +568,10 @@ std::string GetPacPrivacyFile(ClientContext &context, const std::string &default
 	return default_filename;
 }
 
-std::string GetPacCompiledPath(ClientContext &context, const std::string &default_path) {
+string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compiled_path", v);
-	std::string path = v.IsNull() ? default_path : v.ToString();
+	string path = v.IsNull() ? default_path : v.ToString();
 	if (!path.empty() && path.back() != '/')
 		path.push_back('/');
 	return path;
@@ -606,8 +604,8 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	}
 }
 
-std::vector<std::string> PacTablesSetToVector(const std::unordered_set<std::string> &set) {
-	std::vector<std::string> out;
+vector<string> PacTablesSetToVector(const std::unordered_set<string> &set) {
+	vector<string> out;
 	out.reserve(set.size());
 	for (auto &s : set)
 		out.push_back(s);
@@ -616,13 +614,13 @@ std::vector<std::string> PacTablesSetToVector(const std::unordered_set<std::stri
 }
 
 // Add implementation for GetPacCompileMethod
-std::string GetPacCompileMethod(ClientContext &context, const std::string &default_method) {
+string GetPacCompileMethod(ClientContext &context, const string &default_method) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compile_method", v);
 	if (v.IsNull())
 		return default_method;
 	try {
-		std::string s = v.ToString();
+		string s = v.ToString();
 		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
 		if (s == "standard" || s == "bitslice")
 			return s;

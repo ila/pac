@@ -10,8 +10,7 @@
 // Include public helper to access the configured PAC tables filename and read helper
 #include "include/pac_privacy_unit.hpp"
 #include "include/pac_helpers.hpp"
-// Include PAC compiler
-#include "include/pac_compiler.hpp"
+// Include PAC bitslice compiler
 #include "include/pac_bitslice_compiler.hpp"
 
 namespace duckdb {
@@ -43,7 +42,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	auto pac_tables = ReadPacTablesFile(pac_privacy_file);
 	// convert unordered_set returned by ReadPacTablesFile to a vector for the compatibility check
-	std::vector<std::string> pac_table_list = PacTablesSetToVector(pac_tables);
+	vector<string> pac_table_list = PacTablesSetToVector(pac_tables);
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
 	// to PACRewriteQueryCheck. It now returns a PACCompatibilityResult with fk_paths and PKs.
@@ -62,7 +61,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	}
 
 	// Determine the set of discovered privacy units (could come from fk_paths targets or scanned PAC tables)
-	std::vector<std::string> discovered_pus;
+	vector<string> discovered_pus;
 	// Consider fk_paths targets
 	for (auto &kv : check.fk_paths) {
 		if (!kv.second.empty()) {
@@ -82,16 +81,15 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	}
 
 	// compute normalized query hash once for file naming
-	std::string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
-	std::string query_hash = HashStringToHex(normalized);
-	std::string compile_method = GetPacCompileMethod(input.context, "standard");
+	string normalized = NormalizeQueryForHash(input.context.GetCurrentQuery());
+	string query_hash = HashStringToHex(normalized);
 
 	if (discovered_pus.size() > 1) {
 		throw InvalidInputException(
 		    "PAC rewrite: multiple privacy units discovered (%s); multi-privacy-unit queries are not supported");
 	}
 
-	std::vector<std::string> privacy_units = std::move(discovered_pus);
+	vector<string> privacy_units = std::move(discovered_pus);
 
 	// Print discovered PKs for diagnostics (if available) for each privacy unit
 	for (auto &pu : privacy_units) {
@@ -120,12 +118,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
-			compile_method = "bitslice"; // for debugging
-			if (compile_method == "bitslice") {
-				CompilePacBitsliceQuery(check, input, plan, pu, normalized, query_hash);
-			} else {
-				CompilePACQuery(input, plan, pu, normalized, query_hash);
-			}
+			CompilePacBitsliceQuery(check, input, plan, pu, normalized, query_hash);
 		}
 	}
 }

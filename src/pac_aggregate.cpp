@@ -26,7 +26,7 @@ namespace duckdb {
 // ============================================================================
 
 // Forward declaration for the internal variance helper so it can be used above
-static double ComputeSecondMomentVariance(const std::vector<double> &values);
+static double ComputeSecondMomentVariance(const vector<double> &values);
 
 // Deterministic sampling helpers (use engine() bits directly so draws are identical across platforms
 // for a given mt19937_64 seed). Function names follow repository style (no snake_case).
@@ -90,7 +90,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 	constexpr int N = 64;
 	// Compute empirical (second-moment) variance across the 64 counters and use it
 	// to determine the noise variance. We reuse ComputeSecondMomentVariance here.
-	std::vector<double> vals(counters, counters + N);
+	vector<double> vals(counters, counters + N);
 	// Compute delta using the shared exported helper (validates mi as well)
 	double delta = ComputeDeltaFromValues(vals, mi);
 
@@ -131,7 +131,7 @@ struct PacAggregateLocalState : public FunctionLocalState {
 
 // Compute second-moment variance (not unbiased estimator)
 // todo - check if this is leave one out or n denominator
-static double ComputeSecondMomentVariance(const std::vector<double> &values) {
+static double ComputeSecondMomentVariance(const vector<double> &values) {
 	idx_t n = values.size();
 	if (n <= 1) {
 		return 0.0;
@@ -154,7 +154,7 @@ static double ComputeSecondMomentVariance(const std::vector<double> &values) {
 
 // Exported helper: compute the PAC noise variance (delta) from values and mi.
 // This implements the header-declared ComputeDeltaFromValues and is reused by other files.
-double ComputeDeltaFromValues(const std::vector<double> &values, double mi) {
+double ComputeDeltaFromValues(const vector<double> &values, double mi) {
 	if (mi < 0.0) {
 		throw InvalidInputException("ComputeDeltaFromValues: mi must be >= 0");
 	}
@@ -240,7 +240,7 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 		auto *vdata = FlatVector::GetData<T>(vals_child);
 		auto *cdata = FlatVector::GetData<C>(cnts_child);
 
-		std::vector<double> values;
+		vector<double> values;
 		values.reserve(vals_len);
 
 		int64_t max_count = 0;

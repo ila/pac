@@ -63,6 +63,32 @@ ORDER BY grp
 3	25
 4	60
 
+# Single GROUP BY with multiple aggregates (SUM, COUNT, AVG) on FK child table
+query IIII
+SELECT grp, SUM(val), COUNT(val), AVG(val)::DECIMAL(5, 2)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY grp
+----
+0	0	0	0.00
+1	15	5	3.00
+2	40	0	8.00
+3	25	0	5.00
+4	60	5	12.00
+
+# Testing COUNT DISTINCT (compare with COUNT above)
+query II
+SELECT grp, COUNT(DISTINCT val)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY grp
+----
+0	0
+1	2
+2	0
+3	0
+4	2
+
 # Testing with AVG
 query II
 SELECT grp, AVG(val)::DECIMAL(5, 2)
@@ -129,6 +155,20 @@ INSERT INTO bitslice_deepleaf
 SELECT i AS id, (i % 5) AS d2_id, (i % 5) AS grp, (i % 10) AS val
 FROM range(25) t(i);
 
+# Create a second non-PU table that references the same PU (bitslice_fk_side)
+statement ok
+CREATE TABLE bitslice_fk_side(
+    id INTEGER PRIMARY KEY,
+    pu_id INTEGER REFERENCES bitslice_fk_pu(id),
+    grp2 INTEGER,
+    val2 INTEGER
+);
+
+statement ok
+INSERT INTO bitslice_fk_side
+SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp2, (i % 10) AS val2
+FROM range(25) t(i);
+
 # Aggregation over deepleaf (SUM)
 query II
 SELECT grp, SUM(val)
@@ -162,52 +202,607 @@ FROM bitslice_deepleaf
 GROUP BY grp
 ORDER BY grp
 ----
-0	127
-1	64
+0	0
+1	0
 2	2
-3	65
+3	1
 4	4
 
-# Create a second non-PU table that references the same PU (bitslice_fk_side)
-statement ok
-CREATE TABLE bitslice_fk_side(
-    id INTEGER PRIMARY KEY,
-    pu_id INTEGER REFERENCES bitslice_fk_pu(id),
-    grp2 INTEGER,
-    val2 INTEGER
-);
-
-statement ok
-INSERT INTO bitslice_fk_side
-SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp2, (i % 10) AS val2
-FROM range(25) t(i);
-
-# Join two non-PU tables on the PU foreign key (both reference PU but PU is not scanned)
-# We aggregate (c.val + s.val2) grouped by c.grp. Because each group has 5 child rows and 5 side rows per PU,
-# the join produces 25 pairings per group and the sum equals 5*(sum_child + sum_side) = 10*sum_child (since sums equal)
+# Test with INNER JOIN (similar to LEFT JOIN case)
 query II
-SELECT c.grp, SUM(c.val + s.val2)
+SELECT grp, MIN(val)
+FROM bitslice_deepleaf d1 INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY grp
+ORDER BY grp
+----
+0	0
+1	0
+2	2
+3	1
+4	4
+
+# Test with LEFT JOIN
+query II
+SELECT grp, MIN(val)
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY grp
+ORDER BY grp
+----
+0	0
+1	0
+2	2
+3	1
+4	4
+
+# Test with multiple INNER JOINs in the FK chain (deepleaf -> deep2 -> deep1 -> child)
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Test with full FK chain explicit joins (deepleaf -> deep2 -> deep1 -> child -> pu)
+query II
+SELECT d1.grp, COUNT(*)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+INNER JOIN bitslice_fk_child c ON d3.child_id = c.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	5
+2	0
+3	0
+4	5
+
+# Test reverse join order (starting from middle of chain)
+query II
+SELECT d1.grp, AVG(d1.val)::DECIMAL(5, 2)
+FROM bitslice_deep2 d2
+INNER JOIN bitslice_deepleaf d1 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+LIMIT 3
+----
+0	0.00
+1	3.00
+2	8.00
+
+# Test with multiple aggregates on joined tables
+query III
+SELECT d1.grp, SUM(d1.val), MAX(d2.id)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+LIMIT 3
+----
+0	0	0
+1	15	0
+2	40	2
+
+# Test join with WHERE clause filtering
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+WHERE d1.grp > 1
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+2	40
+3	25
+4	60
+
+# Test with cross-chain join (two different FK paths to same PU)
+query II
+SELECT l.grp, SUM(l.val + d.val)
+FROM bitslice_fk_leaf l
+INNER JOIN bitslice_fk_child c ON l.child_id = c.id
+INNER JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+INNER JOIN bitslice_deepleaf d ON s.grp2 = d.grp
+GROUP BY l.grp
+ORDER BY l.grp
+LIMIT 3
+----
+0	0
+1	750
+2	2000
+
+# Test with aliased columns and expressions
+query II
+SELECT d1.grp AS group_key, SUM(d1.val * 2) AS doubled_sum
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+LIMIT 3
+----
+0	0
+1	30
+2	80
+
+# Test complex join with multiple tables and aggregates
+query IIII
+SELECT d1.grp, COUNT(*), SUM(d1.val), AVG(c.val)::DECIMAL(5, 2)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+INNER JOIN bitslice_fk_child c ON d3.child_id = c.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+LIMIT 2
+----
+0	0	0	0.00
+1	5	15	1.00
+
+# Test with self-referential join pattern (child joins with side on same PU)
+query III
+SELECT c.grp, COUNT(*), SUM(s.val2)
 FROM bitslice_fk_child c
-JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+INNER JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+INNER JOIN bitslice_fk_pu p ON c.pu_id = p.id
+GROUP BY c.grp
+ORDER BY c.grp
+LIMIT 3
+----
+0	0	0
+1	25	75
+2	0	200
+
+# Test joining in weird order (right to left in FK chain)
+query II
+SELECT c.grp, SUM(d1.val)
+FROM bitslice_fk_child c
+INNER JOIN bitslice_deep1 d3 ON d3.child_id = c.id
+INNER JOIN bitslice_deep2 d2 ON d2.d1_id = d3.id
+INNER JOIN bitslice_deepleaf d1 ON d1.d2_id = d2.id
 GROUP BY c.grp
 ORDER BY c.grp
 ----
 0	0
-1	150
-2	400
-3	250
-4	600
+1	15
+2	40
+3	25
+4	60
 
-# ORDER BY + LIMIT example (top 2 groups by SUM(val))
+# Test with HAVING clause on joined aggregates
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+HAVING SUM(d1.val) > 20
+ORDER BY d1.grp
+----
+2	40
+3	25
+4	60
+
+# ========== NEW LEFT JOIN TEST CASES ==========
+
+# Test LEFT JOIN with NULL handling (add some NULL FK values first)
+statement ok
+INSERT INTO bitslice_deepleaf VALUES (100, NULL, 0, 99);
+
 query II
 SELECT grp, SUM(val)
-FROM bitslice_fk_child
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
 GROUP BY grp
-ORDER BY SUM(val) DESC
-LIMIT 2
+ORDER BY grp
 ----
-4	60
+0	198
+1	15
 2	40
+3	25
+4	60
+
+# Clean up the NULL test row
+statement ok
+DELETE FROM bitslice_deepleaf WHERE id = 100;
+
+# Test LEFT JOIN with aggregate on right table (should handle NULLs)
+query III
+SELECT d1.grp, SUM(d1.val), COUNT(d2.id)
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0	0
+1	15	5
+2	40	0
+3	25	0
+4	60	5
+
+# Test LEFT JOIN with WHERE clause on left table (should not affect join semantics)
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+WHERE d1.grp >= 2
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+2	40
+3	25
+4	60
+
+# Test multiple LEFT JOINs in the FK chain
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+LEFT JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Test LEFT JOIN with RIGHT table aggregate in SELECT
+query III
+SELECT d1.grp, SUM(d1.val), MAX(d2.id)
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+LIMIT 3
+----
+0	0	0
+1	15	0
+2	40	2
+
+# Test mixed INNER and LEFT JOINs
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Test LEFT JOIN with complex aggregates (AVG, COUNT, MIN, MAX)
+query IIIII
+SELECT d1.grp, COUNT(*), AVG(d1.val)::DECIMAL(5,2), MIN(d1.val), MAX(d1.val)
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+LIMIT 3
+----
+0	0	0.00	0	0
+1	5	3.00	0	3
+2	0	8.00	2	7
+
+# Test LEFT JOIN with full FK chain (deepleaf -> deep2 -> deep1 -> child)
+query II
+SELECT d1.grp, COUNT(*)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+LEFT JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+LEFT JOIN bitslice_fk_child c ON d3.child_id = c.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	5
+2	0
+3	0
+4	5
+
+# Test LEFT JOIN from child to side table (same PU, different paths)
+query III
+SELECT c.grp, COUNT(*), SUM(s.val2)
+FROM bitslice_fk_child c
+LEFT JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+GROUP BY c.grp
+ORDER BY c.grp
+LIMIT 3
+----
+0	0	0
+1	25	75
+2	0	200
+
+# Test LEFT JOIN with HAVING clause
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+HAVING SUM(d1.val) >= 15
+ORDER BY d1.grp
+----
+1	15
+2	40
+3	25
+4	60
+
+# Test LEFT JOIN with ORDER BY on right table column
+query III
+SELECT d1.grp, SUM(d1.val), MAX(d2.id)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+ORDER BY MAX(d2.id) DESC NULLS LAST
+LIMIT 3
+----
+4	60	4
+2	40	2
+3	25	1
+
+# Test LEFT JOIN with COUNT DISTINCT on right table
+query III
+SELECT d1.grp, COUNT(*), COUNT(DISTINCT d2.id)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+LIMIT 3
+----
+0	0	0
+1	5	1
+2	0	0
+
+# Test LEFT JOIN with expressions in ON clause
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id AND d2.id > 1
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	20
+1	30
+2	40
+3	25
+4	60
+
+# Test LEFT JOIN from leaf to child (skipping intermediate tables via FK path completion)
+query II
+SELECT l.grp, SUM(l.val)
+FROM bitslice_fk_leaf l
+LEFT JOIN bitslice_fk_child c ON l.child_id = c.id
+GROUP BY l.grp
+ORDER BY l.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Test RIGHT table references in WHERE (should filter after LEFT JOIN)
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+WHERE d2.id IS NOT NULL
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# ========== LEFT JOIN WITH PU LINK POSITION TEST CASES ==========
+
+# Test LEFT JOIN where PU-linked table is on the LEFT side (child LEFT JOIN side)
+# child has FK to PU (left side), side also has FK to PU (right side)
+query III
+SELECT c.grp, COUNT(*), SUM(COALESCE(s.val2, 0))
+FROM bitslice_fk_child c
+LEFT JOIN bitslice_fk_side s ON c.pu_id = s.pu_id AND s.grp2 > 2
+GROUP BY c.grp
+ORDER BY c.grp
+LIMIT 3
+----
+0	0	0
+1	5	0
+2	0	0
+
+# Test LEFT JOIN where PU-linked table is on the RIGHT side (side LEFT JOIN child)
+# This tests when the right side of LEFT JOIN needs to reach the PU
+query III
+SELECT s.grp2, COUNT(*), SUM(COALESCE(c.val, 0))
+FROM bitslice_fk_side s
+LEFT JOIN bitslice_fk_child c ON s.pu_id = c.pu_id AND c.grp > 2
+GROUP BY s.grp2
+ORDER BY s.grp2
+LIMIT 3
+----
+0	0	0
+1	5	0
+2	0	0
+
+# Test LEFT JOIN where only the RIGHT table links to PU (leaf LEFT JOIN child where child links to PU)
+# leaf -> child -> pu, but we're scanning leaf which doesn't directly link to PU
+query II
+SELECT l.grp, COUNT(*)
+FROM bitslice_fk_leaf l
+LEFT JOIN bitslice_fk_child c ON l.child_id = c.id
+GROUP BY l.grp
+ORDER BY l.grp
+----
+0	0
+1	5
+2	0
+3	0
+4	5
+
+# Test LEFT JOIN where PU is reached through FK chain on LEFT side
+# deepleaf LEFT JOIN side, where deepleaf reaches PU through deep2->deep1->child->pu
+query II
+SELECT d1.grp, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_fk_side s ON d1.grp = s.grp2
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	75
+2	200
+3	125
+4	300
+
+# Test LEFT JOIN where both sides link to same PU (child LEFT JOIN side, both have FK to PU)
+# This is a critical test - both tables reference the same PU
+query III
+SELECT c.grp, COUNT(*), AVG(COALESCE(s.val2, 0))::DECIMAL(5,2)
+FROM bitslice_fk_child c
+LEFT JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+GROUP BY c.grp
+ORDER BY c.grp
+----
+0	0	0.00
+1	25	3.00
+2	0	8.00
+3	0	5.00
+4	25	12.00
+
+# Test LEFT JOIN with NULL FK on left side reaching PU
+statement ok
+INSERT INTO bitslice_fk_leaf VALUES (200, NULL, 5, 100);
+
+query II
+SELECT l.grp, SUM(l.val)
+FROM bitslice_fk_leaf l
+LEFT JOIN bitslice_fk_child c ON l.child_id = c.id
+GROUP BY l.grp
+ORDER BY l.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+5	200
+
+# Clean up NULL test row
+statement ok
+DELETE FROM bitslice_fk_leaf WHERE id = 200;
+
+# Test complex LEFT JOIN: deepleaf (reaches PU via chain) LEFT JOIN child (direct PU link)
+query III
+SELECT d1.grp, COUNT(*), SUM(COALESCE(c.val, 0))
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_fk_child c ON d1.grp = c.grp
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0	0
+1	25	75
+2	0	200
+3	0	125
+4	25	300
+
+# Test LEFT JOIN: PU table on LEFT (pu LEFT JOIN child)
+query II
+SELECT p.id, COUNT(c.id)
+FROM bitslice_fk_pu p
+LEFT JOIN bitslice_fk_child c ON p.id = c.pu_id
+GROUP BY p.id
+ORDER BY p.id
+----
+0	0
+1	5
+2	0
+3	0
+4	5
+
+# Test LEFT JOIN: PU table on RIGHT (child LEFT JOIN pu)
+query II
+SELECT c.grp, COUNT(p.id)
+FROM bitslice_fk_child c
+LEFT JOIN bitslice_fk_pu p ON c.pu_id = p.id
+GROUP BY c.grp
+ORDER BY c.grp
+----
+0	0
+1	5
+2	0
+3	0
+4	5
+
+# Test LEFT JOIN chain: non-PU LEFT JOIN non-PU where both reach same PU
+# leaf (via child->pu) LEFT JOIN side (via pu)
+query II
+SELECT l.grp, COUNT(*)
+FROM bitslice_fk_leaf l
+LEFT JOIN bitslice_fk_child c ON l.child_id = c.id
+LEFT JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+GROUP BY l.grp
+ORDER BY l.grp
+----
+0	0
+1	25
+2	0
+3	0
+4	25
+
+# Test LEFT JOIN with deep chain on LEFT: deepleaf LEFT JOIN child (PU link)
+query II
+SELECT d1.grp, SUM(COALESCE(c.val, 0))
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+LEFT JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+LEFT JOIN bitslice_fk_child c ON d3.child_id = c.id
+GROUP BY d1.grp
+ORDER BY d1.grp
+----
+0	0
+1	5
+2	20
+3	15
+4	40
+
+# Test LEFT JOIN with deep chain on RIGHT: child LEFT JOIN deepleaf (via deep1->deep2)
+query II
+SELECT c.grp, SUM(COALESCE(d1.val, 0))
+FROM bitslice_fk_child c
+RIGHT JOIN bitslice_deep1 d3 ON c.id = d3.child_id
+RIGHT JOIN bitslice_deep2 d2 ON d3.id = d2.d1_id
+RIGHT JOIN bitslice_deepleaf d1 ON d2.id = d1.d2_id
+GROUP BY c.grp
+ORDER BY c.grp
+----
+0	0
+1	15
+2	40
+3	25
+4	60
+
+# Test RIGHT JOIN with FK chain - child table on right, aggregating with condition
+query III
+SELECT c.grp, COUNT(*), SUM(COALESCE(s.val2, 0))
+FROM bitslice_fk_side s
+RIGHT JOIN bitslice_fk_child c ON s.pu_id = c.pu_id AND s.grp2 > 1
+GROUP BY c.grp
+ORDER BY c.grp
+----
+0	0	0
+1	5	0
+2	0	200
+3	0	125
+4	25	300
 
 # Cleanup
 statement ok

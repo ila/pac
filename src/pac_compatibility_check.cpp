@@ -33,10 +33,10 @@ static bool ContainsCrossJoinWithGenerateSeries(const LogicalOperator &op) {
 	return false;
 }
 
-static bool IsAllowedAggregate(const std::string &func) {
-	static const std::unordered_set<std::string> allowed = {
-	    "sum", "sum_no_overflow", "count", "count_star", "avg", "min", "max"};
-	std::string lower_func = func;
+static bool IsAllowedAggregate(const string &func) {
+	static const std::unordered_set<string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min",
+	                                                   "max"};
+	string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return allowed.count(lower_func) > 0;
 }
@@ -47,8 +47,10 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
 	    op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN || op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
 	    op.type == LogicalOperatorType::LOGICAL_POSITIONAL_JOIN) {
 		auto &join = op.Cast<LogicalJoin>();
-		if (join.join_type != JoinType::INNER) {
-			// Non-inner join detected: signal disallowed join via boolean return to let caller throw
+		// Allow INNER and LEFT joins; reject all others
+		if (join.join_type != JoinType::INNER && join.join_type != JoinType::LEFT &&
+		    join.join_type != JoinType::RIGHT) {
+			// Non-inner/left join detected: signal disallowed join via boolean return to let caller throw
 			return true;
 		}
 	} else if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
@@ -77,43 +79,14 @@ static bool ContainsWindowFunction(const LogicalOperator &op) {
 	return false;
 }
 
-static bool ContainsDistinct(const LogicalOperator &op) {
-	// If there's an explicit DISTINCT operator in the logical plan, detect it
+static bool ContainsLogicalDistinct(const LogicalOperator &op) {
+	// Only check for explicit DISTINCT operator (SELECT DISTINCT), not aggregate DISTINCT
 	if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
 		return true;
 	}
 
-	// Inspect expressions attached to this operator: COUNT(DISTINCT ...), etc.
-	for (auto &expr : op.expressions) {
-		if (!expr) {
-			continue;
-		}
-		if (expr->IsAggregate()) {
-			auto &aggr = expr->Cast<BoundAggregateExpression>();
-			if (aggr.IsDistinct()) {
-				return true;
-			}
-		}
-	}
-
-	// Also check LogicalAggregate nodes' expressions (GROUP BY select list)
-	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = op.Cast<LogicalAggregate>();
-		for (auto &expr : aggr.expressions) {
-			if (!expr) {
-				continue;
-			}
-			if (expr->IsAggregate()) {
-				auto &a = expr->Cast<BoundAggregateExpression>();
-				if (a.IsDistinct()) {
-					return true;
-				}
-			}
-		}
-	}
-
 	for (auto &child : op.children) {
-		if (ContainsDistinct(*child)) {
+		if (ContainsLogicalDistinct(*child)) {
 			return true;
 		}
 	}
@@ -141,7 +114,7 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 }
 
 // helper: traverse the plan and count how many times each table/CTE name is scanned
-void CountScans(const LogicalOperator &op, std::unordered_map<std::string, idx_t> &counts) {
+void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &scan = op.Cast<LogicalGet>();
 		auto table_entry = scan.GetTable();
@@ -155,7 +128,7 @@ void CountScans(const LogicalOperator &op, std::unordered_map<std::string, idx_t
 }
 
 PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context,
-                                            const std::vector<std::string> &pac_tables, bool replan_in_progress) {
+                                            const vector<string> &pac_tables, bool replan_in_progress) {
 	PACCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
@@ -172,7 +145,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	// Case 2: no PAC tables? (return empty result, nothing to do)
 
 	// count all scanned tables/CTEs in the plan
-	std::unordered_map<std::string, idx_t> scan_counts;
+	std::unordered_map<string, idx_t> scan_counts;
 	CountScans(plan, scan_counts);
 
 	// Record which configured PAC tables were scanned in this plan. The optimizer
@@ -195,7 +168,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		if (pac_count == 0) {
 			continue;
 		}
-		std::string sample_name = std::string("_pac_internal_sample_") + t;
+		string sample_name = string("_pac_internal_sample_") + t;
 		idx_t sample_count = 0;
 		auto it = scan_counts.find(sample_name);
 		if (it != scan_counts.end()) {
@@ -230,7 +203,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	}
 
 	// Build a vector of scanned table names to check FK links
-	std::vector<std::string> scanned_tables;
+	vector<string> scanned_tables;
 	for (auto &kv : scan_counts) {
 		scanned_tables.push_back(kv.first);
 	}
@@ -238,7 +211,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	// Populate scanned_non_pac_tables: scanned tables that are not in the configured pac_tables
 	// and are not internal sample tables (named _pac_internal_sample_<table>). This is useful
 	// to know which external/non-PAC tables were read by the query.
-	std::unordered_set<std::string> pac_set(pac_tables.begin(), pac_tables.end());
+	std::unordered_set<string> pac_set(pac_tables.begin(), pac_tables.end());
 	for (auto &name : scanned_tables) {
 		if (name.rfind("_pac_internal_sample_", 0) == 0) {
 			// internal sample table, skip
@@ -339,11 +312,11 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	if (!ContainsAggregation(plan)) {
 		throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
 	}
-	if (ContainsDistinct(plan)) {
+	if (ContainsLogicalDistinct(plan)) {
 		throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
 	}
 	if (ContainsDisallowedJoin(plan)) {
-		throw InvalidInputException("PAC rewrite: only INNER JOINs are supported for PAC compilation");
+		throw InvalidInputException("PAC rewrite: only INNER and LEFT JOINs are supported for PAC compilation");
 	}
 
 	// If we reach here, the plan is eligible for rewrite/compilation

@@ -16,9 +16,10 @@ include_directories(src/include third_party/lpts)
 include_directories(benchmark/include)
 
 # Extension sources
-set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_compiler.cpp src/pac_privacy_unit.cpp
+set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_privacy_unit.cpp
         src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp third_party/lpts/logical_plan_to_sql.cpp
-        src/pac_count.cpp src/pac_sum_avg.cpp src/pac_min_max.cpp src/pac_bitslice_compiler.cpp src/pac_compiler_helpers.cpp)
+        src/pac_count.cpp src/pac_sum_avg.cpp src/pac_min_max.cpp src/pac_bitslice_compiler.cpp src/pac_compiler_helpers.cpp
+        src/pac_expression_builder.cpp src/pac_plan_traversal.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 

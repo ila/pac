@@ -8,14 +8,14 @@
 namespace duckdb {
 
 // Sanitize a string to be used as a PAC privacy unit or table name (alphanumeric + underscores only)
-std::string Sanitize(const std::string &in);
+string Sanitize(const string &in);
 
 // Normalize a query string by collapsing whitespace and lower-casing. Returns the normalized string.
 // (Hashing is provided by HashStringToHex below.)
-std::string NormalizeQueryForHash(const std::string &query);
+string NormalizeQueryForHash(const string &query);
 
 // Compute a hex string of the std::hash of the given input string
-std::string HashStringToHex(const std::string &input);
+string HashStringToHex(const string &input);
 
 // Determine the next available table index by scanning existing logical operators in the plan
 idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
@@ -34,19 +34,17 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 
 // Find the primary key column names for the given table (searching the client's catalog search path).
 // Returns a vector with the primary key column names in order; empty vector if there is no PK.
-vector<std::string> FindPrimaryKey(ClientContext &context, const std::string &table_name);
+vector<string> FindPrimaryKey(ClientContext &context, const string &table_name);
 
 // Find foreign keys declared on the given table (searching the client's catalog search path).
 // Returns a vector of pairs: (referenced_table_name, list_of_fk_column_names) for each FK constraint.
-vector<std::pair<std::string, vector<std::string>>> FindForeignKeys(ClientContext &context,
-                                                                    const std::string &table_name);
+vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name);
 
 // Find foreign-key path(s) from any of `table_names` to any of `privacy_units`.
 // Returns a map: start_table (as provided) -> path (vector of qualified table names from start to privacy unit,
 // inclusive). If no path exists for a start table, it will not appear in the returned map.
-std::unordered_map<std::string, std::vector<std::string>>
-FindForeignKeyBetween(ClientContext &context, const std::vector<std::string> &privacy_units,
-                      const std::vector<std::string> &table_names);
+std::unordered_map<string, vector<string>>
+FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_units, const vector<string> &table_names);
 
 // -----------------------------------------------------------------------------
 // PAC-specific small helpers
@@ -70,14 +68,14 @@ private:
 
 // Configuration helpers that read PAC-related settings from the client's context and
 // return a canonicalized value or a default when not configured.
-std::string GetPacPrivacyFile(ClientContext &context, const std::string &default_filename = "pac_tables.csv");
-std::string GetPacCompiledPath(ClientContext &context, const std::string &default_path = ".");
+string GetPacPrivacyFile(ClientContext &context, const string &default_filename = "pac_tables.csv");
+string GetPacCompiledPath(ClientContext &context, const string &default_path = ".");
 int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
-std::string GetPacCompileMethod(ClientContext &context, const std::string &default_method = "standard");
+string GetPacCompileMethod(ClientContext &context, const string &default_method = "standard");
 
 // Helper to convert ReadPacTablesFile's unordered_set into a deterministic vector (sorted)
 // so callers don't need to repeat this conversion.
-std::vector<std::string> PacTablesSetToVector(const std::unordered_set<std::string> &set);
+vector<string> PacTablesSetToVector(const std::unordered_set<string> &set);
 
 } // namespace duckdb

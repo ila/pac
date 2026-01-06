@@ -77,9 +77,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::BOOLEAN);
 	// Add option to set path where compiled PAC artifacts (CTEs) are written
 	db.config.AddExtensionOption("pac_compiled_path", "path to write compiled PAC artifacts", LogicalType::VARCHAR);
-	// Add option to choose compile method: "standard" or "bitslice"
-	db.config.AddExtensionOption("pac_compile_method", "PAC compile method: 'standard' or 'bitslice'",
-	                             LogicalType::VARCHAR);
+	// Add option to enable/disable join elimination (stop FK chain before reaching PU)
+	db.config.AddExtensionOption("pac_join_elimination", "eliminate final join to PU table", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
 
 	// Register pac_aggregate function(s)
 	RegisterPacAggregateFunctions(loader);
