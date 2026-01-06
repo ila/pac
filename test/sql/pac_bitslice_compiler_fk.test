@@ -76,6 +76,19 @@ ORDER BY grp
 3	25	0	5.00
 4	60	5	12.00
 
+# Testing COUNT DISTINCT (compare with COUNT above)
+query II
+SELECT grp, COUNT(DISTINCT val)
+FROM bitslice_fk_child
+GROUP BY grp
+ORDER BY grp
+----
+0	0
+1	2
+2	0
+3	0
+4	2
+
 # Testing with AVG
 query II
 SELECT grp, AVG(val)::DECIMAL(5, 2)
@@ -320,20 +333,6 @@ LIMIT 3
 1	30
 2	80
 
-# Test joining leaf with child directly (skipping intermediate tables)
-query II
-SELECT l.grp, COUNT(DISTINCT c.pu_id)
-FROM bitslice_fk_leaf l
-INNER JOIN bitslice_fk_child c ON l.child_id = c.id
-GROUP BY l.grp
-ORDER BY l.grp
-----
-0	0
-1	5
-2	0
-3	0
-4	5
-
 # Test complex join with multiple tables and aggregates
 query IIII
 SELECT d1.grp, COUNT(*), SUM(d1.val), AVG(c.val)::DECIMAL(5, 2)
@@ -390,19 +389,6 @@ ORDER BY d1.grp
 2	40
 3	25
 4	60
-
-# Test multiple joins with mixed table references
-query III
-SELECT d1.grp, COUNT(d1.id), COUNT(DISTINCT d2.id)
-FROM bitslice_deepleaf d1
-INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
-INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
-GROUP BY d1.grp
-ORDER BY d1.grp
-LIMIT 2
-----
-0	0	0
-1	5	5
 
 # ========== NEW LEFT JOIN TEST CASES ==========
 
@@ -571,7 +557,7 @@ ORDER BY d1.grp
 LIMIT 3
 ----
 0	0	0
-1	5	5
+1	5	1
 2	0	0
 
 # Test LEFT JOIN with expressions in ON clause

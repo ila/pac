@@ -554,8 +554,11 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		aggr_children.push_back(hash_input_expr->Copy());
 		aggr_children.push_back(std::move(value_child));
 
-		auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
-		                                                      AggregateType::NON_DISTINCT);
+		// Pass through the DISTINCT flag from the original aggregate
+		AggregateType agg_type = old_aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT;
+
+		auto new_aggr =
+		    function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr, agg_type);
 
 		agg->expressions[i] = std::move(new_aggr);
 	}
@@ -640,8 +643,11 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		aggr_children.push_back(hash_input_expr->Copy());
 		aggr_children.push_back(std::move(value_child));
 
-		auto new_aggr = function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr,
-		                                                      AggregateType::NON_DISTINCT);
+		// Pass through the DISTINCT flag from the original aggregate
+		AggregateType agg_type = old_aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT;
+
+		auto new_aggr =
+		    function_binder.BindAggregateFunction(bound_aggr_func, std::move(aggr_children), nullptr, agg_type);
 
 		agg->expressions[i] = std::move(new_aggr);
 	}

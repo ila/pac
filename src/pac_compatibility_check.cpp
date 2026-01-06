@@ -79,43 +79,14 @@ static bool ContainsWindowFunction(const LogicalOperator &op) {
 	return false;
 }
 
-static bool ContainsDistinct(const LogicalOperator &op) {
-	// If there's an explicit DISTINCT operator in the logical plan, detect it
+static bool ContainsLogicalDistinct(const LogicalOperator &op) {
+	// Only check for explicit DISTINCT operator (SELECT DISTINCT), not aggregate DISTINCT
 	if (op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
 		return true;
 	}
 
-	// Inspect expressions attached to this operator: COUNT(DISTINCT ...), etc.
-	for (auto &expr : op.expressions) {
-		if (!expr) {
-			continue;
-		}
-		if (expr->IsAggregate()) {
-			auto &aggr = expr->Cast<BoundAggregateExpression>();
-			if (aggr.IsDistinct()) {
-				return true;
-			}
-		}
-	}
-
-	// Also check LogicalAggregate nodes' expressions (GROUP BY select list)
-	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = op.Cast<LogicalAggregate>();
-		for (auto &expr : aggr.expressions) {
-			if (!expr) {
-				continue;
-			}
-			if (expr->IsAggregate()) {
-				auto &a = expr->Cast<BoundAggregateExpression>();
-				if (a.IsDistinct()) {
-					return true;
-				}
-			}
-		}
-	}
-
 	for (auto &child : op.children) {
-		if (ContainsDistinct(*child)) {
+		if (ContainsLogicalDistinct(*child)) {
 			return true;
 		}
 	}
@@ -341,7 +312,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	if (!ContainsAggregation(plan)) {
 		throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
 	}
-	if (ContainsDistinct(plan)) {
+	if (ContainsLogicalDistinct(plan)) {
 		throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
 	}
 	if (ContainsDisallowedJoin(plan)) {

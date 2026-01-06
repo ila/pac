@@ -109,12 +109,6 @@ SELECT t1.a, SUM(t3.n) FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.
 1	1000
 2	2000
 
-# Not PAC-compatible: DISTINCT
-statement error
-SELECT COUNT(DISTINCT a) FROM t1;
-----
-PAC rewrite: DISTINCT is not supported for PAC compilation
-
 # Not PAC-compatible: window function
 statement error
 SELECT a, SUM(b) OVER (PARTITION BY a) FROM t1;
