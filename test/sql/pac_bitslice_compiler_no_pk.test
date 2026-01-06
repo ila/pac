@@ -243,6 +243,20 @@ SELECT COUNT(rowid) FROM bitslice_with_rowid
 ----
 9
 
+# Test RIGHT JOIN with no-PK tables, aggregating with filtering condition
+query III
+SELECT b.grp, COUNT(*), SUM(COALESCE(a.val, 0))
+FROM bitslice_a a
+RIGHT JOIN bitslice_b b ON a.grp = b.grp AND a.grp2 = 0
+GROUP BY b.grp
+ORDER BY b.grp
+----
+0	5	25
+1	10	35
+2	0	10
+3	5	95
+4	5	110
+
 # Cleanup
 statement ok
 DROP TABLE bitslice_a
@@ -252,3 +266,4 @@ DROP TABLE bitslice_b
 
 statement ok
 DROP TABLE bitslice_with_rowid
+

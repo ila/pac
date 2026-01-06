@@ -804,6 +804,20 @@ ORDER BY c.grp
 3	25
 4	60
 
+# Test RIGHT JOIN with FK chain - child table on right, aggregating with condition
+query III
+SELECT c.grp, COUNT(*), SUM(COALESCE(s.val2, 0))
+FROM bitslice_fk_side s
+RIGHT JOIN bitslice_fk_child c ON s.pu_id = c.pu_id AND s.grp2 > 1
+GROUP BY c.grp
+ORDER BY c.grp
+----
+0	0	0
+1	5	0
+2	0	200
+3	0	125
+4	25	300
+
 # Cleanup
 statement ok
 PRAGMA remove_pac_privacy_unit('bitslice_fk_pu');

@@ -165,6 +165,20 @@ LIMIT 3
 1	635
 2	810
 
+# Test RIGHT JOIN with composite PK table on right, aggregating with condition
+query III
+SELECT b.grp, COUNT(*), SUM(COALESCE(a.val, 0))
+FROM bitslice_pk_single a
+RIGHT JOIN bitslice_pk_many b ON a.grp = b.grp AND a.val > 3
+GROUP BY b.grp
+ORDER BY b.grp
+----
+0	6	50
+1	8	60
+2	8	70
+3	12	64
+4	15	150
+
 # Cleanup
 statement ok
 DROP TABLE bitslice_pk_single
