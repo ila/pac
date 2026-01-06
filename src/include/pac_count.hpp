@@ -135,9 +135,13 @@ struct PacCountState {
 
 	// Allocate banks0 (subtotal8) and transition to aggregation mode
 	void AllocateFirstLevel(ArenaAllocator &allocator) {
+		// Zero out union first (while still in buffering mode conceptually)
+		banks0 = nullptr;
+		banks1 = nullptr;
+		banks2 = nullptr;
+		banks3 = nullptr;
+		// Now transition to aggregation mode
 		buffering = false;
-		// Zero out pointers (union was previously holding buf_hashes)
-		banks1 = banks2 = banks3 = nullptr;
 		banks0 = reinterpret_cast<uint8_t *>(allocator.AllocateAligned(64));
 		memset(banks0, 0, 64);
 		subtotal8_count = 0;
@@ -146,7 +150,8 @@ struct PacCountState {
 
 	// Allocate only banks0 without resetting other banks (for Finalize after Combine)
 	void EnsureBanks0Allocated(ArenaAllocator &allocator) {
-		if (!banks0) {
+		// Only call this when NOT buffering
+		if (!buffering && !banks0) {
 			banks0 = reinterpret_cast<uint8_t *>(allocator.AllocateAligned(64));
 			memset(banks0, 0, 64);
 		}
