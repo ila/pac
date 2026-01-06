@@ -69,7 +69,7 @@ string NormalizeQueryForHash(const string &query) {
 
 string HashStringToHex(const string &input) {
 	size_t h = std::hash<string> {}(input);
-	std::stringstream ss;
+	std::ostringstream ss;
 	ss << std::hex << h;
 	return ss.str();
 }
@@ -414,7 +414,7 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 			}
 			// Build referenced table name: DO NOT return schema-qualified name here; only return the table name.
 			// The schema-qualified variant adds complexity and is left for future work.
-			std::string ref_table = fk.info.table;
+			string ref_table = fk.info.table;
 			// fk.fk_columns contains the column names on THIS table that reference the other
 			result.emplace_back(ref_table, fk.fk_columns);
 		}
@@ -525,7 +525,7 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 
 		if (found) {
 			// reconstruct path from start_name to found_target
-			std::vector<string> path;
+			vector<string> path;
 			string cur = found_target;
 			while (true) {
 				path.push_back(cur);

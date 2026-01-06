@@ -33,7 +33,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 #endif
 
 	// Create the necessary LogicalGets for missing tables
-	std::unordered_map<std::string, unique_ptr<LogicalGet>> get_map;
+	std::unordered_map<string, unique_ptr<LogicalGet>> get_map;
 	// Preserve creation order: store ordered table names (ownership kept in get_map)
 	vector<string> ordered_table_names;
 	auto idx = GetNextTableIndex(plan);
@@ -96,7 +96,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	target_ref = FindNodeRefByTable(&plan, connecting_table, &parent_join, &child_idx_in_parent);
 	if (!target_ref) {
 		throw InternalException("PAC compiler: could not find existing LogicalGet for table " +
-		                        (connecting_table.empty() ? std::string("<none>") : connecting_table));
+		                        (connecting_table.empty() ? string("<none>") : connecting_table));
 	}
 
 	// Check if the target node is part of a LEFT JOIN
@@ -254,8 +254,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 }
 
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
-                             unique_ptr<LogicalOperator> &plan, const std::string &privacy_unit,
-                             const std::string &query, const std::string &query_hash) {
+                             unique_ptr<LogicalOperator> &plan, const string &privacy_unit,
+                             const string &query, const string &query_hash) {
 
 #ifdef DEBUG
 	Printer::Print("CompilePacBitsliceQuery called for PU=" + privacy_unit + " hash=" + query_hash);

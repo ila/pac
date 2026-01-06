@@ -7,8 +7,8 @@ namespace duckdb {
 class PacExtension : public Extension {
 public:
 	void Load(ExtensionLoader &db) override;
-	std::string Name() override;
-	std::string Version() const override;
+	string Name() override;
+	string Version() const override;
 };
 
 } // namespace duckdb

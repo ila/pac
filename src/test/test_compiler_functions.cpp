@@ -85,7 +85,7 @@ static bool VerifyNoInvalidBindings(const std::set<std::pair<idx_t, idx_t>> &bin
 
 // New: collect a mapping from ColumnBinding (table_index,col_index) to producer LogicalOperator*
 static void CollectBindingProducers(LogicalOperator *node,
-                                    std::map<std::pair<idx_t, idx_t>, std::vector<LogicalOperator *>> &out) {
+                                    std::map<std::pair<idx_t, idx_t>, vector<LogicalOperator *>> &out) {
 	if (!node) {
 		return;
 	}
@@ -100,7 +100,7 @@ static void CollectBindingProducers(LogicalOperator *node,
 
 // New: ensure each binding has exactly one producer and the producer advertises a type for that column_index
 static bool VerifyBindingProducersUniqueAndTypes(LogicalOperator *root) {
-	std::map<std::pair<idx_t, idx_t>, std::vector<LogicalOperator *>> producers;
+	std::map<std::pair<idx_t, idx_t>, vector<LogicalOperator *>> producers;
 	CollectBindingProducers(root, producers);
 	bool ok = true;
 	for (auto &kv : producers) {
@@ -182,7 +182,7 @@ static bool VerifyBindingProducersUniqueAndTypes(LogicalOperator *root) {
 // New: verify that BoundColumnRefExpression.type matches the producer's type
 static bool VerifyExprTypesMatchProducers(LogicalOperator *root) {
 	// build producers map
-	std::map<std::pair<idx_t, idx_t>, std::vector<LogicalOperator *>> producers;
+	std::map<std::pair<idx_t, idx_t>, vector<LogicalOperator *>> producers;
 	CollectBindingProducers(root, producers);
 	bool ok = true;
 	// traverse expressions

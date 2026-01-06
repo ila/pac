@@ -95,11 +95,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 void PacExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
-std::string PacExtension::Name() {
+string PacExtension::Name() {
 	return "pac";
 }
 
-std::string PacExtension::Version() const {
+string PacExtension::Version() const {
 #ifdef EXT_VERSION_PAC
 	return EXT_VERSION_PAC;
 #else

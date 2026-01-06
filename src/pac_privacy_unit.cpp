@@ -19,10 +19,10 @@
 
 namespace duckdb {
 
-std::unordered_set<std::string> ReadPacTablesFile(const std::string &filename) {
-	std::unordered_set<std::string> tables;
+std::unordered_set<string> ReadPacTablesFile(const string &filename) {
+	std::unordered_set<string> tables;
 	std::ifstream file(filename);
-	std::string line;
+	string line;
 	while (std::getline(file, line)) {
 		// StringUtil::Trim mutates the string in-place
 		StringUtil::Trim(line);
@@ -33,12 +33,12 @@ std::unordered_set<std::string> ReadPacTablesFile(const std::string &filename) {
 	return tables;
 }
 
-void WritePacTablesFile(const std::string &filename, const std::unordered_set<std::string> &tables) {
-	std::string tmp_filename = filename + ".tmp";
+void WritePacTablesFile(const string &filename, const std::unordered_set<string> &tables) {
+	string tmp_filename = filename + ".tmp";
 	{
 		std::ofstream file(tmp_filename, std::ios::trunc);
 		for (const auto &t : tables) {
-			std::string s = t;
+			string s = t;
 			StringUtil::Trim(s);
 			file << s << "\n";
 		}
@@ -49,7 +49,7 @@ void WritePacTablesFile(const std::string &filename, const std::unordered_set<st
 	::rename(tmp_filename.c_str(), filename.c_str());
 }
 
-bool TableExists(ClientContext &context, const std::string &table_name) {
+bool TableExists(ClientContext &context, const string &table_name) {
 	// todo - support custom schemas
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 	CatalogSearchPath search_path(context);
@@ -71,9 +71,9 @@ void DeletePrivacyUnitFileFun(DataChunk &args, ExpressionState &state, Vector &r
 	}
 	// extract first (and only) value
 	auto val = args.data[0].GetValue(0);
-	std::string path = val.ToString();
+	string path = val.ToString();
 	int r = ::remove(path.c_str());
-	std::string msg;
+	string msg;
 	if (r == 0) {
 		msg = StringUtil::Format("Deleted PAC privacy units file: %s", path);
 	} else {
@@ -97,7 +97,7 @@ void AddPrivacyUnitPragma(ClientContext &context, const FunctionParameters &para
 		throw InvalidInputException("add_privacy_unit pragma requires the table name");
 	}
 	auto table_name = parameters.values[0].ToString();
-	std::string pac_privacy_file = GetPacPrivacyFile(context);
+	string pac_privacy_file = GetPacPrivacyFile(context);
 	// Ensure the referenced table actually exists before touching the file
 	if (!TableExists(context, table_name)) {
 		throw InvalidInputException(StringUtil::Format("add_privacy_unit: table does not exist: %s", table_name));
@@ -163,7 +163,7 @@ void RemovePrivacyUnitPragma(ClientContext &context, const FunctionParameters &p
 		throw InvalidInputException("remove_privacy_unit pragma requires at least the table name");
 	}
 	auto table_name = parameters.values[0].ToString();
-	std::string pac_privacy_file = GetPacPrivacyFile(context);
+	string pac_privacy_file = GetPacPrivacyFile(context);
 	if (parameters.values.size() >= 2) {
 		pac_privacy_file = parameters.values[1].ToString();
 	}

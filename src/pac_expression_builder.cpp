@@ -17,7 +17,7 @@
 namespace duckdb {
 
 // Ensure a column is projected in a LogicalGet and return its projection index
-idx_t EnsureProjectedColumn(LogicalGet &g, const std::string &col_name) {
+idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	// try existing projected columns by matching returned names via ColumnIndex primary
 	for (idx_t cid = 0; cid < g.GetColumnIds().size(); ++cid) {
 		auto col_idx = g.GetColumnIds()[cid];

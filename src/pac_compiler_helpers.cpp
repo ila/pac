@@ -21,7 +21,7 @@
 
 namespace duckdb {
 
-void ReplanWithoutOptimizers(ClientContext &context, const std::string &query, unique_ptr<LogicalOperator> &plan) {
+void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan) {
 	// Begin a transaction and disable a set of optimizers to simplify the generated plan
 	Connection con(*context.db);
 	con.BeginTransaction();
@@ -96,8 +96,8 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	if (!left_table_ptr || !right_table_ptr) {
 		throw InternalException("PAC compiler: expected both LogicalGet nodes to be bound to tables for join creation");
 	}
-	std::string left_table_name = left_table_ptr->name;
-	std::string right_table_name = right_table_ptr->name;
+	string left_table_name = left_table_ptr->name;
+	string right_table_name = right_table_ptr->name;
 
 	// Require metadata to be present; compatibility check is responsible for populating it.
 	auto lit = check.table_metadata.find(left_table_name);

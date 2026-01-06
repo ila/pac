@@ -7,11 +7,11 @@
 namespace duckdb {
 
 // Read/write pac tables file
-std::unordered_set<std::string> ReadPacTablesFile(const std::string &filename);
-void WritePacTablesFile(const std::string &filename, const std::unordered_set<std::string> &tables);
+std::unordered_set<string> ReadPacTablesFile(const string &filename);
+void WritePacTablesFile(const string &filename, const std::unordered_set<string> &tables);
 
 // Helper: check if table exists in the current catalog
-bool TableExists(ClientContext &context, const std::string &table_name);
+bool TableExists(ClientContext &context, const string &table_name);
 
 // Pragma-style helpers: PRAGMA add_privacy_unit(...) and PRAGMA remove_privacy_unit(...)
 void AddPrivacyUnitPragma(ClientContext &context, const FunctionParameters &parameters);
