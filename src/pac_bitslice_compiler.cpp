@@ -378,12 +378,32 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
                          const std::string &privacy_unit) {
 	// Note: we assume we don't use rowid
 
+	// Check if join elimination is enabled
+	Value join_elim_val;
+	bool join_elimination = false;
+	if (input.context.TryGetCurrentSetting("pac_join_elimination", join_elim_val) && !join_elim_val.IsNull()) {
+		join_elimination = join_elim_val.GetValue<bool>();
+	}
+
+#ifdef DEBUG
+	Printer::Print("ModifyPlanWithoutPU: join_elimination = " + std::to_string(join_elimination));
+	Printer::Print("ModifyPlanWithoutPU: privacy_unit = " + privacy_unit);
+#endif
+
 	// Create the necessary LogicalGets for missing tables
 	std::unordered_map<std::string, unique_ptr<LogicalGet>> get_map;
 	// Preserve creation order: store ordered table names (ownership kept in get_map)
 	vector<string> ordered_table_names;
 	auto idx = GetNextTableIndex(plan);
 	for (auto &table : gets_missing) {
+		// If join elimination is enabled, skip the PU table
+		if (join_elimination && table == privacy_unit) {
+#ifdef DEBUG
+			Printer::Print("ModifyPlanWithoutPU: Skipping PU table " + table + " due to join elimination");
+#endif
+			continue;
+		}
+
 		auto it = check.table_metadata.find(table);
 		if (it == check.table_metadata.end()) {
 			throw InternalException("PAC compiler: missing table metadata for missing GET: " + table);
@@ -393,6 +413,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		// store in map (ownership) and record name to preserve order
 		get_map[table] = std::move(get);
 		ordered_table_names.push_back(table);
+#ifdef DEBUG
+		Printer::Print("ModifyPlanWithoutPU: Added table " + table + " to join chain");
+#endif
 		idx++;
 	}
 
@@ -483,27 +506,69 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 #endif
 
-	// Locate the privacy-unit LogicalGet we just inserted (so we can reference its projections)
-	unique_ptr<LogicalOperator> *pu_ref = nullptr;
-	if (!privacy_unit.empty()) {
-		pu_ref = FindNodeRefByTable(&plan, privacy_unit);
-	}
-	if (!pu_ref || !pu_ref->get()) {
-		throw InternalException("PAC compiler: could not find LogicalGet for privacy unit " + privacy_unit);
-	}
-	auto pu_get = &pu_ref->get()->Cast<LogicalGet>();
+	// When join elimination is enabled, we don't join to PU table
+	// Instead, we use the FK column from the last table in the chain
+	unique_ptr<Expression> hash_input_expr;
 
-	vector<string> pu_pks;
-	for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
-		pu_pks.push_back(pk);
+	if (join_elimination) {
+		// Find the last table in the FK chain (the one that would link to PU)
+		// This is the last table in ordered_table_names, or if empty, the connecting_table
+		string last_table_name;
+		if (!ordered_table_names.empty()) {
+			last_table_name = ordered_table_names.back();
+		} else {
+			last_table_name = connecting_table;
+		}
+
+		// Find the LogicalGet for this table
+		unique_ptr<LogicalOperator> *last_table_ref = FindNodeRefByTable(&plan, last_table_name);
+		if (!last_table_ref || !last_table_ref->get()) {
+			throw InternalException("PAC compiler: could not find LogicalGet for last table " + last_table_name);
+		}
+		auto last_get = &last_table_ref->get()->Cast<LogicalGet>();
+
+		// Find the FK column(s) that reference the PU
+		auto it = check.table_metadata.find(last_table_name);
+		if (it == check.table_metadata.end()) {
+			throw InternalException("PAC compiler: missing metadata for table " + last_table_name);
+		}
+
+		vector<string> fk_cols;
+		for (auto &fk : it->second.fks) {
+			if (fk.first == privacy_unit) {
+				fk_cols = fk.second;
+				break;
+			}
+		}
+
+		if (fk_cols.empty()) {
+			throw InternalException("PAC compiler: no FK found from " + last_table_name + " to " + privacy_unit);
+		}
+
+		// Build hash from FK columns
+		hash_input_expr = BuildXorHashFromPKs(input, *last_get, fk_cols);
+	} else {
+		// Original behavior: locate the privacy-unit LogicalGet we just inserted
+		unique_ptr<LogicalOperator> *pu_ref = nullptr;
+		if (!privacy_unit.empty()) {
+			pu_ref = FindNodeRefByTable(&plan, privacy_unit);
+		}
+		if (!pu_ref || !pu_ref->get()) {
+			throw InternalException("PAC compiler: could not find LogicalGet for privacy unit " + privacy_unit);
+		}
+		auto pu_get = &pu_ref->get()->Cast<LogicalGet>();
+
+		vector<string> pu_pks;
+		for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
+			pu_pks.push_back(pk);
+		}
+
+		// Build the hash expression from PU PKs
+		hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
 	}
 
 	// Now we need to edit the aggregate node to use pac functions
 	auto *agg = FindTopAggregate(plan);
-
-	// Build the hash expression once (will be copied/reused for each aggregate)
-	// We create a hash expression over the XOR of PK columns from the privacy unit table
-	unique_ptr<Expression> hash_input_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
 
 	FunctionBinder function_binder(input.context);
 
