@@ -40,11 +40,6 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 // Backward compatibility overload (defaults to deterministic)
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen);
 
-// Helper function that computes noisy sample using deterministic Box-Muller when pac_deterministic_noise is set.
-// This adds deterministic noise to a chosen counter value (yJ) given delta and a random generator.
-double PacNoisySampleFrom64CountersDeterministic(const double counters[64], double mi, std::mt19937_64 &gen,
-                                                 bool use_deterministic_noise);
-
 // Bind data used by PAC aggregates to carry the `mi` parameter.
 struct PacBindData : public FunctionData {
 	double mi;
