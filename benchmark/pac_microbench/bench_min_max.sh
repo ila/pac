@@ -11,12 +11,10 @@
 #
 # Variants:
 #   - standard: DuckDB's native MAX (baseline)
-#   - default: PAC MAX with all optimizations (banking, lazy alloc, bound opt, buffering)
-#   - nosimd: PAC MAX with auto-vectorization disabled
+#   - default: PAC MAX with all optimizations (buffering, bound opt)
 #   - noboundopt: PAC MAX without bound optimization
-#   - noncascading: PAC MAX without banking (uses contiguous arrays)
-#   - eageralloc: PAC MAX with eager level allocation (grouped tests only)
 #   - nobuffering: PAC MAX without input buffering (grouped tests only)
+#   - nosimd: PAC MAX with simd-unfriendly update kernel and auto-vectorization disabled
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,10 +23,10 @@ source "$SCRIPT_DIR/common.sh"
 RESULTS_FILE="$RESULTS_DIR/min_max_$(date +%Y%m%d_%H%M%S).csv"
 
 # Variants for ungrouped tests (includes noboundopt since it affects min/max)
-UNGROUPED_VARIANTS=(standard default nosimd noboundopt noncascading)
+UNGROUPED_VARIANTS=(standard default noboundopt nobuffering nosimd)
 
 # Variants for grouped tests (includes allocation/buffering variants)
-GROUPED_VARIANTS=(standard default nosimd noboundopt noncascading eageralloc nobuffering)
+GROUPED_VARIANTS=(standard default noboundopt nobuffering)
 
 # Get binary for variant
 get_binary() {

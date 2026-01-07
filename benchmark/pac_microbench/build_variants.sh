@@ -4,11 +4,10 @@
 #
 # Consolidated binary names (aggregate-agnostic):
 #   default       - default cascading/banking/buffering (all optimizations on)
-#   nosimd        - default but with auto-vectorization disabled
+#   nobuffering   - disable input buffering (lazy allocation)
 #   noboundopt    - disable bound optimization (only affects min/max)
-#   noncascading  - disable cascading (sum/avg) and banking (min/max, count)
-#   eageralloc    - eager allocation (disable lazy level allocation)
-#   nobuffering   - disable input buffering
+#   nocascading   - disable cascading (count, sum/avg) 
+#   nosimd        - nocascading with simd-unfriendly update kernels and auto-vectorization disabled
 
 set -e
 
@@ -24,11 +23,10 @@ mkdir -p "$BINARIES_DIR"
 # Format: "name:flags" (empty flags = default build)
 CONFIGS=(
     "default:"
-    "nosimd:-fno-vectorize -fno-slp-vectorize"
     "noboundopt:-DPAC_MINMAX_NOBOUNDOPT"
-    "noncascading:-DPAC_MINMAX_NONBANKED -DPAC_COUNT_NONBANKED -DPAC_SUMAVG_NONCASCADING"
-    "eageralloc:-DPAC_COUNT_NONLAZY -DPAC_MINMAX_NONLAZY -DPAC_SUMAVG_NONLAZY"
     "nobuffering:-DPAC_COUNT_NOBUFFERING -DPAC_MINMAX_NOBUFFERING -DPAC_SUMAVG_NOBUFFERING"
+    "nocascading:-DPAC_COUNT_NOCASCADING -DPAC_SUMAVG_NOCASCADING"
+    "nosimd:-DPAC_COUNT_NOCASCADING -DPAC_SUMAVG_NOCASCADING -DPAC_COUNT_NOSIMD -DPAC_SUMAVG_NOSIMD -DPAC_MINMAX_NOSIMD -fno-vectorize -fno-slp-vectorize"
 )
 
 # Get config name from "name:flags" string

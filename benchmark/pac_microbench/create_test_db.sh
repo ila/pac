@@ -40,11 +40,11 @@ echo "Creating views: data (base), data1 (10M), data10 (100M), data100 (1B)..."
         -- Row identifier
         i,
 
-        -- Data columns with various value ranges (typed)
-        (i % 4)::TINYINT as col_8,
-        (i % 1024)::SMALLINT as col_16,
-        (i % 262144)::INTEGER as col_32,
-        (i % 1099511627776)::BIGINT as col_64,
+        -- Data columns with various value ranges (typed) - use hash for non-monotonic
+        ((hash(i) % 256)::INTEGER - 128)::TINYINT as col_8,
+        ((hash(i + 1) % 65536)::INTEGER - 32768)::SMALLINT as col_16,
+        ((hash(i + 2) % 4294967296)::BIGINT - 2147483648)::INTEGER as col_32,
+        (hash(i + 3) & 9223372036854775807)::BIGINT as col_64,
         (i % 10000000 * 1000000::HUGEINT) as col_128,
         ((i % 1000) + 0.5)::FLOAT as col_flt,
         ((i % 1000000) + 0.123456789)::DOUBLE as col_dbl,

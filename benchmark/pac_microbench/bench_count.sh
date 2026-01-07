@@ -9,10 +9,10 @@
 #
 # Variants:
 #   - standard: DuckDB's native COUNT (baseline)
-#   - default: PAC COUNT with all optimizations (banking, lazy alloc)
-#   - nosimd: PAC COUNT with auto-vectorization disabled
-#   - noncascading: PAC COUNT without banking (uses contiguous arrays)
-#   - eageralloc: PAC COUNT with eager level allocation (grouped tests only)
+#   - default: PAC COUNT with all optimizations (buffering, cascading)
+#   - nobuffering: PAC COUNT without buffering (lazy alloc)
+#   - nocascading: PAC COUNT directly into uint64 totals
+#   - nosimd: PAC COUNT nocascading with simd-unfriendly update kernel
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,10 +21,10 @@ source "$SCRIPT_DIR/common.sh"
 RESULTS_FILE="$RESULTS_DIR/count_$(date +%Y%m%d_%H%M%S).csv"
 
 # Variants for ungrouped tests
-UNGROUPED_VARIANTS=(standard default nosimd noncascading)
+UNGROUPED_VARIANTS=(standard default nobuffering nocascading nosimd)
 
-# Variants for grouped tests (includes allocation variant)
-GROUPED_VARIANTS=(standard default nosimd noncascading eageralloc)
+# Variants for grouped tests 
+GROUPED_VARIANTS=(standard default nobuffering nocascading)
 
 # Get binary for variant
 get_binary() {

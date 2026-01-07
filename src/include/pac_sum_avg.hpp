@@ -51,43 +51,36 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // distinct GROUP BY values (and relatively modest sums, therefore), the bigger counters are often not needed.
 // Therefore, we allocate counters lazily now: only when say 8-bits counters overflow we allocate the 16-bits counters
 // This optimization can reduce the memory footprint by 2-8x, which can help in avoiding spilling.
-//
-// DuckDB's parallel aggregation partitions per thread and creates small 32K hash-tables, which get abandoned
-// when they fill. This means that dynamically allocated aggregate state memory leaks. Typically, it happens
-// when every group-by key in the hash table just had one insert for it (or a few). With abandoning the input
-// is just partitioned, and reprocessed later. If you generate group-ids with range(100M) / 100 you get group locality
-// and do not suffer from this, but with range(100M) % 1M you get very different performance due to this.
-//
-// We therefore delay any aggregate processing (and thus allocation) until 3-4 (hash,value) pairs have been received.
-// These values are buffered in the state memory (it becomes a union because of this dual use).
 
 // for benchmarking/reproducibility purposes, we can disable cascading counters (just sum directly to the largest tyoe)
 // and in cascading mode we can still use eager memory allocation.
-//#define PAC_SUMAVG_NONCASCADING 1 // seems 10x slower on Apple
-//#define PAC_SUMAVG_NONLAZY 1  // Pre-allocate all levels at initialization
-// Define PAC_SUMAVG_NOBUFFERING to disable input buffering (aggregation state initialized immediately)
-//#define PAC_SUMAVG_NOBUFFERING 1
-
-// NULL handling: by default we ignore NULLs (safe behavior, like DuckDB's SUM/AVG).
-// Define PAC_SUMAVG_UNSAFENULL to return NULL if any input value is NULL.
-//#define PAC_SUMAVG_UNSAFENULL 1
-
-// Float cascading: accumulate in float subtotal, periodically flush to double total
-// Only beneficial on x86 which has variable-shift SIMD (vpsrlvq). ARM lacks this and
-// showed no benefit from float cascading approaches (SWAR, lookup tables, etc.)
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-#define PAC_SUMAVG_FLOAT_CASCADING 1
+//#define PAC_SUMAVG_NOCASCADING 1 // seems 10x slower on Apple
+//#define PAC_SUMAVG_NOSIMD 1  // use if-then-else rather than predicated simd-friendly update
+#if defined(PAC_SUMAVG_NOSIMD) && !defined(PAC_SUMAVG_NOCASCADING)
+PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 #endif
+    //#define PAC_SUMAVG_NOBUFFERING 1  // Disable buffering wrapper (allocate state immediately)
 
-// Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
-// This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
-template <typename ACCUM_T, typename VALUE_T>
-AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *__restrict__ total, VALUE_T value, uint64_t key_hash) {
+    // NULL handling: by default we ignore NULLs (safe behavior, like DuckDB's SUM/AVG).
+    // Define PAC_SUMAVG_UNSAFENULL to return NULL if any input value is NULL.
+    //#define PAC_SUMAVG_UNSAFENULL 1
+
+    // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
+    // This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
+    template <typename ACCUM_T, typename VALUE_T>
+    AUTOVECTORIZE static inline void AddToTotalsSimple(ACCUM_T *__restrict__ total, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
+#ifdef PAC_SUMAVG_NOSIMD
+		if ((key_hash >> j) & 1ULL) {
+			total[j] += v;
+		}
+#else
 		total[j] += v * static_cast<ACCUM_T>((key_hash >> j) & 1ULL);
+#endif
 	}
 }
+
 // For the 8-bits, 16-bits and 32-bits PAC_SUM() SIMD-benefits are greatest, but achieving these is harder
 //
 // We need SWAR (SIMD Within A Register). The idea in case of int8_t:
@@ -120,34 +113,6 @@ AUTOVECTORIZE static inline void AddToTotalsSWAR(uint64_t *__restrict__ total, V
 	}
 }
 
-#ifdef PAC_SUMAVG_FLOAT_CASCADING
-// SWAR approach for x86: extract bytes, expand bits to float masks via union, multiply-accumulate
-// x86 has variable-shift SIMD (vpsrlvq) so this vectorizes well
-// prototyped here: https://godbolt.org/z/jodKW3er7
-AUTOVECTORIZE static inline void AddToTotalsFloat(float *total, float value, uint64_t key_hash) {
-	union {
-		uint64_t u64;
-		uint8_t u8[8];
-	} key = {key_hash};
-
-	for (int byte = 0; byte < 8; byte++) {
-		uint32_t b = key.u8[byte];
-		float *dst = total + byte * 8;
-		// Use union for proper type punning: bit -> 0x00000000 or 0x3F800000 (1.0f)
-		union {
-			uint32_t u[8];
-			float f[8];
-		} masks;
-		for (int bit = 0; bit < 8; bit++) {
-			masks.u[bit] = ((b >> bit) & 1u) * 0x3F800000u;
-		}
-		for (int bit = 0; bit < 8; bit++) {
-			dst[bit] += value * masks.f[bit];
-		}
-	}
-}
-#endif // PAC_SUMAVG_FLOAT_CASCADING
-
 // =========================
 // Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
 // =========================
@@ -163,10 +128,6 @@ AUTOVECTORIZE static inline void AddToTotalsFloat(float *total, float value, uin
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 // Uses lazy allocation via DuckDB's ArenaAllocator for memory management.
 // Arena handles cleanup automatically when aggregate operation completes.
-//
-// Input buffering: To avoid memory allocation when DuckDB abandons pre-aggregation
-// hash tables (which leaks arena memory), we buffer the first 3 values before
-// starting actual aggregation. The buffer uses a union with the aggregation state.
 template <bool SIGNED>
 struct PacSumIntState {
 	// Type aliases based on signedness
@@ -175,63 +136,43 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
+#ifdef PAC_SUMAVG_NOCASCADING
+	uint64_t exact_count;                 // total count of values added (for pac_avg)
+	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
 #ifdef PAC_SUMAVG_UNSAFENULL
 	bool seen_null;
 #endif
-	uint64_t exact_count; // total count of values added (for pac_avg), also buffer count when buffering
-
-#ifdef PAC_SUMAVG_NONCASCADING
-	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
 #else
-	// Input buffering: buffer first 3 values before allocating arrays
-	// When buffering == true: buf_hashes/buf_values hold buffered inputs
-	// When buffering == false: exact_totalX and probabilistic_totalX hold aggregation state
-	static constexpr uint8_t BUFFER_CAPACITY = 3;
-
-	// buffering field is first in both union members to reduce padding and ensure identical layout
-	union {
-		struct { // Buffering mode (when buffering == true)
-			bool buffering;
-			uint64_t buf_hashes[BUFFER_CAPACITY];
-			T64 buf_values[BUFFER_CAPACITY]; // Actual type T64
-		};
-		struct {             // Aggregating mode (when buffering == false)
-			bool buffering_; // same memory location as buffering above
-
-			// Exact subtotals for each level - sized to fit level's representable range.
-			// After any Flush, exact_totalN is either:
-			//   - the incoming `value` (which fits in TN since it was routed to level N), or
-			//   - `new_total` which we verified fits in TN range before assigning
-			// Flush functions use int64_t for intermediate calculations to detect overflow.
-			T8 exact_total8;   // sum of values at level 8 since last flush (fits in T8 after flush)
-			T16 exact_total16; // sum of values at level 16 since last flush (fits in T16 after flush)
-			T32 exact_total32; // sum of values at level 32 since last flush (fits in T32 after flush)
-			T64 exact_total64; // sum of values at level 64 since last flush
-
-			// All levels lazily allocated via arena allocator (nullptr if not allocated)
-			uint64_t *probabilistic_total8;    // 8 x uint64_t (64 bytes) when allocated, each holds 8 packed T8
-			uint64_t *probabilistic_total16;   // 16 x uint64_t (128 bytes) when allocated, each holds 4 packed T16
-			uint64_t *probabilistic_total32;   // 32 x uint64_t (256 bytes) when allocated, each holds 2 packed T32
-			uint64_t *probabilistic_total64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
-			hugeint_t *probabilistic_total128; // 64 x hugeint_t (1024 bytes) when allocated
-		};
-	};
-
-	bool IsBuffering() const {
-#ifdef PAC_SUMAVG_NOBUFFERING
-		return false; // buffering disabled at compile time
-#else
-		return buffering;
+	// Field ordering optimized for memory layout:
+	// 1. seen_null (1 byte)
+	// 2. exact_totals (sized to fit level's range - value is always valid after flush)
+	// 3. exact_count
+	// 4. allocator pointer
+	// 5. probabilistic pointers (lazily allocated)
+#ifdef PAC_SUMAVG_UNSAFENULL
+	bool seen_null;
 #endif
-	}
+	// Exact subtotals for each level - sized to fit level's representable range.
+	// After any Flush, exact_totalN is either:
+	//   - the incoming `value` (which fits in TN since it was routed to level N), or
+	//   - `new_total` which we verified fits in TN range before assigning
+	// Flush functions use int64_t for intermediate calculations to detect overflow.
+	T8 exact_total8;   // sum of values at level 8 since last flush (fits in T8 after flush)
+	T16 exact_total16; // sum of values at level 16 since last flush (fits in T16 after flush)
+	T32 exact_total32; // sum of values at level 32 since last flush (fits in T32 after flush)
+	T64 exact_total64; // sum of values at level 64 since last flush
+
+	uint64_t exact_count; // total count of values added (for pac_avg)
+
+	// All levels lazily allocated via arena allocator (nullptr if not allocated)
+	uint64_t *probabilistic_total8;    // 8 x uint64_t (64 bytes) when allocated, each holds 8 packed T8
+	uint64_t *probabilistic_total16;   // 16 x uint64_t (128 bytes) when allocated, each holds 4 packed T16
+	uint64_t *probabilistic_total32;   // 32 x uint64_t (256 bytes) when allocated, each holds 2 packed T32
+	uint64_t *probabilistic_total64;   // 64 x uint64_t (512 bytes) when allocated, each holds 1 T64
+	hugeint_t *probabilistic_total128; // 64 x hugeint_t (1024 bytes) when allocated
 #endif
-#ifdef PAC_SUMAVG_NONCASCADING
-	// NONCASCADING: dummy methods for uniform interface
-	bool IsBuffering() const {
-		return false;
-	}
-	void InitializeAggregationState() {
-	} // no-op - NONCASCADING doesn't buffer
+#ifdef PAC_SUMAVG_NOCASCADING
+	// NOCASCADING: dummy methods for uniform interface
 	void Flush(ArenaAllocator &) {
 	} // no-op
 	void GetTotalsAsDouble(double *dst) const {
@@ -349,18 +290,6 @@ struct PacSumIntState {
 		}
 	}
 
-	// Initialize aggregation state (transition from buffering mode)
-	// Called when buffer is full or at Combine/Finalize time
-	// NOTE: Caller must copy buf_hashes/buf_values to stack BEFORE calling this,
-	// as this method overwrites the union with aggregation state fields.
-	void InitializeAggregationState() {
-		buffering = false;
-		exact_total8 = exact_total16 = exact_total32 = exact_total64 = 0;
-		probabilistic_total8 = probabilistic_total16 = nullptr;
-		probabilistic_total32 = probabilistic_total64 = nullptr;
-		probabilistic_total128 = nullptr;
-	}
-
 	void Flush(ArenaAllocator &allocator) {
 		// Start flushing from the lowest allocated level
 		// (data may have skipped lower levels if values were always large)
@@ -407,16 +336,15 @@ struct PacSumIntState {
 			memset(dst, 0, 64 * sizeof(double));
 		}
 	}
-
-	// Pre-allocate all levels (for NONLAZY mode)
-	void InitializeAllLevels(ArenaAllocator &allocator) {
-		EnsureLevelAllocated(allocator, probabilistic_total8, 8);
-		EnsureLevelAllocated(allocator, probabilistic_total16, 16);
-		EnsureLevelAllocated(allocator, probabilistic_total32, 32);
-		EnsureLevelAllocated(allocator, probabilistic_total64, 64);
-		EnsureLevelAllocated(allocator, probabilistic_total128, idx_t(64));
-	}
 #endif
+
+	// Interface methods for wrapper compatibility
+	PacSumIntState *GetState() {
+		return this;
+	}
+	PacSumIntState *EnsureState(ArenaAllocator &) {
+		return this;
+	}
 };
 
 // Double pac_sum state
@@ -425,45 +353,10 @@ struct PacSumDoubleState {
 #ifdef PAC_SUMAVG_UNSAFENULL
 	bool seen_null;
 #endif
-#ifdef PAC_SUMAVG_FLOAT_CASCADING
-	double exact_total;
-#endif
 	uint64_t exact_count; // total count of values added (for pac_avg)
-#ifdef PAC_SUMAVG_FLOAT_CASCADING
-	// Float cascading: accumulate small values in float subtotal, flush to double total
-	float probabilistic_total_float[64];
-#endif
 	double probabilistic_total[64];
 
-	// Cascade constants for float cascading
-	static constexpr double MaxIncrementFloat32 = 1000000.0;
-	static constexpr double MinIncrementsFloat32 = 16;
-
-	static inline bool FloatSubtotalFitsDouble(double value, double num = 1) {
-		return (value > -MaxIncrementFloat32 * num) && (value < MaxIncrementFloat32 * num);
-	}
-
 	AUTOVECTORIZE inline void Flush32(double value, bool force = false) {
-#ifdef PAC_SUMAVG_FLOAT_CASCADING
-		double raw_subtotal = exact_total + value;
-		bool would_overflow = FloatSubtotalFitsDouble(raw_subtotal, MinIncrementsFloat32);
-		if (would_overflow || force) {
-			for (int i = 0; i < 64; i++) {
-				probabilistic_total[i] += static_cast<double>(probabilistic_total_float[i]);
-			}
-			memset(probabilistic_total_float, 0, sizeof(probabilistic_total_float));
-			exact_total = value;
-		} else {
-			exact_total = raw_subtotal;
-		}
-#endif
-	}
-
-	void Flush(ArenaAllocator &) {
-		// Note: allocator unused - PacSumDoubleState doesn't do lazy allocation
-#ifdef PAC_SUMAVG_FLOAT_CASCADING
-		Flush32(0, true);
-#endif
 	}
 
 	void GetTotalsAsDouble(double *dst) const {
@@ -471,12 +364,57 @@ struct PacSumDoubleState {
 			dst[i] = probabilistic_total[i];
 		}
 	}
-
-	// No buffering for double state (arrays are inline, no lazy allocation)
-	bool IsBuffering() const {
-		return false;
+	// Interface methods for wrapper compatibility
+	void Flush(ArenaAllocator &) {
+	}
+	PacSumDoubleState *GetState() {
+		return this;
+	}
+	PacSumDoubleState *EnsureState(ArenaAllocator &) {
+		return this;
 	}
 };
+
+#ifndef PAC_SUMAVG_NOBUFFERING
+// ============================================================================
+// PacSumStateWrapper: unified buffering wrapper for both int and double states
+// Buffers (hash, value) pairs before allocating the inner state from arena
+// ============================================================================
+template <typename InnerState, typename ValueT>
+struct PacSumStateWrapper {
+	using State = InnerState;
+	using Value = ValueT;
+	static constexpr int BUF_SIZE = 2;
+	static constexpr uint64_t BUF_MASK = 3ULL;
+
+	ValueT val_buf[BUF_SIZE];
+	uint64_t hash_buf[BUF_SIZE];
+	uint64_t exact_count; // tracked separately, merged on flush/combine
+	union {
+		uint64_t n_buffered; // lower 2 bits: count, upper bits: state pointer
+		State *state;
+	};
+
+	State *GetState() const {
+		return reinterpret_cast<State *>(reinterpret_cast<uintptr_t>(state) & ~7ULL);
+	}
+
+	State *EnsureState(ArenaAllocator &a) {
+		State *s = GetState();
+		if (!s) {
+			s = reinterpret_cast<State *>(a.Allocate(sizeof(State)));
+			memset(s, 0, sizeof(State));
+			state = s;
+		}
+		return s;
+	}
+};
+
+// Type aliases for convenience
+template <bool SIGNED>
+using PacSumIntStateWrapper = PacSumStateWrapper<PacSumIntState<SIGNED>, typename PacSumIntState<SIGNED>::T64>;
+using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
+#endif // PAC_SUMAVG_NOBUFFERING
 
 } // namespace duckdb
 

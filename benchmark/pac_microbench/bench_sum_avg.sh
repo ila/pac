@@ -9,11 +9,10 @@
 #
 # Variants:
 #   - standard: DuckDB's native SUM (baseline)
-#   - default: PAC SUM with all optimizations (cascading, lazy alloc, buffering)
-#   - nosimd: PAC SUM with auto-vectorization disabled
-#   - noncascading: PAC SUM without cascading (direct to largest type)
-#   - eageralloc: PAC SUM with eager level allocation (grouped tests only)
+#   - default: PAC SUM with all optimizations (buffering, cascading)
 #   - nobuffering: PAC SUM without input buffering (grouped tests only)
+#   - nocascading: PAC SUM without cascading (direct to largest type)
+#   - nosimd: PAC SUM nocascading with simd-unfriendly update kernel and auto-vectorization disabled
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,10 +21,10 @@ source "$SCRIPT_DIR/common.sh"
 RESULTS_FILE="$RESULTS_DIR/sum_avg_$(date +%Y%m%d_%H%M%S).csv"
 
 # Variants for ungrouped tests (eageralloc/nobuffering don't affect ungrouped)
-UNGROUPED_VARIANTS=(standard default nosimd noncascading)
+UNGROUPED_VARIANTS=(standard default nobuffering nocascading nosimd)
 
 # Variants for grouped tests (includes allocation/buffering variants)
-GROUPED_VARIANTS=(standard default nosimd noncascading eageralloc nobuffering)
+GROUPED_VARIANTS=(standard default nobuffering nocascading)
 
 # Get binary for variant
 get_binary() {

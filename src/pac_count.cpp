@@ -1,12 +1,11 @@
+#include <locale>
 #include "include/pac_count.hpp"
 
 namespace duckdb {
 
-static unique_ptr<FunctionData> // Bind function for pac_count with optional mi parameter (must be constant)
-PacCountBind(ClientContext &ctx, AggregateFunction &func, vector<unique_ptr<Expression>> &args) {
-	double mi = 128.0; // default
-
-	// Handle mi parameter - check each argument position for a foldable numeric constant
+static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFunction &func,
+                                             vector<unique_ptr<Expression>> &args) {
+	double mi = 128.0;
 	for (idx_t i = 1; i < args.size(); i++) {
 		auto &arg = args[i];
 		if (arg->IsFoldable() && (arg->return_type.IsNumeric() || arg->return_type.id() == LogicalTypeId::UNKNOWN)) {
@@ -20,163 +19,47 @@ PacCountBind(ClientContext &ctx, AggregateFunction &func, vector<unique_ptr<Expr
 			}
 		}
 	}
-
 	uint64_t seed = std::random_device {}();
 	Value pac_seed_val;
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
-
-	bool use_deterministic_noise = false;
-	Value pac_det_noise_val;
-	if (ctx.TryGetCurrentSetting("pac_deterministic_noise", pac_det_noise_val) && !pac_det_noise_val.IsNull()) {
-		use_deterministic_noise = pac_det_noise_val.GetValue<bool>();
-	}
-
-	return make_uniq<PacBindData>(mi, seed, 1.0, use_deterministic_noise);
+	return make_uniq<PacBindData>(mi, seed);
 }
 
+// State types: simple (non-scatter) always uses PacCountState directly
+// Scatter uses PacCountStateWrapper for buffering (unless NOBUFFERING or NOCASCADING)
+#if defined(PAC_COUNT_NOBUFFERING) || defined(PAC_COUNT_NOCASCADING)
+using ScatterState = PacCountState;
+#else
+using ScatterState = PacCountStateWrapper;
+#endif
+
+// State functions - uses ScatterState for both simple and scatter
 static idx_t PacCountStateSize(const AggregateFunction &) {
-	return sizeof(PacCountState);
+	return sizeof(ScatterState);
 }
 
 static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
-	memset(state_ptr, 0, sizeof(PacCountState));
-#if !defined(PAC_COUNT_NONBANKED) && !defined(PAC_COUNT_NOBUFFERING)
-	reinterpret_cast<PacCountState *>(state_ptr)->buffering = true;
-#endif
+	memset(state_ptr, 0, sizeof(ScatterState));
 }
 
-#ifdef PAC_COUNT_NONBANKED
-AUTOVECTORIZE static inline void PacCountUpdateHash(uint64_t key_hash, PacCountState &state) {
-	for (int j = 0; j < 64; j++) {
-		state.probabilistic_total[j] += (key_hash >> j) & 1ULL;
-	}
-}
-#else
-// Forward declaration
-AUTOVECTORIZE static inline void PacCountUpdateHashAggregation(uint64_t key_hash, PacCountState &state,
-                                                               ArenaAllocator &allocator);
-
-// Flush buffer and process buffered hashes
-static inline void FlushBufferIfNeeded(PacCountState &state, ArenaAllocator &allocator) {
-#ifndef PAC_COUNT_NOBUFFERING
-	if (state.IsBuffering()) {
-		// Save buffered hashes before AllocateFirstLevel overwrites union
-		uint64_t saved_hashes[PacCountState::BUFFER_CAPACITY];
-		uint8_t buf_count = state.GetBufferCount();
-		for (uint8_t i = 0; i < buf_count; i++) {
-			saved_hashes[i] = state.buf_hashes[i];
-		}
-		// Transition to aggregation mode
-		state.AllocateFirstLevel(allocator);
-		// Process buffered hashes
-		for (uint8_t i = 0; i < buf_count; i++) {
-			PacCountUpdateHashAggregation(saved_hashes[i], state, allocator);
-		}
-	}
-#endif
-}
-
-// Flush src's buffer directly into dst
-static inline bool FlushSrcBufferIntoDst(PacCountState *src, PacCountState *dst, ArenaAllocator &allocator) {
-#ifndef PAC_COUNT_NOBUFFERING
-	if (src->IsBuffering()) {
-		uint8_t buf_count = src->GetBufferCount();
-		for (uint8_t i = 0; i < buf_count; i++) {
-			PacCountUpdateHashAggregation(src->buf_hashes[i], *dst, allocator);
-		}
-		return true;
-	}
-#endif
-	return false;
-}
-
-// Core aggregation logic (no buffering check)
-AUTOVECTORIZE static inline void PacCountUpdateHashAggregation(uint64_t key_hash, PacCountState &state,
-                                                               ArenaAllocator &allocator) {
-#ifdef PAC_COUNT_NONLAZY
-	// Pre-allocate all banks on first update
-	if (state.total_level == 0) {
-		state.AllocateBanks(allocator, 64);
-		state.total_level = 64;
-	}
-#endif
-	// SWAR update to subtotal8 (banks0)
-	auto *subtotal8 = state.GetSubtotal8();
-	for (int j = 0; j < 8; j++) {
-		subtotal8[j] += (key_hash >> j) & PAC_COUNT_MASK;
-	}
-	// Flush if subtotal8 would overflow
-	if (++state.subtotal8_count == 255) {
-		state.Flush(allocator);
-	}
-}
-
-AUTOVECTORIZE static inline void PacCountUpdateHash(uint64_t key_hash, PacCountState &state,
-                                                    ArenaAllocator &allocator) {
-#ifndef PAC_COUNT_NOBUFFERING
-	// Try to buffer the hash
-	if (state.IsBuffering()) {
-		uint8_t buf_idx = state.GetBufferCount();
-		if (buf_idx < PacCountState::BUFFER_CAPACITY) {
-			state.buf_hashes[buf_idx] = key_hash;
-			state.SetBufferCount(buf_idx + 1);
-			return;
-		}
-		// Buffer full - flush it
-		FlushBufferIfNeeded(state, allocator);
-	}
-#else
-	// NOBUFFERING: ensure first level allocated
-	if (!state.banks0) {
-		state.AllocateFirstLevel(allocator);
-	}
-#endif
-	PacCountUpdateHashAggregation(key_hash, state, allocator);
-}
-#endif
-
-#ifdef PAC_COUNT_NONBANKED
-#define UPDATE_HASH(hash, state, allocator) PacCountUpdateHash(hash, state)
-#else
-#define UPDATE_HASH(hash, state, allocator) PacCountUpdateHash(hash, state, allocator)
-#endif
-
-// Row-based update functions
-void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_total, data_ptr_t state_ptr, idx_t count) {
-	D_ASSERT(input_total == 1 || input_total == 2);
-	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
+// Non-grouped update - uses ScatterState with buffering
+void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
+	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) {
-			UPDATE_HASH(input_data[idx], state, aggr.allocator);
+			PacCountUpdateOne(agg, input_data[idx], aggr.allocator);
 		}
 	}
 }
 
-void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
-	UnifiedVectorFormat idata, sdata;
-	inputs[0].ToUnifiedFormat(count, idata);
-	states.ToUnifiedFormat(count, sdata);
-	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
-	auto state_p = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
-	for (idx_t i = 0; i < count; i++) {
-		auto idx = idata.sel->get_index(i);
-		if (idata.validity.RowIsValid(idx)) {
-			UPDATE_HASH(input_data[idx], *state_p[sdata.sel->get_index(i)], aggr.allocator);
-		}
-	}
-}
-
-// Column-based update functions (count non-null values)
-void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_total, data_ptr_t state_ptr,
-                          idx_t count) {
-	D_ASSERT(input_total >= 2);
-	auto &state = *reinterpret_cast<PacCountState *>(state_ptr);
+void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
+	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
 	UnifiedVectorFormat hash_data, col_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -185,7 +68,22 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input
 		auto h_idx = hash_data.sel->get_index(i);
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
-			UPDATE_HASH(hashes[h_idx], state, aggr.allocator);
+			PacCountUpdateOne(agg, hashes[h_idx], aggr.allocator);
+		}
+	}
+}
+
+// Scatter update - uses ScatterState
+void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
+	UnifiedVectorFormat idata, sdata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	states.ToUnifiedFormat(count, sdata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
+	auto state_p = UnifiedVectorFormat::GetData<ScatterState *>(sdata);
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = idata.sel->get_index(i);
+		if (idata.validity.RowIsValid(idx)) {
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
 		}
 	}
 }
@@ -196,123 +94,57 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 	inputs[1].ToUnifiedFormat(count, col_data);
 	states.ToUnifiedFormat(count, sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto state_p = UnifiedVectorFormat::GetData<PacCountState *>(sdata);
+	auto state_p = UnifiedVectorFormat::GetData<ScatterState *>(sdata);
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
-			UPDATE_HASH(hashes[h_idx], *state_p[sdata.sel->get_index(i)], aggr.allocator);
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx], aggr.allocator);
 		}
 	}
 }
 
-#ifdef PAC_COUNT_NONBANKED
-AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
-	auto src_state = FlatVector::GetData<PacCountState *>(src);
-	auto dst_state = FlatVector::GetData<PacCountState *>(dst);
+// Combine - flush src's buffer into dst (don't allocate src), then merge states
+void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
+	auto sa = FlatVector::GetData<ScatterState *>(src);
+	auto da = FlatVector::GetData<ScatterState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
-		for (int j = 0; j < 64; j++) {
-			dst_state[i]->probabilistic_total[j] += src_state[i]->probabilistic_total[j];
-		}
-	}
-}
-#else
-static inline int RequiredLevel(uint64_t count) {
-	return (count <= UINT16_MAX) ? 16 : (count <= UINT32_MAX) ? 32 : 64;
-}
-
-// Combine src banks into dst banks (supports same type or widening)
-template <typename DST_T, typename SRC_T = DST_T>
-AUTOVECTORIZE static inline void CombineBanks(PacCountState *d, const PacCountState *s) {
-	constexpr int ELEMS_PER_BANK = 64 / sizeof(DST_T);
-	int num_banks = PacCountState::BanksForLevel(sizeof(DST_T) * 8);
-	for (int b = 0; b < num_banks; b++) {
-		auto *dp = reinterpret_cast<DST_T *>(d->GetBank(b + 1)); // +1 to skip banks0 (subtotal8)
-		for (int j = 0; j < ELEMS_PER_BANK; j++) {
-			dp[j] += s->GetTotalElement<SRC_T>(b * ELEMS_PER_BANK + j);
-		}
-	}
-}
-
-AUTOVECTORIZE void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
-	auto src_state = FlatVector::GetData<PacCountState *>(src);
-	auto dst_state = FlatVector::GetData<PacCountState *>(dst);
-	for (idx_t i = 0; i < count; i++) {
-		auto *s = src_state[i];
-		auto *d = dst_state[i];
-
-		// First flush dst's buffer (allocates in dst which we keep)
-		FlushBufferIfNeeded(*d, aggr.allocator);
-
-		// If src is buffering, flush its values directly into dst (avoids allocating in src)
-		if (FlushSrcBufferIntoDst(s, d, aggr.allocator)) {
-			continue;
-		}
-
-		s->Flush(aggr.allocator);
-		d->Flush(aggr.allocator);
-		if (s->total_level == 0)
-			continue;
-
-		// Determine required level (max of src, dst, and level needed for sum)
-		uint64_t combined_max = s->GetMaxPossibleCount() + d->GetMaxPossibleCount();
-		int required = RequiredLevel(combined_max);
-		if (s->total_level > required)
-			required = s->total_level;
-		if (d->total_level > required)
-			required = d->total_level;
-
-		// Initialize or upgrade dst to required level
-		if (d->total_level == 0) {
-			d->AllocateBanks(aggr.allocator, required);
-			d->total_level = required;
-		}
-		if (d->total_level == 16 && required > 16)
-			d->UpgradeTotal<uint16_t, uint32_t>(aggr.allocator, 32);
-		if (d->total_level == 32 && required > 32)
-			d->UpgradeTotal<uint32_t, uint64_t>(aggr.allocator, 64);
-
-		// Combine based on dst level and src level
-		if (d->total_level == 16) {
-			CombineBanks<uint16_t>(d, s);
-		} else if (d->total_level == 32) {
-			if (s->total_level == 32)
-				CombineBanks<uint32_t>(d, s);
-			else
-				CombineBanks<uint32_t, uint16_t>(d, s);
-		} else {
-			if (s->total_level == 64)
-				CombineBanks<uint64_t>(d, s);
-			else if (s->total_level == 32)
-				CombineBanks<uint64_t, uint32_t>(d, s);
-			else
-				CombineBanks<uint64_t, uint16_t>(d, s);
-		}
-	}
-}
+		// Push src data into dst
+#if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
+		sa[i]->FlushBuffer(*da[i], aggr.allocator);
 #endif
+		PacCountState *ss = sa[i]->GetState();
+		if (ss) {
+			PacCountState &ds = *da[i]->EnsureState(aggr.allocator);
+			ss->FlushLevel();
+			for (int j = 0; j < 64; j++) {
+				ds.probabilistic_total[j] += ss->probabilistic_total[j];
+			}
+		}
+	}
+}
 
+// Finalize - uses ScatterState
 void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	auto state = FlatVector::GetData<PacCountState *>(states);
+	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	std::mt19937_64 gen(seed);
 	double mi = input.bind_data->Cast<PacBindData>().mi;
-	bool use_deterministic_noise =
-	    input.bind_data ? input.bind_data->Cast<PacBindData>().use_deterministic_noise : true;
-
+	double buf[64];
 	for (idx_t i = 0; i < count; i++) {
-#ifndef PAC_COUNT_NONBANKED
-		// Flush any buffered values before finalization
-		FlushBufferIfNeeded(*state[i], input.allocator);
-		// Ensure banks0 is allocated (for states that only received data via Combine)
-		state[i]->EnsureBanks0Allocated(input.allocator);
+#if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
+		aggs[i]->FlushBuffer(*aggs[i], input.allocator);
 #endif
-		state[i]->Flush(input.allocator);
-		double buf[64];
-		state[i]->GetTotalsAsDouble(buf);
-		data[offset + i] = static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen, use_deterministic_noise)) +
-		                   static_cast<int64_t>(buf[41]);
+		PacCountState *s = aggs[i]->GetState();
+		if (s) {
+			s->FlushLevel();
+			s->GetTotalsAsDouble(buf);
+		} else {
+			memset(buf, 0, sizeof(buf));
+		}
+		data[offset + i] =
+		    static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen)) + static_cast<int64_t>(buf[41]);
 	}
 }
 
