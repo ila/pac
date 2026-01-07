@@ -149,7 +149,7 @@ struct PacCountStateWrapper {
 	}
 
 	// Flush buffered hashes + key_hash into dst state
-	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t cnt) {
+	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *__restrict__ hash_buf, uint64_t cnt) {
 		if (cnt + dst.exact_total8 >= 255) {
 			dst.FlushLevel(); // make room
 		}
@@ -162,7 +162,7 @@ struct PacCountStateWrapper {
 		uint64_t cnt = agg.n_buffered & 7;
 		if (cnt > 0) {
 			auto dst = *agg.EnsureState(a);
-			FlushBufferInternal(dst, cnt);
+			FlushBufferInternal(dst, agg.hash_buf, cnt);
 			agg.n_buffered &= ~7ULL;
 			dst.exact_total8 += cnt;
 		}
@@ -175,8 +175,8 @@ AUTOVECTORIZE inline void PacCountUpdateOne(PacCountStateWrapper &agg, uint64_t 
 	if (DUCKDB_UNLIKELY(cnt == 3)) {
 		auto &dst = *agg.EnsureState(a);
 		auto n_buffered = agg.n_buffered & ~7ULL;
-		agg.n_buffered = key_hash;       // hack: overwrite pointer temporarily
-		agg.FlushBufferInternal(dst, 4); // we now have a buffer of 4
+		agg.n_buffered = key_hash;                     // hack: overwrite pointer temporarily
+		agg.FlushBufferInternal(dst, agg.hash_buf, 4); // we now have a buffer of 4
 		agg.n_buffered = n_buffered;
 		dst.exact_total8 += 4; // 3 buffered plus the new one (key_hash)
 	} else {
