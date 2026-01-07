@@ -132,7 +132,7 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 
 // Build a map from table_index to table name for PU tables
 static void BuildTableIndexMap(const LogicalOperator &op, const std::unordered_set<string> &pu_tables,
-                                std::unordered_map<idx_t, string> &table_index_map) {
+                               std::unordered_map<idx_t, string> &table_index_map) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
 		auto table_entry = get.GetTable();
@@ -191,7 +191,8 @@ static void ValidatePUColumnsInExpression(const Expression &expr,
 }
 
 // Validate that PU columns are not in GROUP BY and are only accessed inside aggregates
-static void ValidatePUColumnUsage(const LogicalOperator &op, const std::unordered_map<idx_t, string> &pu_table_indices) {
+static void ValidatePUColumnUsage(const LogicalOperator &op,
+                                  const std::unordered_map<idx_t, string> &pu_table_indices) {
 	// Check GROUP BY clauses in aggregates
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &aggr = op.Cast<LogicalAggregate>();

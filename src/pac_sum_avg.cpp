@@ -104,16 +104,17 @@ AUTOVECTORIZE inline void PacSumUpdateOne(ScatterIntState<SIGNED> &state, uint64
 
 #else // Buffering enabled
 
-// Unified FlushBuffer - works for both int and double wrappers
+// Unified FlushBuffer - flushes src's buffer into dst's inner state
+// To flush into self, pass same wrapper for both src and dst
 template <bool SIGNED, typename WrapperT>
-inline void PacSumFlushBuffer(WrapperT &agg, ArenaAllocator &a) {
-	uint64_t cnt = agg.n_buffered & WrapperT::BUF_MASK;
+inline void PacSumFlushBuffer(WrapperT &src, WrapperT &dst, ArenaAllocator &a) {
+	uint64_t cnt = src.n_buffered & WrapperT::BUF_MASK;
 	if (cnt > 0) {
-		auto &dst = *agg.EnsureState(a);
+		auto &dst_inner = *dst.EnsureState(a);
 		for (uint64_t i = 0; i < cnt; i++) {
-			PacSumUpdateOneInternal<SIGNED>(dst, agg.hash_buf[i], agg.val_buf[i], a);
+			PacSumUpdateOneInternal<SIGNED>(dst_inner, src.hash_buf[i], src.val_buf[i], a);
 		}
-		agg.n_buffered &= ~WrapperT::BUF_MASK;
+		src.n_buffered &= ~WrapperT::BUF_MASK;
 	}
 }
 
@@ -250,8 +251,8 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_SUMAVG_NOBUFFERING
-		// Flush src's buffer into src's inner state before combining
-		PacSumFlushBuffer<SIGNED>(*src_wrapper[i], allocator);
+		// Flush src's buffer into dst's inner state (avoids allocating src inner)
+		PacSumFlushBuffer<SIGNED>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
 		auto *s = src_wrapper[i]->GetState();
 		auto *d_wrapper = dst_wrapper[i];
@@ -319,8 +320,8 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 	auto dst_wrapper = FlatVector::GetData<ScatterDoubleState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_SUMAVG_NOBUFFERING
-		// Flush src's buffer into src's inner state before combining
-		PacSumFlushBuffer<true>(*src_wrapper[i], allocator);
+		// Flush src's buffer into dst's inner state (avoids allocating src inner)
+		PacSumFlushBuffer<true>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
 		auto *s = src_wrapper[i]->GetState();
 		auto *d_wrapper = dst_wrapper[i];
@@ -363,7 +364,7 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_SUMAVG_NOBUFFERING
-		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], input.allocator);
+		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 #endif
 		auto *s = state_ptrs[i]->GetState();
 #ifdef PAC_SUMAVG_UNSAFENULL

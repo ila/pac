@@ -68,7 +68,7 @@ PAC_COUNT_NOSIMD only makes sense in combination with PAC_COUNT_NOCASCADING
 		}
 		const uint8_t *src = reinterpret_cast<const uint8_t *>(probabilistic_total8);
 		for (int bit = 0; bit < 64; bit++) {
-			probabilistic_total[bit] += src[bit]; // we ignore SWAR order-changing here (does not matter for noising)
+			probabilistic_total[bit] += src[bit];
 		}
 		memset(probabilistic_total8, 0, sizeof(probabilistic_total8));
 		exact_total8 = 0;
@@ -158,12 +158,13 @@ struct PacCountStateWrapper {
 		}
 	}
 
-	inline void FlushBuffer(PacCountStateWrapper &agg, ArenaAllocator &a) {
-		uint64_t cnt = agg.n_buffered & 7;
+	inline void FlushBuffer(PacCountStateWrapper &dst_wrapper, ArenaAllocator &a) {
+		// Flush THIS wrapper's buffer into dst_wrapper's inner state
+		uint64_t cnt = n_buffered & 7;
 		if (cnt > 0) {
-			auto dst = *agg.EnsureState(a);
-			FlushBufferInternal(dst, agg.hash_buf, cnt);
-			agg.n_buffered &= ~7ULL;
+			auto &dst = *dst_wrapper.EnsureState(a);
+			FlushBufferInternal(dst, hash_buf, cnt);
+			n_buffered &= ~7ULL;
 			dst.exact_total8 += cnt;
 		}
 	}

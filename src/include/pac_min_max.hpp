@@ -396,12 +396,13 @@ struct PacMinMaxStateWrapper {
 		dst.RecomputeBound();
 	}
 
-	inline void FlushBuffer(PacMinMaxStateWrapper &agg, ArenaAllocator &a) {
-		uint64_t cnt = agg.n_buffered & BUF_MASK;
+	inline void FlushBuffer(PacMinMaxStateWrapper &dst_wrapper, ArenaAllocator &a) {
+		// Flush THIS wrapper's buffer into dst_wrapper's inner state
+		uint64_t cnt = n_buffered & BUF_MASK;
 		if (cnt > 0) {
-			State &dst = *agg.EnsureState(a);
-			FlushBufferInternal(dst, agg.val_buf, agg.hash_buf, cnt);
-			agg.n_buffered &= ~BUF_MASK;
+			State &dst = *dst_wrapper.EnsureState(a);
+			FlushBufferInternal(dst, val_buf, hash_buf, cnt);
+			n_buffered &= ~BUF_MASK;
 		}
 	}
 };

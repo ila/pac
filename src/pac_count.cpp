@@ -109,7 +109,6 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 	auto sa = FlatVector::GetData<ScatterState *>(src);
 	auto da = FlatVector::GetData<ScatterState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
-		// Push src data into dst
 #if !defined(PAC_COUNT_NOBUFFERING) && !defined(PAC_COUNT_NOCASCADING)
 		sa[i]->FlushBuffer(*da[i], aggr.allocator);
 #endif
