@@ -173,16 +173,6 @@ double ComputeDeltaFromValues(const vector<double> &values, double mi) {
 	return delta;
 }
 
-// Wrapper function that handles both deterministic and standard noise generation
-// When use_deterministic_noise is true, it uses the same Box-Muller approach as already used in
-// PacNoisySampleFrom64Counters
-double PacNoisySampleFrom64CountersDeterministic(const double counters[64], double mi, std::mt19937_64 &gen,
-                                                 bool use_deterministic_noise) {
-	// The existing PacNoisySampleFrom64Counters already uses deterministic Box-Muller
-	// so we just call it directly - it's already platform-agnostic!
-	return PacNoisySampleFrom64Counters(counters, mi, gen);
-}
-
 unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
                                                 FunctionData *bind_data) {
 	// Single source-of-truth: prefer seed supplied via bind_data (PacBindData). Do NOT read the session
