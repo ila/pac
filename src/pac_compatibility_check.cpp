@@ -2,10 +2,13 @@
 #include "include/pac_helpers.hpp"
 
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 
 #include <algorithm>
 #include <unordered_map>
@@ -124,6 +127,100 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 	}
 	for (auto &child : op.children) {
 		CountScans(*child, counts);
+	}
+}
+
+// Build a map from table_index to table name for PU tables
+static void BuildTableIndexMap(const LogicalOperator &op, const std::unordered_set<string> &pu_tables,
+                                std::unordered_map<idx_t, string> &table_index_map) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		auto table_entry = get.GetTable();
+		if (table_entry && pu_tables.count(table_entry->name) > 0) {
+			table_index_map[get.table_index] = table_entry->name;
+		}
+	}
+	for (auto &child : op.children) {
+		BuildTableIndexMap(*child, pu_tables, table_index_map);
+	}
+}
+
+// Check if an expression references a PU column (by table_index)
+static bool ExpressionReferencesPUColumn(const Expression &expr,
+                                         const std::unordered_map<idx_t, string> &pu_table_indices) {
+	bool references_pu = false;
+	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+		if (child.type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &colref = child.Cast<BoundColumnRefExpression>();
+			if (pu_table_indices.count(colref.binding.table_index) > 0) {
+				references_pu = true;
+			}
+		}
+	});
+	return references_pu;
+}
+
+// Check if expression tree contains PU columns outside of aggregate functions
+static void ValidatePUColumnsInExpression(const Expression &expr,
+                                          const std::unordered_map<idx_t, string> &pu_table_indices,
+                                          bool inside_aggregate = false) {
+	// If this is an aggregate expression, mark that we're inside an aggregate
+	if (expr.IsAggregate()) {
+		auto &agg = expr.Cast<BoundAggregateExpression>();
+		// Recursively check children with inside_aggregate = true
+		for (auto &child : agg.children) {
+			ValidatePUColumnsInExpression(*child, pu_table_indices, true);
+		}
+		return;
+	}
+
+	// If this is a column reference to a PU table and we're not inside an aggregate, error
+	if (expr.type == ExpressionType::BOUND_COLUMN_REF && !inside_aggregate) {
+		auto &colref = expr.Cast<BoundColumnRefExpression>();
+		if (pu_table_indices.count(colref.binding.table_index) > 0) {
+			throw InvalidInputException(
+			    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions "
+			    "(e.g., SUM, COUNT, AVG, MIN, MAX)");
+		}
+	}
+
+	// Recurse into children
+	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+		ValidatePUColumnsInExpression(child, pu_table_indices, inside_aggregate);
+	});
+}
+
+// Validate that PU columns are not in GROUP BY and are only accessed inside aggregates
+static void ValidatePUColumnUsage(const LogicalOperator &op, const std::unordered_map<idx_t, string> &pu_table_indices) {
+	// Check GROUP BY clauses in aggregates
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op.Cast<LogicalAggregate>();
+
+		// Check GROUP BY expressions - PU columns are not allowed
+		for (auto &group_expr : aggr.groups) {
+			if (ExpressionReferencesPUColumn(*group_expr, pu_table_indices)) {
+				throw InvalidInputException(
+				    "PAC rewrite: columns from privacy unit tables cannot be used in GROUP BY clauses");
+			}
+		}
+
+		// Check aggregate expressions - ensure PU columns only appear inside aggregates
+		for (auto &agg_expr : aggr.expressions) {
+			ValidatePUColumnsInExpression(*agg_expr, pu_table_indices, false);
+		}
+	}
+
+	// Check projections
+	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = op.Cast<LogicalProjection>();
+		for (auto &expr : proj.expressions) {
+			ValidatePUColumnsInExpression(*expr, pu_table_indices, false);
+		}
+	}
+
+	// Recurse into children
+	for (auto &child : op.children) {
+		ValidatePUColumnUsage(*child, pu_table_indices);
 	}
 }
 
@@ -303,6 +400,15 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	if (result.fk_paths.empty() && result.scanned_pu_tables.empty()) {
 		// No FK paths and no scanned PAC tables: nothing to do
 		return result;
+	}
+
+	// Build table_index to table name map for PU tables
+	std::unordered_map<idx_t, string> pu_table_indices;
+	BuildTableIndexMap(plan, pac_set, pu_table_indices);
+
+	// Validate column-level restrictions for PU tables
+	if (!pu_table_indices.empty()) {
+		ValidatePUColumnUsage(plan, pu_table_indices);
 	}
 
 	// Structural checks (throw when invalid)

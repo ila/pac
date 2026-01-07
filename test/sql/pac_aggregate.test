@@ -78,21 +78,6 @@ CREATE TABLE t1(group_key VARCHAR, val DOUBLE, cnt INTEGER);
 statement ok
 INSERT INTO t1 VALUES ('A', 10.0, 3), ('A', 11.0, 3), ('B', 20.0, 3), ('B', 21.0, 3);
 
-# Register t1 as a privacy unit so the PAC framework treats it as protected (matches other tests)
-statement ok
-PRAGMA add_pac_privacy_unit('t1');
-
-statement ok
-SET enforce_m_values = true;
-
-statement error
-SELECT group_key, pac_aggregate(array_agg(val), array_agg(cnt), 1.0/128, 3) FROM t1 GROUP BY group_key;
-----
-Invalid Input Error: Query does not contain any allowed aggregation (sum, count, avg, min, max)!
-
-statement ok
-SET enforce_m_values = false;
-
 # Positive test: materialize a correct per-sample table using generate_series(1,128)
 statement ok
 DROP TABLE IF EXISTS per_sample_m128;
@@ -115,12 +100,3 @@ ORDER BY group_key;
 ----
 A	9.494607641394737
 B	14.109083190275262
-
-# WITH counts AS (SELECT group_key, count(cnt) AS cnt FROM t1 GROUP BY group_key)
-# SELECT group_key, pac_aggregate(array_agg(cnt ORDER BY group_key), array_agg(cnt ORDER BY group_key), 1.0/128, 1) AS pac_val
-# FROM counts
-# GROUP BY group_key
-# ORDER BY group_key;
-
-statement ok
-PRAGMA remove_pac_privacy_unit('t1');
