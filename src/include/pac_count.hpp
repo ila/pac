@@ -63,8 +63,11 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 #endif
 
-    // SWAR-optimized state
-    struct PacCountState {
+    template <typename S> // forward template declaration
+    static inline void PacCountUpdateOne(S &agg, uint64_t hash, ArenaAllocator &a);
+
+// SWAR-optimized state
+struct PacCountState {
 #ifndef PAC_COUNT_NOCASCADING
 	uint64_t probabilistic_total8[8]; // SWAR packed uint8_t counters
 	uint8_t exact_total8;             // counts updates, flush at 255
@@ -94,10 +97,6 @@ PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
 		return this;
 	}
 };
-
-// Update one hash - direct for PacCountState (always available)
-template <typename S>
-static inline void PacCountUpdateOne(S &agg, uint64_t hash, ArenaAllocator &a);
 
 #ifdef PAC_COUNT_NOCASCADING
 // NOCASCADING: simple direct update to uint64_t[64]
