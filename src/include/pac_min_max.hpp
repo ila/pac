@@ -73,7 +73,7 @@ AUTOVECTORIZE inline void UpdateExtremesSIMD(T *extremes, uint64_t key_hash, T v
 			value_u.val = PAC_BETTER(value, extreme_u.val);
 			result_u.bits = (value_u.bits & mask) | (extreme_u.bits & ~mask); // masking on bits
 			extremes[i] = result_u.val; // same value but now viewed as (multiple SWAR) values of type T
-		} else {                     // only unsigned integer types T below here; this is a bit faster:
+		} else {                        // only unsigned integer types T below here; this is a bit faster:
 			// for unsigned max, we can zero the value if not selected, and run max(result,extreme)
 			// for unsigned min, we can set all bits of the value if not selected, and run min(result,extreme)
 			value_u.val = value;

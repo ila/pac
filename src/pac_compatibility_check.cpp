@@ -337,6 +337,28 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Attach discovered fk_paths to the result
 	result.fk_paths = std::move(fk_paths);
 
+	// Structural checks BEFORE deciding eligibility (throw when invalid)
+	// These checks must run for ALL queries that scan privacy unit tables
+	if (!result.scanned_pu_tables.empty()) {
+		if (ContainsWindowFunction(*plan)) {
+			throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
+		}
+		if (!ContainsAggregation(*plan)) {
+			throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
+		}
+		if (ContainsLogicalDistinct(*plan)) {
+			throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
+		}
+
+		// Check that GROUP BY columns don't come from PU tables
+		// (PU columns can only be accessed inside aggregate functions)
+		{
+			ReplanGuard guard(optimizer_info);
+			ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan);
+		}
+		CheckGroupByColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables);
+	}
+
 	// If any scanned table is linked to a privacy unit via FKs, trigger PAC compilation.
 	// This should not raise errors — we accept the plan and let the rewriter handle it.
 	for (auto &kv : result.fk_paths) {
@@ -349,27 +371,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	if (result.fk_paths.empty() && result.scanned_pu_tables.empty()) {
 		// No FK paths and no scanned PAC tables: nothing to do
 		return result;
-	}
-
-	// Structural checks (throw when invalid)
-	if (ContainsWindowFunction(*plan)) {
-		throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
-	}
-	if (!ContainsAggregation(*plan)) {
-		throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
-	}
-	if (ContainsLogicalDistinct(*plan)) {
-		throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
-	}
-
-	// Check that GROUP BY columns don't come from PU tables
-	// (PU columns can only be accessed inside aggregate functions)
-	CheckGroupByColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables);
-
-	// Replan with selected optimizers disabled but keeping JOIN_ORDER enabled for final compilation
-	{
-		ReplanGuard guard(optimizer_info);
-		ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan, /*disable_join_order=*/false);
 	}
 
 	// If we reach here, the plan is eligible for rewrite/compilation

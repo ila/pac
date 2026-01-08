@@ -288,6 +288,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		pu_present_in_tree = true;
 	}
 
+	// Replan with selected optimizers disabled
+	ReplanWithoutOptimizers(input.context, input.context.GetCurrentQuery(), plan);
+
 	// Case a) query scans PU table (we assume only 1 PAC table for now)
 	vector<string> pks;
 	// Build two vectors: present (GETs already in the plan) and missing (GETs to create)

@@ -6,7 +6,7 @@
 
 #include "duckdb/main/connection.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "duckdb/planner/planner.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -19,11 +19,11 @@
 #include "include/pac_compatibility_check.hpp"
 
 #include <vector>
+#include <duckdb/planner/planner.hpp>
 
 namespace duckdb {
 
-void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan,
-                             bool disable_join_order) {
+void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan) {
 	auto &config = DBConfig::GetConfig(context);
 
 	// Save the original disabled optimizers
@@ -35,9 +35,6 @@ void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique
 	config.options.disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
 	config.options.disabled_optimizers.insert(OptimizerType::EXPRESSION_REWRITER);
 	config.options.disabled_optimizers.insert(OptimizerType::FILTER_PUSHDOWN);
-	if (disable_join_order) {
-		config.options.disabled_optimizers.insert(OptimizerType::JOIN_ORDER);
-	}
 
 	Parser parser;
 	Planner planner(context);
