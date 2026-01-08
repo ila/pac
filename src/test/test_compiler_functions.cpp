@@ -7,8 +7,10 @@
 #include <set>
 
 #include "../include/pac_helpers.hpp"
+#include "../include/pac_compiler_helpers.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_projection.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_dummy_scan.hpp"
+#include "../../duckdb/src/include/duckdb/planner/operator/logical_get.hpp"
 #include "../../duckdb/src/include/duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_join.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_filter.hpp"
@@ -17,7 +19,12 @@
 #include "../../duckdb/src/include/duckdb.hpp"
 #include "../../duckdb/src/include/duckdb/main/connection.hpp"
 #include "../../duckdb/src/include/duckdb/common/constants.hpp"
+#include "../../duckdb/src/include/duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "include/test_compiler_functions.hpp"
+
+#include <duckdb/optimizer/optimizer.hpp>
+#include <duckdb/parser/parser.hpp>
+#include <duckdb/planner/planner.hpp>
 
 namespace duckdb {
 // Use DuckDB-provided vector/unique_ptr/make_uniq; do NOT import std::vector/std::unique_ptr/make_uniq
@@ -652,6 +659,422 @@ int RunCompilerFunctionTests() {
 	code = RunTest("Test_VerifierDetectsDuplicateProducers", Test_VerifierDetectsDuplicateProducers);
 	if (code != 0) {
 		return code;
+	}
+
+	// Comprehensive tests for ColumnBelongsToTable
+	{
+		std::cout << "Running ColumnBelongsToTable tests...\n";
+		DuckDB db(nullptr);
+		Connection con(db);
+		con.BeginTransaction();
+
+		con.Query("CREATE TABLE t1(a INTEGER, b INTEGER);");
+		con.Query("CREATE TABLE t2(x INTEGER, y INTEGER);");
+		con.Query("CREATE TABLE t3(m INTEGER, n INTEGER);");
+
+		con.Query("INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);");
+		con.Query("INSERT INTO t2 VALUES (1, 100), (2, 200);");
+		con.Query("INSERT INTO t3 VALUES (1, 1000), (2, 2000);");
+
+		// Test 1: Simple scan - check that columns from t1 belong to t1
+		{
+			Parser parser;
+			parser.ParseQuery("SELECT a, b FROM t1;");
+
+			Planner planner(*con.context);
+			planner.CreatePlan(std::move(parser.statements[0]));
+			Optimizer opt(*planner.binder, *con.context);
+
+			auto plan = opt.Optimize(std::move(planner.plan));
+
+			// Find the LogicalGet node for t1
+			LogicalGet *get_t1 = nullptr;
+			std::function<void(LogicalOperator &)> find_get = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_GET && !get_t1) {
+					auto &g = op.Cast<LogicalGet>();
+					if (g.GetTable() && g.GetTable()->name == "t1") {
+						get_t1 = &g;
+					}
+				}
+				for (auto &child : op.children) {
+					if (child) {
+						find_get(*child);
+					}
+				}
+			};
+			find_get(*plan);
+
+			if (!get_t1) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: could not find LogicalGet for t1" << std::endl;
+				return 1;
+			}
+
+			// Get bindings from the scan node
+			auto bindings = get_t1->GetColumnBindings();
+			if (bindings.size() < 2) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: expected at least 2 bindings from t1" << std::endl;
+				return 1;
+			}
+
+			// Check that both columns belong to t1
+			if (!ColumnBelongsToTable(*plan, "t1", bindings[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 0 should belong to t1" << std::endl;
+				return 1;
+			}
+			if (!ColumnBelongsToTable(*plan, "t1", bindings[1])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 1 should belong to t1" << std::endl;
+				return 1;
+			}
+			// Check that they don't belong to t2
+			if (ColumnBelongsToTable(*plan, "t2", bindings[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 0 should not belong to t2" << std::endl;
+				return 1;
+			}
+			std::cerr << "PASS: ColumnBelongsToTable test 1 (simple scan)" << std::endl;
+		}
+
+		// Test 2: Join - check columns from different tables
+		{
+			Parser parser;
+			parser.ParseQuery("SELECT t1.a, t2.x FROM t1 INNER JOIN t2 ON t1.a = t2.x;");
+			Planner planner(*con.context);
+			planner.CreatePlan(std::move(parser.statements[0]));
+			Optimizer opt(*planner.binder, *con.context);
+			auto plan = opt.Optimize(std::move(planner.plan));
+
+			// Find LogicalGet nodes for both tables
+			LogicalGet *get_t1 = nullptr;
+			LogicalGet *get_t2 = nullptr;
+			std::function<void(LogicalOperator &)> find_gets = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_GET) {
+					auto &g = op.Cast<LogicalGet>();
+					if (g.GetTable()) {
+						if (g.GetTable()->name == "t1") {
+							get_t1 = &g;
+						} else if (g.GetTable()->name == "t2") {
+							get_t2 = &g;
+						}
+					}
+				}
+				for (auto &child : op.children) {
+					if (child) {
+						find_gets(*child);
+					}
+				}
+			};
+			find_gets(*plan);
+
+			if (!get_t1 || !get_t2) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: could not find both LogicalGet nodes" << std::endl;
+				return 1;
+			}
+
+			auto bindings_t1 = get_t1->GetColumnBindings();
+			auto bindings_t2 = get_t2->GetColumnBindings();
+
+			if (bindings_t1.empty() || bindings_t2.empty()) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: no bindings found" << std::endl;
+				return 1;
+			}
+
+			// Check t1 columns belong to t1 and not t2
+			if (!ColumnBelongsToTable(*plan, "t1", bindings_t1[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t1 column should belong to t1" << std::endl;
+				return 1;
+			}
+			if (ColumnBelongsToTable(*plan, "t2", bindings_t1[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t1 column should not belong to t2" << std::endl;
+				return 1;
+			}
+
+			// Check t2 columns belong to t2 and not t1
+			if (!ColumnBelongsToTable(*plan, "t2", bindings_t2[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t2 column should belong to t2" << std::endl;
+				return 1;
+			}
+			if (ColumnBelongsToTable(*plan, "t1", bindings_t2[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t2 column should not belong to t1" << std::endl;
+				return 1;
+			}
+			std::cerr << "PASS: ColumnBelongsToTable test 2 (join)" << std::endl;
+		}
+
+		// Test 3: Three-way join
+		{
+			Parser parser;
+			parser.ParseQuery("SELECT * FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.x = t3.m;");
+			Planner planner(*con.context);
+			planner.CreatePlan(std::move(parser.statements[0]));
+			Optimizer opt(*planner.binder, *con.context);
+			auto plan = opt.Optimize(std::move(planner.plan));
+
+			// Find all LogicalGet nodes
+			LogicalGet *get_t1 = nullptr;
+			LogicalGet *get_t2 = nullptr;
+			LogicalGet *get_t3 = nullptr;
+			std::function<void(LogicalOperator &)> find_gets = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_GET) {
+					auto &g = op.Cast<LogicalGet>();
+					if (g.GetTable()) {
+						if (g.GetTable()->name == "t1") {
+							get_t1 = &g;
+						} else if (g.GetTable()->name == "t2") {
+							get_t2 = &g;
+						} else if (g.GetTable()->name == "t3") {
+							get_t3 = &g;
+						}
+					}
+				}
+				for (auto &child : op.children) {
+					if (child) {
+						find_gets(*child);
+					}
+				}
+			};
+			find_gets(*plan);
+
+			if (!get_t1 || !get_t2 || !get_t3) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: could not find all three LogicalGet nodes"
+				          << std::endl;
+				return 1;
+			}
+
+			auto bindings_t1 = get_t1->GetColumnBindings();
+			auto bindings_t2 = get_t2->GetColumnBindings();
+			auto bindings_t3 = get_t3->GetColumnBindings();
+
+			// Verify each table's columns are correctly attributed
+			if (!ColumnBelongsToTable(*plan, "t1", bindings_t1[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t1 column should belong to t1" << std::endl;
+				return 1;
+			}
+			if (!ColumnBelongsToTable(*plan, "t2", bindings_t2[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t2 column should belong to t2" << std::endl;
+				return 1;
+			}
+			if (!ColumnBelongsToTable(*plan, "t3", bindings_t3[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t3 column should belong to t3" << std::endl;
+				return 1;
+			}
+
+			// Cross-check: t1 column shouldn't belong to t2 or t3
+			if (ColumnBelongsToTable(*plan, "t2", bindings_t1[0]) ||
+			    ColumnBelongsToTable(*plan, "t3", bindings_t1[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t1 column wrongly attributed" << std::endl;
+				return 1;
+			}
+			std::cerr << "PASS: ColumnBelongsToTable test 3 (three-way join)" << std::endl;
+		}
+
+		// Test 4: Non-existent table
+		{
+			Parser parser;
+			parser.ParseQuery("SELECT a FROM t1;");
+			Planner planner(*con.context);
+			planner.CreatePlan(std::move(parser.statements[0]));
+			Optimizer opt(*planner.binder, *con.context);
+			auto plan = opt.Optimize(std::move(planner.plan));
+
+			LogicalGet *get_t1 = nullptr;
+			std::function<void(LogicalOperator &)> find_get = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_GET && !get_t1) {
+					auto &g = op.Cast<LogicalGet>();
+					if (g.GetTable() && g.GetTable()->name == "t1") {
+						get_t1 = &g;
+					}
+				}
+				for (auto &child : op.children) {
+					if (child) {
+						find_get(*child);
+					}
+				}
+			};
+			find_get(*plan);
+
+			if (!get_t1) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 4: could not find LogicalGet for t1" << std::endl;
+				return 1;
+			}
+
+			auto bindings = get_t1->GetColumnBindings();
+			if (bindings.empty()) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 4: no bindings found" << std::endl;
+				return 1;
+			}
+
+			// Check that the column doesn't belong to a non-existent table
+			if (ColumnBelongsToTable(*plan, "nonexistent_table", bindings[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 4: column should not belong to nonexistent table"
+				          << std::endl;
+				return 1;
+			}
+			std::cerr << "PASS: ColumnBelongsToTable test 4 (non-existent table)" << std::endl;
+		}
+
+		// Test 5: Subquery with multiple tables
+		{
+			Parser parser;
+			parser.ParseQuery("SELECT * FROM (SELECT t1.a, t2.x FROM t1, t2) AS sub;");
+			Planner planner(*con.context);
+			planner.CreatePlan(std::move(parser.statements[0]));
+			Optimizer opt(*planner.binder, *con.context);
+			auto plan = opt.Optimize(std::move(planner.plan));
+
+			// Find LogicalGet nodes for both tables
+			LogicalGet *get_t1 = nullptr;
+			LogicalGet *get_t2 = nullptr;
+			std::function<void(LogicalOperator &)> find_gets = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_GET) {
+					auto &g = op.Cast<LogicalGet>();
+					if (g.GetTable()) {
+						if (g.GetTable()->name == "t1" && !get_t1) {
+							get_t1 = &g;
+						} else if (g.GetTable()->name == "t2" && !get_t2) {
+							get_t2 = &g;
+						}
+					}
+				}
+				for (auto &child : op.children) {
+					if (child) {
+						find_gets(*child);
+					}
+				}
+			};
+			find_gets(*plan);
+
+			if (!get_t1 || !get_t2) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 5: could not find both LogicalGet nodes in subquery"
+				          << std::endl;
+				return 1;
+			}
+
+			auto bindings_t1 = get_t1->GetColumnBindings();
+			auto bindings_t2 = get_t2->GetColumnBindings();
+
+			if (bindings_t1.empty() || bindings_t2.empty()) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 5: no bindings found" << std::endl;
+				return 1;
+			}
+
+			// Verify columns are correctly attributed even in subquery
+			if (!ColumnBelongsToTable(*plan, "t1", bindings_t1[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 5: t1 column should belong to t1 in subquery"
+				          << std::endl;
+				return 1;
+			}
+			if (!ColumnBelongsToTable(*plan, "t2", bindings_t2[0])) {
+				std::cerr << "FAIL: ColumnBelongsToTable test 5: t2 column should belong to t2 in subquery"
+				          << std::endl;
+				return 1;
+			}
+			std::cerr << "PASS: ColumnBelongsToTable test 5 (subquery)" << std::endl;
+		}
+
+		con.Rollback();
+		std::cerr << "=== ALL ColumnBelongsToTable TESTS PASSED ===" << std::endl;
+	}
+
+	// Test 6: Three-way join with GROUP BY - simulate the failing test case
+	{
+		DuckDB db(nullptr);
+		Connection con(db);
+		con.BeginTransaction();
+
+		con.Query("CREATE TABLE t1(a INTEGER, b INTEGER);");
+		con.Query("CREATE TABLE t2(x INTEGER, y INTEGER);");
+		con.Query("CREATE TABLE t3(m INTEGER, n INTEGER);");
+
+		con.Query("INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);");
+		con.Query("INSERT INTO t2 VALUES (1, 100), (2, 200);");
+		con.Query("INSERT INTO t3 VALUES (1, 1000), (2, 2000);");
+
+		const string query =
+		    "SELECT t2.x, SUM(t3.n) FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.x = t3.m GROUP BY t2.x;";
+
+		// Replan without optimizers to avoid compressed materialization complexity
+		unique_ptr<LogicalOperator> plan;
+		ReplanWithoutOptimizers(*con.context, query, plan, /*disable_join_order=*/true);
+		if (!plan) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: replan returned null plan" << std::endl;
+			return 1;
+		}
+
+		// Find the LogicalAggregate node
+		LogicalAggregate *agg_node = nullptr;
+		std::function<void(LogicalOperator &)> find_agg = [&](LogicalOperator &op) {
+			if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && !agg_node) {
+				agg_node = &op.Cast<LogicalAggregate>();
+			}
+			for (auto &child : op.children) {
+				if (child) {
+					find_agg(*child);
+				}
+			}
+		};
+		find_agg(*plan);
+
+		if (!agg_node) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: could not find aggregate node" << std::endl;
+			return 1;
+		}
+
+		// Check the GROUP BY expression
+		if (agg_node->groups.empty()) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: no group expressions found" << std::endl;
+			return 1;
+		}
+
+		auto &group_expr = agg_node->groups[0];
+		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: group expression is not a column ref" << std::endl;
+			return 1;
+		}
+
+		auto &col_ref = group_expr->Cast<BoundColumnRefExpression>();
+
+		// Find LogicalGet nodes
+		LogicalGet *get_t1 = nullptr;
+		LogicalGet *get_t2 = nullptr;
+		std::function<void(LogicalOperator &)> find_gets = [&](LogicalOperator &op) {
+			if (op.type == LogicalOperatorType::LOGICAL_GET) {
+				auto &g = op.Cast<LogicalGet>();
+				if (g.GetTable()) {
+					if (g.GetTable()->name == "t1" && !get_t1) {
+						get_t1 = &g;
+					} else if (g.GetTable()->name == "t2" && !get_t2) {
+						get_t2 = &g;
+					}
+				}
+			}
+			for (auto &child : op.children) {
+				if (child) {
+					find_gets(*child);
+				}
+			}
+		};
+		find_gets(*plan);
+
+		if (!get_t1 || !get_t2) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: could not find both LogicalGet nodes" << std::endl;
+			return 1;
+		}
+
+		// The GROUP BY column should NOT belong to t1 (the PU table)
+		bool belongs_to_t1 = ColumnBelongsToTable(*plan, "t1", col_ref.binding);
+		bool belongs_to_t2 = ColumnBelongsToTable(*plan, "t2", col_ref.binding);
+
+		if (belongs_to_t1) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: GROUP BY column t2.x incorrectly attributed to t1"
+			          << std::endl;
+			return 1;
+		}
+
+		if (!belongs_to_t2) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: GROUP BY column t2.x should belong to t2" << std::endl;
+			return 1;
+		}
+
+		std::cerr << "PASS: ColumnBelongsToTable test 6 (three-way join with GROUP BY)" << std::endl;
 	}
 
 	std::cout << "All ReplaceNode tests passed\n";

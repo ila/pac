@@ -3,14 +3,15 @@
 
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
-#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/planner/expression_iterator.hpp"
 
 #include <algorithm>
+#include <pac_compiler_helpers.hpp>
+#include <pac_optimizer.hpp>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -116,6 +117,48 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 	return false;
 }
 
+// Helper: Check if any GROUP BY columns in aggregates come from PU tables
+static void CheckGroupByColumnsNotFromPU(const LogicalOperator &op, LogicalOperator &root,
+                                         const vector<string> &pu_tables) {
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op.Cast<LogicalAggregate>();
+
+		// Check each grouped expression
+		for (size_t group_idx = 0; group_idx < aggr.groups.size(); group_idx++) {
+			auto &group_expr = aggr.groups[group_idx];
+			if (!group_expr) {
+				continue;
+			}
+
+			// Use ExpressionIterator to find all BoundColumnRefExpression nodes in the group expression
+			ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(group_expr), [&](Expression
+			                                                                                                  &expr) {
+				if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+
+					// The GROUP BY expression references a column binding
+					// We need to trace this binding back to its source table
+					// The binding might reference the aggregate's child or any ancestor operator
+
+					// Directly trace the binding in the group expression back to its source
+					for (auto &pu_table : pu_tables) {
+						if (ColumnBelongsToTable(root, pu_table, col_ref.binding)) {
+							throw InvalidInputException(
+							    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+							    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
+						}
+					}
+				}
+			});
+		}
+	}
+
+	// Recursively check children
+	for (auto &child : op.children) {
+		CheckGroupByColumnsNotFromPU(*child, root, pu_tables);
+	}
+}
+
 // helper: traverse the plan and count how many times each table/CTE name is scanned
 void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
@@ -130,108 +173,13 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 	}
 }
 
-// Build a map from table_index to table name for PU tables
-static void BuildTableIndexMap(const LogicalOperator &op, const std::unordered_set<string> &pu_tables,
-                               std::unordered_map<idx_t, string> &table_index_map) {
-	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
-		auto table_entry = get.GetTable();
-		if (table_entry && pu_tables.count(table_entry->name) > 0) {
-			table_index_map[get.table_index] = table_entry->name;
-		}
-	}
-	for (auto &child : op.children) {
-		BuildTableIndexMap(*child, pu_tables, table_index_map);
-	}
-}
-
-// Check if an expression references a PU column (by table_index)
-static bool ExpressionReferencesPUColumn(const Expression &expr,
-                                         const std::unordered_map<idx_t, string> &pu_table_indices) {
-	bool references_pu = false;
-	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
-		if (child.type == ExpressionType::BOUND_COLUMN_REF) {
-			auto &colref = child.Cast<BoundColumnRefExpression>();
-			if (pu_table_indices.count(colref.binding.table_index) > 0) {
-				references_pu = true;
-			}
-		}
-	});
-	return references_pu;
-}
-
-// Check if expression tree contains PU columns outside of aggregate functions
-static void ValidatePUColumnsInExpression(const Expression &expr,
-                                          const std::unordered_map<idx_t, string> &pu_table_indices,
-                                          bool inside_aggregate = false) {
-	// If this is an aggregate expression, mark that we're inside an aggregate
-	if (expr.IsAggregate()) {
-		auto &agg = expr.Cast<BoundAggregateExpression>();
-		// Recursively check children with inside_aggregate = true
-		for (auto &child : agg.children) {
-			ValidatePUColumnsInExpression(*child, pu_table_indices, true);
-		}
-		return;
-	}
-
-	// If this is a column reference to a PU table and we're not inside an aggregate, error
-	if (expr.type == ExpressionType::BOUND_COLUMN_REF && !inside_aggregate) {
-		auto &colref = expr.Cast<BoundColumnRefExpression>();
-		if (pu_table_indices.count(colref.binding.table_index) > 0) {
-			throw InvalidInputException(
-			    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions "
-			    "(e.g., SUM, COUNT, AVG, MIN, MAX)");
-		}
-	}
-
-	// Recurse into children
-	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
-		ValidatePUColumnsInExpression(child, pu_table_indices, inside_aggregate);
-	});
-}
-
-// Validate that PU columns are not in GROUP BY and are only accessed inside aggregates
-static void ValidatePUColumnUsage(const LogicalOperator &op,
-                                  const std::unordered_map<idx_t, string> &pu_table_indices) {
-	// Check GROUP BY clauses in aggregates
-	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = op.Cast<LogicalAggregate>();
-
-		// Check GROUP BY expressions - PU columns are not allowed
-		for (auto &group_expr : aggr.groups) {
-			if (ExpressionReferencesPUColumn(*group_expr, pu_table_indices)) {
-				throw InvalidInputException(
-				    "PAC rewrite: columns from privacy unit tables cannot be used in GROUP BY clauses");
-			}
-		}
-
-		// Check aggregate expressions - ensure PU columns only appear inside aggregates
-		for (auto &agg_expr : aggr.expressions) {
-			ValidatePUColumnsInExpression(*agg_expr, pu_table_indices, false);
-		}
-	}
-
-	// Check projections
-	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto &proj = op.Cast<LogicalProjection>();
-		for (auto &expr : proj.expressions) {
-			ValidatePUColumnsInExpression(*expr, pu_table_indices, false);
-		}
-	}
-
-	// Recurse into children
-	for (auto &child : op.children) {
-		ValidatePUColumnUsage(*child, pu_table_indices);
-	}
-}
-
-PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context,
-                                            const vector<string> &pac_tables, bool replan_in_progress) {
+PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
+                                            const vector<string> &pac_tables, PACOptimizerInfo *optimizer_info) {
 	PACCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
 	// to avoid re-entrant behavior and infinite loops.
-	if (replan_in_progress) {
+	if (optimizer_info && optimizer_info->replan_in_progress.load(std::memory_order_acquire)) {
 		return result;
 	}
 
@@ -244,7 +192,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 
 	// count all scanned tables/CTEs in the plan
 	std::unordered_map<string, idx_t> scan_counts;
-	CountScans(plan, scan_counts);
+	CountScans(*plan, scan_counts);
 
 	// Record which configured PAC tables were scanned in this plan. The optimizer
 	// rule will still want to compile queries that directly read from a privacy
@@ -296,7 +244,7 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 	// non-inner joins.
 
 	// Only allow CROSS JOIN with GENERATE_SERIES (for random sample expansion)
-	if (ContainsCrossJoinWithGenerateSeries(plan)) {
+	if (ContainsCrossJoinWithGenerateSeries(*plan)) {
 		return result;
 	}
 
@@ -403,27 +351,25 @@ PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext
 		return result;
 	}
 
-	// Build table_index to table name map for PU tables
-	std::unordered_map<idx_t, string> pu_table_indices;
-	BuildTableIndexMap(plan, pac_set, pu_table_indices);
-
-	// Validate column-level restrictions for PU tables
-	if (!pu_table_indices.empty()) {
-		ValidatePUColumnUsage(plan, pu_table_indices);
-	}
-
 	// Structural checks (throw when invalid)
-	if (ContainsWindowFunction(plan)) {
+	if (ContainsWindowFunction(*plan)) {
 		throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
 	}
-	if (!ContainsAggregation(plan)) {
+	if (!ContainsAggregation(*plan)) {
 		throw InvalidInputException("Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
 	}
-	if (ContainsLogicalDistinct(plan)) {
+	if (ContainsLogicalDistinct(*plan)) {
 		throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
 	}
-	if (ContainsDisallowedJoin(plan)) {
-		throw InvalidInputException("PAC rewrite: only INNER and LEFT JOINs are supported for PAC compilation");
+
+	// Check that GROUP BY columns don't come from PU tables
+	// (PU columns can only be accessed inside aggregate functions)
+	CheckGroupByColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables);
+
+	// Replan with selected optimizers disabled but keeping JOIN_ORDER enabled for final compilation
+	{
+		ReplanGuard guard(optimizer_info);
+		ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan, /*disable_join_order=*/false);
 	}
 
 	// If we reach here, the plan is eligible for rewrite/compilation

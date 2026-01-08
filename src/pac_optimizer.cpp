@@ -46,13 +46,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
 	// to PACRewriteQueryCheck. It now returns a PACCompatibilityResult with fk_paths and PKs.
-	// Pass the replan_in_progress flag from the optimizer extension so the compatibility check
-	// can immediately return when a replan is already in progress (avoids infinite recursion).
-	bool replan_flag = false;
-	if (pac_info) {
-		replan_flag = pac_info->replan_in_progress.load(std::memory_order_acquire);
-	}
-	PACCompatibilityResult check = PACRewriteQueryCheck(*plan, input.context, pac_table_list, replan_flag);
+	PACCompatibilityResult check = PACRewriteQueryCheck(plan, input.context, pac_table_list, pac_info);
 	// If no FK paths were found and no configured PAC tables were scanned, nothing to do.
 	// However, if the plan directly scans configured PAC tables (privacy units) we should still
 	// proceed with compilation even when no FK paths (or PKs) were discovered.

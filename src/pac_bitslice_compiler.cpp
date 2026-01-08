@@ -345,10 +345,6 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		// fk_path_to_use is populated and will be passed into ModifyPlanWithoutPU below
 	}
 
-	// Now we need to find the PAC scan node
-	// Replan the plan without compressed materialization
-	ReplanWithoutOptimizers(input.context, query, plan);
-
 	if (pu_present_in_tree) {
 		ModifyPlanWithPU(input, plan, pks, use_rowid, check.scanned_pu_tables[0]);
 	} else {

@@ -78,4 +78,9 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method 
 // so callers don't need to repeat this conversion.
 vector<string> PacTablesSetToVector(const std::unordered_set<string> &set);
 
+// Return true if the given ColumnBinding in a logical plan ultimately originates from the
+// specified base table name (i.e., from a LogicalGet of that table), false otherwise.
+// This resolves bindings via table_index back to the source LogicalGet nodes.
+bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const ColumnBinding &binding);
+
 } // namespace duckdb

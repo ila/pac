@@ -16,6 +16,7 @@
 #include "duckdb/planner/operator/logical_cte.hpp"
 #include "duckdb/planner/operator/logical_recursive_cte.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
@@ -629,6 +630,162 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method)
 	} catch (...) {
 		return default_method;
 	}
+}
+
+// Helper to trace a binding back through the plan to find which LogicalGet it originates from
+static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding) {
+	// Build a map from table_index to the operator that produces it
+	std::unordered_map<idx_t, LogicalOperator *> table_index_to_op;
+
+	std::function<void(LogicalOperator &)> collect_ops = [&](LogicalOperator &op) {
+		auto bindings = op.GetColumnBindings();
+		if (!bindings.empty()) {
+			// Map this operator's table_index to the operator itself
+			idx_t op_table_index = bindings[0].table_index;
+			table_index_to_op[op_table_index] = &op;
+		}
+		for (auto &child : op.children) {
+			if (child) {
+				collect_ops(*child);
+			}
+		}
+	};
+	collect_ops(plan);
+
+	// Start from the binding's table_index and trace backwards
+	idx_t current_table_index = binding.table_index;
+	idx_t current_column_index = binding.column_index;
+
+	// Limit iterations to prevent infinite loops
+	int max_iterations = 100;
+	int iterations = 0;
+
+	while (iterations++ < max_iterations) {
+		auto it = table_index_to_op.find(current_table_index);
+		if (it == table_index_to_op.end()) {
+			return nullptr;
+		}
+
+		auto *op = it->second;
+
+		// If we found a LogicalGet, we've reached the source
+		if (op->type == LogicalOperatorType::LOGICAL_GET) {
+			auto &get = op->Cast<LogicalGet>();
+			return &get;
+		}
+
+		// For PROJECTION nodes, we need to look at the expression for this column
+		if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			auto &proj = op->Cast<LogicalProjection>();
+
+			// Check if this column_index is within the projection's expressions
+			if (current_column_index >= proj.expressions.size()) {
+				return nullptr;
+			}
+
+			// Get the expression for this column
+			auto &expr = proj.expressions[current_column_index];
+
+			// If it's a BoundColumnRefExpression, follow it
+			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &col_ref = expr->Cast<BoundColumnRefExpression>();
+				current_table_index = col_ref.binding.table_index;
+				current_column_index = col_ref.binding.column_index;
+				continue;
+			}
+
+			// For other expression types, we can't trace further
+			return nullptr;
+		}
+
+		// For AGGREGATE nodes, check if the column comes from groups
+		if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			auto &agg = op->Cast<LogicalAggregate>();
+
+			// Groups come first in the output column bindings
+			if (current_column_index < agg.groups.size()) {
+				// This is a group column, trace through the group expression
+				auto &group_expr = agg.groups[current_column_index];
+
+				if (group_expr->type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &col_ref = group_expr->Cast<BoundColumnRefExpression>();
+					current_table_index = col_ref.binding.table_index;
+					current_column_index = col_ref.binding.column_index;
+					continue;
+				}
+				return nullptr;
+			}
+			// Aggregate expressions - we can't trace further
+			return nullptr;
+		}
+
+		// For joins, we need to figure out which child the column comes from
+		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op->type == LogicalOperatorType::LOGICAL_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
+
+			if (op->children.empty()) {
+				return nullptr;
+			}
+
+			// Get left and right child bindings
+			auto left_count = op->children[0] ? op->children[0]->GetColumnBindings().size() : 0;
+			auto right_count =
+			    op->children.size() > 1 && op->children[1] ? op->children[1]->GetColumnBindings().size() : 0;
+
+			// Check if column comes from left child
+			if (current_column_index < left_count && op->children[0]) {
+				auto left_bindings = op->children[0]->GetColumnBindings();
+				if (current_column_index < left_bindings.size()) {
+					current_table_index = left_bindings[current_column_index].table_index;
+					current_column_index = left_bindings[current_column_index].column_index;
+					continue;
+				}
+			}
+
+			// Check if column comes from right child
+			if (op->children.size() > 1 && op->children[1]) {
+				idx_t right_col_idx = current_column_index - left_count;
+				auto right_bindings = op->children[1]->GetColumnBindings();
+				if (right_col_idx < right_bindings.size()) {
+					current_table_index = right_bindings[right_col_idx].table_index;
+					current_column_index = right_bindings[right_col_idx].column_index;
+					continue;
+				}
+			}
+
+			return nullptr;
+		}
+
+		// For other operators (filters, etc.), trace through the child
+		if (!op->children.empty() && op->children[0]) {
+			auto child_bindings = op->children[0]->GetColumnBindings();
+			if (current_column_index < child_bindings.size()) {
+				current_table_index = child_bindings[current_column_index].table_index;
+				current_column_index = child_bindings[current_column_index].column_index;
+			} else {
+				return nullptr;
+			}
+		} else {
+			return nullptr;
+		}
+	}
+
+	return nullptr;
+}
+
+bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const ColumnBinding &binding) {
+	auto *source_get = TraceBindingToSource(plan, binding);
+	if (!source_get) {
+		return false;
+	}
+
+	auto table_entry = source_get->GetTable();
+	if (!table_entry) {
+		return false;
+	}
+
+	return table_entry->name == table_name;
 }
 
 } // namespace duckdb

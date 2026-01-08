@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "pac_optimizer.hpp"
 #include <unordered_map>
 #include <utility>
 
@@ -34,8 +35,9 @@ struct PACCompatibilityResult {
 // The caller should pass in the list of configured PAC table names (read once).
 // Returns a PACCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
 // If `replan_in_progress` is true the function will return an empty result immediately to avoid recursion.
-PACCompatibilityResult PACRewriteQueryCheck(LogicalOperator &plan, ClientContext &context,
-                                            const vector<string> &pac_tables, bool replan_in_progress = false);
+PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
+                                            const vector<string> &pac_tables,
+                                            PACOptimizerInfo *optimizer_info = nullptr);
 
 void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts);
 } // namespace duckdb

@@ -13,9 +13,11 @@
 
 namespace duckdb {
 
-// Replan the provided SQL query into `plan` after disabling several optimizers. The function
-// performs the SET transaction, reparses and replans, and prints the resulting plan if present.
-void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan);
+// Replan the provided SQL query into `plan` after disabling several optimizers.
+// If disable_join_order is true, also disables the join_order optimizer (used for GROUP BY validation).
+// If disable_join_order is false, keeps join_order enabled (used for compilation with proper INNER JOINs).
+void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan,
+                             bool disable_join_order = true);
 
 // Build join conditions from FK columns to PK columns
 void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vector<string> &left_cols,

@@ -15,25 +15,37 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/enums/optimizer_type.hpp"
 #include "include/pac_compatibility_check.hpp"
 
 #include <vector>
 
 namespace duckdb {
 
-void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan) {
-	// Begin a transaction and disable a set of optimizers to simplify the generated plan
-	Connection con(*context.db);
-	con.BeginTransaction();
-	con.Query("SET disabled_optimizers='compressed_materialization, column_lifetime, statistics_propagation, "
-	          "expression_rewriter, filter_pushdown';");
-	con.Commit();
+void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique_ptr<LogicalOperator> &plan,
+                             bool disable_join_order) {
+	auto &config = DBConfig::GetConfig(context);
+
+	// Save the original disabled optimizers
+	auto original_disabled = config.options.disabled_optimizers;
+
+	// Add optimizers to disable
+	config.options.disabled_optimizers.insert(OptimizerType::COMPRESSED_MATERIALIZATION);
+	config.options.disabled_optimizers.insert(OptimizerType::COLUMN_LIFETIME);
+	config.options.disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
+	config.options.disabled_optimizers.insert(OptimizerType::EXPRESSION_REWRITER);
+	config.options.disabled_optimizers.insert(OptimizerType::FILTER_PUSHDOWN);
+	if (disable_join_order) {
+		config.options.disabled_optimizers.insert(OptimizerType::JOIN_ORDER);
+	}
 
 	Parser parser;
 	Planner planner(context);
 
 	parser.ParseQuery(query);
 	if (parser.statements.empty()) {
+		// Restore original disabled optimizers before returning
+		config.options.disabled_optimizers = original_disabled;
 		return;
 	}
 	auto statement = parser.statements[0].get();
@@ -41,6 +53,9 @@ void ReplanWithoutOptimizers(ClientContext &context, const string &query, unique
 
 	Optimizer optimizer(*planner.binder, context);
 	plan = optimizer.Optimize(std::move(planner.plan));
+
+	// Restore original disabled optimizers
+	config.options.disabled_optimizers = original_disabled;
 }
 
 // Build join conditions from FK columns to PK columns
