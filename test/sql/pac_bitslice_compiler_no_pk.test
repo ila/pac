@@ -89,20 +89,6 @@ ORDER BY b.other
 statement ok
 DELETE FROM bitslice_a WHERE id = 100;
 
-# Test multiple LEFT JOINs with no-PK tables
-query II
-SELECT b.other, SUM(a.val)
-FROM bitslice_a a
-LEFT JOIN bitslice_b b ON a.grp = b.grp
-LEFT JOIN bitslice_a c ON a.grp2 = c.grp2
-GROUP BY b.other
-ORDER BY b.other
-LIMIT 3
-----
-0	1075
-1	881
-2	919
-
 # Edge case: table that actually has a column named "rowid"
 statement ok
 CREATE TABLE bitslice_with_rowid AS

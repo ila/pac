@@ -200,6 +200,24 @@ SELECT SUM(CASE WHEN a > 1 THEN b ELSE 0 END) FROM t1;
 ----
 90
 
+# Test self-join: should be rejected
+statement error
+SELECT SUM(t1a.b + t1b.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
+----
+PAC rewrite: self-joins are not supported for PAC compilation
+
+# Test self-join with different join type: should also be rejected
+statement error
+SELECT COUNT(*) FROM t1 t1a LEFT JOIN t1 t1b ON t1a.a = t1b.a;
+----
+PAC rewrite: self-joins are not supported for PAC compilation
+
+# Test self-join with WHERE clause: should be rejected
+statement error
+SELECT SUM(t1a.b) FROM t1 t1a, t1 t1b WHERE t1a.a = t1b.a;
+----
+PAC rewrite: self-joins are not supported for PAC compilation
+
 # Remove table from privacy file via PRAGMA
 statement ok
 PRAGMA remove_pac_privacy_unit('t1');

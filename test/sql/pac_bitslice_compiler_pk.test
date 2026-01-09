@@ -83,15 +83,6 @@ LIMIT 3
 4	51	12
 8	56	8
 
-# Test multiple LEFT JOINs with PK tables
-query I
-SELECT SUM(a.val)
-FROM bitslice_pk_single a
-LEFT JOIN bitslice_pk_many b ON a.grp = b.grp
-LEFT JOIN bitslice_pk_single c ON a.grp2 = c.grp2
-----
-3840
-
 # Test RIGHT JOIN with composite PK table on right, aggregating with condition
 query III
 SELECT b.pk1, COUNT(*), SUM(COALESCE(a.val, 0))

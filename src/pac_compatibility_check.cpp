@@ -173,6 +173,24 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 	}
 }
 
+// Helper: check if the plan contains self-joins (same table scanned multiple times)
+static bool ContainsSelfJoin(const LogicalOperator &op) {
+	std::unordered_map<string, idx_t> scan_counts;
+	CountScans(op, scan_counts);
+
+	// Check if any table is scanned more than once
+	for (auto &kv : scan_counts) {
+		// Skip internal PAC sample tables
+		if (kv.first.rfind("_pac_internal_sample_", 0) == 0) {
+			continue;
+		}
+		if (kv.second > 1) {
+			return true;
+		}
+	}
+	return false;
+}
+
 PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
                                             const vector<string> &pac_tables, PACOptimizerInfo *optimizer_info) {
 	PACCompatibilityResult result;
@@ -359,6 +377,9 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		}
 		if (ContainsLogicalDistinct(*plan)) {
 			throw InvalidInputException("PAC rewrite: DISTINCT is not supported for PAC compilation");
+		}
+		if (ContainsSelfJoin(*plan)) {
+			throw InvalidInputException("PAC rewrite: self-joins are not supported for PAC compilation");
 		}
 
 		// Check that GROUP BY columns don't come from PU tables
