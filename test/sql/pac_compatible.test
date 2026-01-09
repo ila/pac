@@ -87,7 +87,7 @@ SELECT * FROM t2;
 statement error
 SELECT a FROM t1;
 ----
-PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+Invalid Input Error: Query does not contain any allowed aggregation (sum, count, avg, min, max)!
 
 # PAC-compatible: MIN
 query I
@@ -108,13 +108,32 @@ SELECT t1.a, SUM(t3.n) FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.
 ----
 PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
-# PAC-compatible: GROUP BY on non-PU column in multi-table join
-query II
+# Not PAC-compatible: GROUP BY on non-PU column in multi-table join
+statement error
 SELECT t2.x, SUM(t3.n) FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.x = t3.m GROUP BY t2.x ORDER BY t2.x;
 ----
-1	1000
-2	2000
+PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
+# Not PAC-compatible: projecting join key from non-PU table (exposes PU column value)
+statement error
+SELECT t2.x, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t2.x ORDER BY t2.x;
+----
+PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+# PAC-compatible: projecting non-join key from non-PU table is OK
+query II
+SELECT t2.y, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t2.y ORDER BY t2.y;
+----
+100	10
+200	20
+
+# Not PAC-compatible: projecting join key in LEFT JOIN (still exposes PU value)
+statement error
+SELECT t2.x, SUM(t1.b) FROM t1 LEFT JOIN t2 ON t1.a = t2.x GROUP BY t2.x ORDER BY t2.x;
+----
+PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+# PAC-compatible: LEFT JOIN with non-join key projection
 # Not PAC-compatible: window function
 statement error
 SELECT a, SUM(b) OVER (PARTITION BY a) FROM t1;
@@ -149,11 +168,11 @@ Query does not contain any allowed aggregation (sum, count, avg, min, max)!
 statement error
 SELECT t1.a, SUM(t2.y) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t1.a;
 ----
-PAC rewrite: columns from privacy unit tables cannot be used in GROUP BY clauses
+Invalid Input Error: PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
 # Test with joins: PU column cannot be projected even with non-PU group by
 statement error
-SELECT t1.a, t2.x, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t2.x;
+SELECT t1.a, t2.x, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t1.a, t2.x;
 ----
 PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 

@@ -17,6 +17,7 @@
 #include "duckdb/planner/operator/logical_recursive_cte.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
@@ -774,18 +775,92 @@ static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBindi
 	return nullptr;
 }
 
-bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const ColumnBinding &binding) {
-	auto *source_get = TraceBindingToSource(plan, binding);
-	if (!source_get) {
-		return false;
+// Helper to collect all equi-join key equivalences from the plan.
+// Returns pairs of column bindings that are equal due to equi-join conditions.
+static void CollectJoinKeyEquivalences(LogicalOperator &op,
+                                       vector<std::pair<ColumnBinding, ColumnBinding>> &equivalences) {
+	// Check if this is a comparison join with equi-join conditions
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+
+		for (auto &cond : join.conditions) {
+			// Only consider equality conditions
+			if (cond.comparison != ExpressionType::COMPARE_EQUAL) {
+				continue;
+			}
+
+			// Check if both sides are column references
+			if (cond.left && cond.right &&
+			    cond.left->type == ExpressionType::BOUND_COLUMN_REF &&
+			    cond.right->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &left_ref = cond.left->Cast<BoundColumnRefExpression>();
+				auto &right_ref = cond.right->Cast<BoundColumnRefExpression>();
+				equivalences.emplace_back(left_ref.binding, right_ref.binding);
+			}
+		}
 	}
 
-	auto table_entry = source_get->GetTable();
-	if (!table_entry) {
-		return false;
+	// Recursively process children
+	for (auto &child : op.children) {
+		if (child) {
+			CollectJoinKeyEquivalences(*child, equivalences);
+		}
 	}
-
-	return table_entry->name == table_name;
 }
+
+// Helper to find all bindings equivalent to the given binding via join key equivalences
+static void FindEquivalentBindings(const ColumnBinding &binding,
+                                   const vector<std::pair<ColumnBinding, ColumnBinding>> &equivalences,
+                                   std::unordered_set<uint64_t> &visited,
+                                   vector<ColumnBinding> &result) {
+	// Create a unique key for the binding
+	uint64_t key = (static_cast<uint64_t>(binding.table_index) << 32) | binding.column_index;
+	if (visited.find(key) != visited.end()) {
+		return;
+	}
+	visited.insert(key);
+	result.push_back(binding);
+
+	// Find all equivalences involving this binding
+	for (auto &eq : equivalences) {
+		if (eq.first.table_index == binding.table_index && eq.first.column_index == binding.column_index) {
+			FindEquivalentBindings(eq.second, equivalences, visited, result);
+		}
+		if (eq.second.table_index == binding.table_index && eq.second.column_index == binding.column_index) {
+			FindEquivalentBindings(eq.first, equivalences, visited, result);
+		}
+	}
+}
+
+bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const ColumnBinding &binding) {
+	// First, collect all join key equivalences from the plan
+	vector<std::pair<ColumnBinding, ColumnBinding>> equivalences;
+	CollectJoinKeyEquivalences(plan, equivalences);
+
+	// Find all bindings equivalent to the given binding (including itself)
+	std::unordered_set<uint64_t> visited;
+	vector<ColumnBinding> equivalent_bindings;
+	FindEquivalentBindings(binding, equivalences, visited, equivalent_bindings);
+
+	// Check if any equivalent binding traces back to the target table
+	for (auto &eq_binding : equivalent_bindings) {
+		auto *source_get = TraceBindingToSource(plan, eq_binding);
+		if (!source_get) {
+			continue;
+		}
+
+		auto table_entry = source_get->GetTable();
+		if (!table_entry) {
+			continue;
+		}
+
+		if (table_entry->name == table_name) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 
 } // namespace duckdb

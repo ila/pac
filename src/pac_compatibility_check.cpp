@@ -337,9 +337,20 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Attach discovered fk_paths to the result
 	result.fk_paths = std::move(fk_paths);
 
+	// Determine if we need to run structural checks:
+	// - Either we scan PU tables directly, OR
+	// - We scan tables linked to PU via FK paths
+	bool has_fk_linked_tables = false;
+	for (auto &kv : result.fk_paths) {
+		if (!kv.second.empty()) {
+			has_fk_linked_tables = true;
+			break;
+		}
+	}
+
 	// Structural checks BEFORE deciding eligibility (throw when invalid)
-	// These checks must run for ALL queries that scan privacy unit tables
-	if (!result.scanned_pu_tables.empty()) {
+	// These checks must run for ALL queries that scan privacy unit tables OR FK-linked tables
+	if (!result.scanned_pu_tables.empty() || has_fk_linked_tables) {
 		if (ContainsWindowFunction(*plan)) {
 			throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
 		}
@@ -352,20 +363,18 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 
 		// Check that GROUP BY columns don't come from PU tables
 		// (PU columns can only be accessed inside aggregate functions)
-		{
+		if (!result.scanned_pu_tables.empty()) {
 			ReplanGuard guard(optimizer_info);
 			ReplanWithoutOptimizers(context, context.GetCurrentQuery(), plan);
+			CheckGroupByColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables);
 		}
-		CheckGroupByColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables);
 	}
 
 	// If any scanned table is linked to a privacy unit via FKs, trigger PAC compilation.
 	// This should not raise errors — we accept the plan and let the rewriter handle it.
-	for (auto &kv : result.fk_paths) {
-		if (!kv.second.empty()) {
-			result.eligible_for_rewrite = true;
-			return result;
-		}
+	if (has_fk_linked_tables) {
+		result.eligible_for_rewrite = true;
+		return result;
 	}
 
 	if (result.fk_paths.empty() && result.scanned_pu_tables.empty()) {

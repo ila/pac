@@ -1277,6 +1277,83 @@ int RunCompilerFunctionTests() {
 		          << std::endl;
 	}
 
+	// Test 9: Join key equivalence - projecting join key from non-PU table should be detected as exposing PU
+	// When we have t1.a = t2.x, projecting t2.x exposes the same values as t1.a
+	{
+		DuckDB db(nullptr);
+		Connection con(db);
+		con.BeginTransaction();
+
+		con.Query("CREATE TABLE pu_table(a INTEGER, b INTEGER);");
+		con.Query("CREATE TABLE non_pu_table(x INTEGER, y INTEGER);");
+		con.Query("INSERT INTO pu_table VALUES (1, 10), (2, 20), (3, 30);");
+		con.Query("INSERT INTO non_pu_table VALUES (1, 100), (2, 200), (3, 300);");
+
+		// Query that projects JOIN KEY from non-PU table (should be detected as exposing PU)
+		const string query = "SELECT non_pu_table.x, SUM(pu_table.b) FROM pu_table LEFT JOIN non_pu_table ON "
+		                     "pu_table.a = non_pu_table.x GROUP BY non_pu_table.x;";
+
+		unique_ptr<LogicalOperator> plan;
+		ReplanWithoutOptimizers(*con.context, query, plan);
+		if (!plan) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: replan returned null plan" << std::endl;
+			return 1;
+		}
+
+		// Find aggregate node
+		LogicalAggregate *agg_node = nullptr;
+		std::function<void(LogicalOperator &)> find_agg = [&](LogicalOperator &op) {
+			if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && !agg_node) {
+				agg_node = &op.Cast<LogicalAggregate>();
+			}
+			for (auto &child : op.children) {
+				if (child) {
+					find_agg(*child);
+				}
+			}
+		};
+		find_agg(*plan);
+
+		if (!agg_node) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: could not find aggregate node" << std::endl;
+			return 1;
+		}
+
+		// Verify GROUP BY expression references non_pu_table.x (JOIN KEY)
+		if (agg_node->groups.empty()) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: no group expressions found" << std::endl;
+			return 1;
+		}
+
+		auto &group_expr = agg_node->groups[0];
+		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: group expression is not a column ref" << std::endl;
+			return 1;
+		}
+
+		auto &col_ref = group_expr->Cast<BoundColumnRefExpression>();
+
+		// The GROUP BY column physically comes from non_pu_table
+		if (!ColumnBelongsToTable(*plan, "non_pu_table", col_ref.binding)) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: GROUP BY column should belong to non_pu_table"
+			          << std::endl;
+			return 1;
+		}
+
+		// BUT because it's a join key (pu_table.a = non_pu_table.x), it should ALSO be detected
+		// as belonging to pu_table due to join key equivalence
+		if (!ColumnBelongsToTable(*plan, "pu_table", col_ref.binding)) {
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: JOIN KEY column should ALSO belong to pu_table "
+			             "(due to join key equivalence)"
+			          << std::endl;
+			return 1;
+		}
+
+		con.Rollback();
+		std::cerr << "PASS: ColumnBelongsToTable test 9 (join key equivalence - t2.x detected as belonging to PU table)"
+		          << std::endl;
+	}
+
 	std::cout << "All ReplaceNode tests passed\n";
 	return 0;
 }
