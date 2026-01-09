@@ -316,6 +316,33 @@ LIMIT 5
 3	0
 4	0
 
+# ========== UNION / UNION ALL TEST CASES ==========
+
+# Test UNION ALL with FK chain aggregates
+query I
+SELECT SUM(d1.val)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+UNION ALL
+SELECT SUM(c.val)
+FROM bitslice_fk_child c
+INNER JOIN bitslice_fk_pu p ON c.pu_id = p.id
+----
+100
+100
+
+# Test UNION (with deduplication) with FK chain aggregates
+query I
+SELECT COUNT(*)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+UNION
+SELECT COUNT(*)
+FROM bitslice_fk_child c
+INNER JOIN bitslice_fk_pu p ON c.pu_id = p.id
+----
+25
+
 # Cleanup
 statement ok
 PRAGMA remove_pac_privacy_unit('bitslice_fk_pu');

@@ -218,6 +218,24 @@ SELECT SUM(t1a.b) FROM t1 t1a, t1 t1b WHERE t1a.a = t1b.a;
 ----
 PAC rewrite: self-joins are not supported for PAC compilation
 
+# Test subquery: should be rejected
+statement error
+SELECT SUM(b) FROM t1 WHERE a IN (SELECT a FROM t2);
+----
+PAC rewrite: subqueries are not supported for PAC compilation
+
+# Test EXISTS subquery: should be rejected
+statement error
+SELECT SUM(b) FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.x = t1.a);
+----
+PAC rewrite: subqueries are not supported for PAC compilation
+
+# Test subquery in aggregate: should be rejected
+statement error
+SELECT SUM(CASE WHEN a > (SELECT AVG(x) FROM t2) THEN b ELSE 0 END) FROM t1;
+----
+PAC rewrite: subqueries are not supported for PAC compilation
+
 # Remove table from privacy file via PRAGMA
 statement ok
 PRAGMA remove_pac_privacy_unit('t1');

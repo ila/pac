@@ -7,6 +7,8 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <algorithm>
@@ -58,9 +60,10 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
 			return true;
 		}
 	} else if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
-	           op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT || op.type == LogicalOperatorType::LOGICAL_UNION ||
+	           op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT ||
 	           op.type == LogicalOperatorType::LOGICAL_EXCEPT || op.type == LogicalOperatorType::LOGICAL_INTERSECT) {
 		// These operator types are disallowed for PAC compilation
+		// Note: UNION and UNION ALL are allowed
 		return true;
 	}
 	for (auto &child : op.children) {
@@ -185,6 +188,82 @@ static bool ContainsSelfJoin(const LogicalOperator &op) {
 			continue;
 		}
 		if (kv.second > 1) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Helper: check if the plan contains subqueries
+static bool ContainsSubquery(const LogicalOperator &op) {
+	// Check if any expressions in this operator contain subqueries
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op.Cast<LogicalAggregate>();
+		// Check aggregate expressions
+		for (auto &expr : aggr.expressions) {
+			if (expr) {
+				bool has_subquery = false;
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
+						has_subquery = true;
+					}
+				});
+				if (has_subquery) {
+					return true;
+				}
+			}
+		}
+		// Check group by expressions
+		for (auto &expr : aggr.groups) {
+			if (expr) {
+				bool has_subquery = false;
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
+						has_subquery = true;
+					}
+				});
+				if (has_subquery) {
+					return true;
+				}
+			}
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
+		// Check filter expressions (WHERE clause)
+		auto &filter = op.Cast<LogicalFilter>();
+		for (auto &expr : filter.expressions) {
+			if (expr) {
+				bool has_subquery = false;
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
+						has_subquery = true;
+					}
+				});
+				if (has_subquery) {
+					return true;
+				}
+			}
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		// Check projection expressions
+		auto &proj = op.Cast<LogicalProjection>();
+		for (auto &expr : proj.expressions) {
+			if (expr) {
+				bool has_subquery = false;
+				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression>&>(expr), [&](Expression &e) {
+					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
+						has_subquery = true;
+					}
+				});
+				if (has_subquery) {
+					return true;
+				}
+			}
+		}
+	}
+
+	// Recursively check children
+	for (auto &child : op.children) {
+		if (ContainsSubquery(*child)) {
 			return true;
 		}
 	}
@@ -380,6 +459,12 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		}
 		if (ContainsSelfJoin(*plan)) {
 			throw InvalidInputException("PAC rewrite: self-joins are not supported for PAC compilation");
+		}
+		if (ContainsDisallowedJoin(*plan)) {
+			throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
+		}
+		if (ContainsSubquery(*plan)) {
+			throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
 		}
 
 		// Check that GROUP BY columns don't come from PU tables
