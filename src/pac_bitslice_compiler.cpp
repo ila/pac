@@ -14,6 +14,15 @@
 
 namespace duckdb {
 
+// Helper: Get boolean setting value with default
+static bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value) {
+	Value val;
+	if (context.TryGetCurrentSetting(setting_name, val) && !val.IsNull()) {
+		return val.GetValue<bool>();
+	}
+	return default_value;
+}
+
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                          const vector<string> &gets_present, const vector<string> &fk_path,
@@ -21,11 +30,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// Note: we assume we don't use rowid
 
 	// Check if join elimination is enabled
-	Value join_elim_val;
-	bool join_elimination = false;
-	if (input.context.TryGetCurrentSetting("pac_join_elimination", join_elim_val) && !join_elim_val.IsNull()) {
-		join_elimination = join_elim_val.GetValue<bool>();
-	}
+	bool join_elimination = GetBooleanSetting(input.context, "pac_join_elimination", false);
 
 #ifdef DEBUG
 	Printer::Print("ModifyPlanWithoutPU: join_elimination = " + std::to_string(join_elimination));

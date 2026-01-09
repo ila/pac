@@ -19,6 +19,15 @@
 
 namespace duckdb {
 
+// Helper: Get boolean setting value with default
+static bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value) {
+	Value val;
+	if (context.TryGetCurrentSetting(setting_name, val) && !val.IsNull()) {
+		return val.GetValue<bool>();
+	}
+	return default_value;
+}
+
 static bool IsAllowedAggregate(const string &func) {
 	static const std::unordered_set<string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min",
 	                                                   "max"};
@@ -174,70 +183,41 @@ static bool ContainsSelfJoin(const LogicalOperator &op) {
 	return false;
 }
 
+// Helper: check if any expression in a vector contains subqueries
+static bool ExpressionsContainSubquery(const vector<unique_ptr<Expression>> &expressions) {
+	for (auto &expr : expressions) {
+		if (expr) {
+			bool has_subquery = false;
+			ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
+				if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
+					has_subquery = true;
+				}
+			});
+			if (has_subquery) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 // Helper: check if the plan contains subqueries
 static bool ContainsSubquery(const LogicalOperator &op) {
 	// Check if any expressions in this operator contain subqueries
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &aggr = op.Cast<LogicalAggregate>();
-		// Check aggregate expressions
-		for (auto &expr : aggr.expressions) {
-			if (expr) {
-				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
-					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
-						has_subquery = true;
-					}
-				});
-				if (has_subquery) {
-					return true;
-				}
-			}
-		}
-		// Check group by expressions
-		for (auto &expr : aggr.groups) {
-			if (expr) {
-				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
-					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
-						has_subquery = true;
-					}
-				});
-				if (has_subquery) {
-					return true;
-				}
-			}
+		if (ExpressionsContainSubquery(aggr.expressions) || ExpressionsContainSubquery(aggr.groups)) {
+			return true;
 		}
 	} else if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
-		// Check filter expressions (WHERE clause)
 		auto &filter = op.Cast<LogicalFilter>();
-		for (auto &expr : filter.expressions) {
-			if (expr) {
-				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
-					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
-						has_subquery = true;
-					}
-				});
-				if (has_subquery) {
-					return true;
-				}
-			}
+		if (ExpressionsContainSubquery(filter.expressions)) {
+			return true;
 		}
 	} else if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		// Check projection expressions
 		auto &proj = op.Cast<LogicalProjection>();
-		for (auto &expr : proj.expressions) {
-			if (expr) {
-				bool has_subquery = false;
-				ExpressionIterator::EnumerateExpression(const_cast<unique_ptr<Expression> &>(expr), [&](Expression &e) {
-					if (e.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
-						has_subquery = true;
-					}
-				});
-				if (has_subquery) {
-					return true;
-				}
-			}
+		if (ExpressionsContainSubquery(proj.expressions)) {
+			return true;
 		}
 	}
 
@@ -413,11 +393,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// These checks must run for ALL queries that scan privacy unit tables OR FK-linked tables
 	if (!result.scanned_pu_tables.empty() || has_fk_linked_tables) {
 		// Get conservative mode setting
-		Value conservative_val;
-		bool is_conservative = true; // default to conservative mode
-		if (context.TryGetCurrentSetting("pac_conservative_mode", conservative_val) && !conservative_val.IsNull()) {
-			is_conservative = conservative_val.GetValue<bool>();
-		}
+		bool is_conservative = GetBooleanSetting(context, "pac_conservative_mode", true);
 
 		if (ContainsWindowFunction(*plan)) {
 			if (is_conservative) {
