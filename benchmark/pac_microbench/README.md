@@ -1,11 +1,13 @@
 # PAC Microbenchmark Suite
 
-Comprehensive performance benchmarks for PAC aggregate functions (pac_count, pac_sum, pac_avg, pac_min, pac_max) with various optimization configurations.
+Comprehensive performance benchmarks for PAC aggregate functions (pac_count, pac_sum, pac_avg, pac_min, pac_max) with various optimization configurations. The extension should be compiled with clang.
 
 ## Quick Start
 Install the required dependencies (assuming a Debian-based system):
 ```bash
 sudo apt install make ninja-build cmake clang
+export CC=clang
+export CXX=clang++
 ```
 Then, run the scripts:
 ```bash
