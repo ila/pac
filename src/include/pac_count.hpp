@@ -63,13 +63,13 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 //
 // While we predicate the counting and SWAR-optimize it, we provide a naive IF..THEN baseline that is SIMD-unfriendly
 //
-// Define PAC_MINMAX_NOBUFFERING to disable the buffering optimization.
-// Define PAC_MINMAX_NOCASCADING to disable the pre-aggregation in a uint8_t level
-// Define PAC_MINMAX_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
+// Define PAC_NOBUFFERING to disable the buffering optimization.
+// Define PAC_NOCASCADING to disable the pre-aggregation in a uint8_t level
+// Define PAC_NOSIMD to get the IF..THEN SIMD-unfriendly aggergate computation kernel
 #endif
 
-#if defined(PAC_SUMAVG_NOSIMD) && !defined(PAC_SUMAVG_NOCASCADING)
-PAC_SUMAVG_NOSIMD only makes sense in combination with PAC_SUMAVG_NOCASCADING
+#if defined(PAC_NOSIMD) && !defined(PAC_NOCASCADING)
+PAC_NOSIMD only makes sense in combination with PAC_NOCASCADING
 #endif
 
 #ifndef PAC_GODBOLT
