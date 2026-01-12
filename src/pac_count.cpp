@@ -52,8 +52,9 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
-		if (idata.validity.RowIsValid(idx)) { // unlike the other aggregates, ungrouped count with buffering was faster
-			PacCountUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator); // note: performs buffering
+		if (idata.validity.RowIsValid(idx)) {
+			PacCountUpdateOne(agg, input_data[idx] ^ query_hash,
+			                  aggr.allocator); // ungrouped: direct update (no buffering)
 		}
 	}
 }
@@ -69,7 +70,8 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data
 		auto h_idx = hash_data.sel->get_index(i);
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
-			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator); // note: performs buffering
+			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash,
+			                  aggr.allocator); // ungrouped: direct update (no buffering)
 		}
 	}
 }
@@ -84,7 +86,11 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vec
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) { // to protect against very many groups, thus uses buffering
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
 			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx] ^ query_hash, aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx] ^ query_hash, aggr.allocator);
+#endif
 		}
 	}
 }
@@ -102,7 +108,11 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
 			// to protect against very many groups, thus uses buffering
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
 			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx] ^ query_hash, aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx] ^ query_hash, aggr.allocator);
+#endif
 		}
 	}
 }

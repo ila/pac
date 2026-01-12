@@ -250,47 +250,47 @@ struct PacMinMaxState {
 
 // Macro to define Update specializations for regular types (8/16/32/64-bit)
 #ifdef PAC_NOSIMD
-#define DEFINE_UPDATE(T, UINT_T, BITS_T, SHIFTS, MASK, FLOAT, SIGNED)                                                      \
+#define DEFINE_UPDATE(T, UINT_T, BITS_T, SHIFTS, MASK, FLOAT, SIGNED)                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
-		UpdateExtremesScalar<T, true>(extremes, h, v);                                                             \
+		UpdateExtremesScalar<T, true>(extremes, h, v);                                                                 \
 	}                                                                                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
-		UpdateExtremesScalar<T, false>(extremes, h, v);                                                            \
+		UpdateExtremesScalar<T, false>(extremes, h, v);                                                                \
 	}
 #else
-#define DEFINE_UPDATE(T, UINT_T, BITS_T, SHIFTS, MASK, FLOAT, SIGNED)                                                      \
+#define DEFINE_UPDATE(T, UINT_T, BITS_T, SHIFTS, MASK, FLOAT, SIGNED)                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
-		UpdateExtremesSIMD<T, UINT_T, BITS_T, SHIFTS, MASK, true, FLOAT, SIGNED>(extremes, h, v);                  \
+		UpdateExtremesSIMD<T, UINT_T, BITS_T, SHIFTS, MASK, true, FLOAT, SIGNED>(extremes, h, v);                      \
 	}                                                                                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
-		UpdateExtremesSIMD<T, UINT_T, BITS_T, SHIFTS, MASK, false, FLOAT, SIGNED>(extremes, h, v);                 \
+		UpdateExtremesSIMD<T, UINT_T, BITS_T, SHIFTS, MASK, false, FLOAT, SIGNED>(extremes, h, v);                     \
 	}
 #endif
 
 // Macro to define Update specializations for hugeint types (128-bit)
 #ifdef PAC_NOSIMD
-#define DEFINE_UPDATE_HUGE(T, SIGNED)                                                                                      \
+#define DEFINE_UPDATE_HUGE(T, SIGNED)                                                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
-		UpdateExtremesScalar<T, true>(extremes, h, v);                                                             \
+		UpdateExtremesScalar<T, true>(extremes, h, v);                                                                 \
 	}                                                                                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
-		UpdateExtremesScalar<T, false>(extremes, h, v);                                                            \
+		UpdateExtremesScalar<T, false>(extremes, h, v);                                                                \
 	}
 #else
-#define DEFINE_UPDATE_HUGE(T, SIGNED)                                                                                      \
+#define DEFINE_UPDATE_HUGE(T, SIGNED)                                                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, true>::Update(uint64_t h, T v) {                                                     \
-		UpdateExtremesSIMD<true, SIGNED>(extremes, h, v);                                                          \
+		UpdateExtremesSIMD<true, SIGNED>(extremes, h, v);                                                              \
 	}                                                                                                                  \
 	template <>                                                                                                        \
 	inline void PacMinMaxState<T, false>::Update(uint64_t h, T v) {                                                    \
-		UpdateExtremesSIMD<false, SIGNED>(extremes, h, v);                                                         \
+		UpdateExtremesSIMD<false, SIGNED>(extremes, h, v);                                                             \
 	}
 #endif
 

@@ -202,8 +202,14 @@ struct PacCountStateWrapper {
 	}
 };
 
+// PacCountUpdateOne: direct state update (bypasses buffering for ungrouped aggregates)
 template <>
-AUTOVECTORIZE inline void PacCountUpdateOne(PacCountStateWrapper &agg, uint64_t key_hash, ArenaAllocator &a) {
+inline void PacCountUpdateOne(PacCountStateWrapper &agg, uint64_t key_hash, ArenaAllocator &a) {
+	PacCountUpdateOne(*agg.EnsureState(a), key_hash, a);
+}
+
+// PacCountBufferOrUpdateOne: buffered update for scatter/grouped aggregates
+AUTOVECTORIZE inline void PacCountBufferOrUpdateOne(PacCountStateWrapper &agg, uint64_t key_hash, ArenaAllocator &a) {
 	uint64_t cnt = agg.n_buffered & 7;
 	if (DUCKDB_UNLIKELY(cnt == 3)) {
 		auto &dst = *agg.EnsureState(a);

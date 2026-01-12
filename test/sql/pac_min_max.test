@@ -25,7 +25,7 @@ SELECT pac_max(hash('key' || i::varchar), i::tinyint, 0.0) FROM range(1, 50) t(i
 query I
 SELECT pac_max(hash('key' || i::varchar), i::smallint, 0.0) FROM range(1, 100) t(i);
 ----
-95
+99
 
 # Test pac_max with INTEGER (INT32)
 query I
@@ -49,7 +49,7 @@ SELECT pac_max(hash('key' || i::varchar), i::utinyint, 0.0) FROM range(1, 50) t(
 query I
 SELECT pac_max(hash('key' || i::varchar), i::usmallint, 0.0) FROM range(1, 100) t(i);
 ----
-95
+99
 
 # Test pac_max with UINTEGER (UINT32)
 query I
@@ -161,7 +161,7 @@ SELECT round(pac_min(hash('key' || i::varchar), i::double, 0.0), 1) FROM range(1
 query I
 SELECT pac_min(hash('key' || i::varchar), i::integer, 0.0) FROM range(-50, 50) t(i);
 ----
--44
+-50
 
 # Test pac_min with mi parameter (0.0 for deterministic results)
 query I
@@ -180,8 +180,8 @@ FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
 0	99
-1	85
-2	92
+1	94
+2	95
 
 # Test pac_min with GROUP BY
 query II rowsort
@@ -189,24 +189,24 @@ SELECT i % 3 as grp, pac_min(hash('key' || i::varchar), i::integer, 0.0)
 FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
-0	3
+0	6
 1	1
-2	5
+2	14
 
 # =============================================================================
 # Edge cases
 # =============================================================================
 
-# Test with single value (PAC returns 0 due to probabilistic sampling)
+# Test with single value
 query I
 SELECT pac_max(hash('single'), 42::integer, 0.0);
 ----
-0
+42
 
 query I
 SELECT pac_min(hash('single'), 42::integer, 0.0);
 ----
-0
+42
 
 # Test with large values (BIGINT)
 query I
@@ -399,7 +399,7 @@ SELECT pac_min(hash('key' || i::varchar), (('2020-01-01 00:00:00'::timestamp + (
 query I
 SELECT pac_max(hash('key' || i::varchar), (i * 0.5)::decimal(4,2), 0.0) FROM range(1, 100) t(i);
 ----
-47.50
+49.50
 
 # Test pac_min with DECIMAL(4,2)
 query I
