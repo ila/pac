@@ -43,15 +43,14 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // mimicking what DuckDB's SUM() normally does, we have the following cases:
 // 1) integers: PAC_SUM(key_hash, HUGEINT | [U](BIG||SMALL|TINY)INT) -> HUGEINT
 //              We keep sub-total8/16/32/64/128_t probabilistic_total and sum each value in smallest total that fits.
-//              We ensure "things fit" by flushing probabilistic_totalX into the next wider total every 2^bX additions,
-//              and by only allowing values to be added into probaiistic_totalX if they have the highest bX bits unset,
-//              so overflow cannot happen (b8=3, b16=5, b32=6, b64=8).
+//              We ensure "things fit" by flushing probabilistic_totalX into the next wider total before it overflows,
+//              and by only allowing values to be added to probabilistic_totalX if they have the highest bX bits unset,
+//              so we can at least add 2^b values before we need to flush (b8=3, b16=5, b32=6, b64=8).
 //              In Combine() we combine the levels of src and dst states, either by moving them from src to dst (if dst
 //              did not have that level yet), or by summing them. In Finalize() the noised result is computed from the
 //              sum of all allocated levels.
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
 //              Accumulates directly into double[64] total using AddToTotalsSimple (ARM).
-//              On x86 we first sum into floats and cascade these into doubles later.
 // 3) hugeint:  PAC_SUM(key_hash, UHUGEINT) -> DOUBLE
 //              DuckDB produces DOUBLE outcomes for unsigned 128-bits integer sums, so we do as well.
 //              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
@@ -62,10 +61,10 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader);
 // code simple, we added an exact_counter also to PAC_SUM(). The only difference is that in the Finalize() for
 // PAC_AVG() we divide the counter numbers by this exact_counter first.
 //
-// The cascading counter state can be quite large: ~2KB per aggregate result value. In aggregations with very many
+// The cascading counter state could be quite large: ~2KB per aggregate result value. In aggregations with very many
 // distinct GROUP BY values (and relatively modest sums, therefore), the bigger counters are often not needed.
 // Therefore, we allocate counters lazily now: only when say 8-bits counters overflow we allocate the 16-bits counters
-// This optimization can reduce the memory footprint by 2-8x, which can help in avoiding spilling.
+// This optimization can reduce the memory footprint by 2-8x, which can help in avoiding OOM.
 //
 // In order to keep the size of the states low, it is more important to delay the state
 // allocation until multiple values have been received (buffering). Processing a buffer
@@ -107,8 +106,6 @@ PAC_NOSIMD only makes sense in combination with PAC_NOCASCADING
 // - Pack 8 int8_t counters into each uint64_t (total[8] instead of total[64])
 // - total[i] holds counters for bit positions i, i+8, i+16, i+24, i+32, i+40, i+48, i+56
 // - 8 iterations instead of 64
-//
-// Note that PAC_COUNT() effectively also used SWAR
 //
 // PAC_SUM() uses SWAR (SIMD Within A Register) for all integer bit widths
 // - BITS=8:  8 values packed per uint64_t, total[8],  8 iterations
@@ -176,10 +173,10 @@ struct PacSumIntState {
 #endif
 #else
 	// Field ordering optimized for memory layout:
-	// 1. seen_null (1 byte)
+	// 1. seen_null (1 byte -- only in the old unsafe NULL semantics)
 	// 2. exact_totals (sized to fit level's range - value is always valid after flush)
-	// 3. exact_count
-	// 4. allocator pointer
+	// 3. key_hash (used to track initialization of all counters)
+	// 4. exact_count (required for AVG really)
 	// 5. probabilistic pointers (lazily allocated)
 #ifdef PAC_UNSAFENULL
 	bool seen_null;

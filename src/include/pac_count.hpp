@@ -52,7 +52,6 @@ void RegisterPacCountFunctions(ExtensionLoader &);
 // So after 255 iterations, the probabilistic_total8[64] are added to uint64_t probabilistic_total[64] and reset to 0.
 //
 // The idea is that we get very fast performance 255 times and slower performance once every 256 only.
-// This SIMD-friendly implementation can make PAC counting almost as fast as normal counting.
 //
 // Define PAC_NOCASCADING for a naive implementation that directly updates uint64_t[64] counters.
 // This is slower but simpler and useful for benchmarking the SWAR optimization.
