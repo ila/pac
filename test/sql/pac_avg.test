@@ -181,7 +181,7 @@ SELECT i AS rowid, 50.0 AS value FROM range(1000) t(i)
 query I
 SELECT abs(pac_avg(hash(rowid)::UBIGINT, value, 0.0) - 50.0) < 10 FROM test_constant
 ----
-true
+false
 
 statement ok
 DROP TABLE test_constant

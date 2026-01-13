@@ -231,21 +231,15 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 	}
 }
 // Helper to combine src array into dst at a specific level
-// If src is null, does nothing. If dst is null, moves pointer from src to dst.
-// Note: exact_totals only used in move case (when both exist, they're handled separately)
-template <typename BUF_T, typename EXACT_T>
-static inline void CombineLevel(BUF_T *&src_buf, BUF_T *&dst_buf, EXACT_T &src_exact, EXACT_T &dst_exact, idx_t count) {
-	if (src_buf) {
-		if (dst_buf) {
-			for (idx_t j = 0; j < count; j++) {
-				dst_buf[j] += src_buf[j];
-			}
-			// exact_totals handled separately (before this call) to avoid overflow
-		} else {
-			dst_buf = src_buf;
-			dst_exact = src_exact;
-			src_buf = nullptr;
+template <typename BUF_T>
+static inline void CombineLevel(BUF_T *&src_buf, BUF_T *&dst_buf, idx_t count) {
+	if (src_buf && dst_buf) {
+		for (idx_t j = 0; j < count; j++) {
+			dst_buf[j] += src_buf[j];
 		}
+	} else if (src_buf) {
+		dst_buf = src_buf;
+		src_buf = nullptr;
 	}
 }
 
@@ -310,13 +304,12 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		} else {
 			d->exact_total64 += s->exact_total64;
 		}
-		// Combine arrays at each level (exact_totals handled above, but passed for move case)
-		hugeint_t dummy = 0;
-		CombineLevel(s->probabilistic_total8, d->probabilistic_total8, s->exact_total8, d->exact_total8, 8);
-		CombineLevel(s->probabilistic_total16, d->probabilistic_total16, s->exact_total16, d->exact_total16, 16);
-		CombineLevel(s->probabilistic_total32, d->probabilistic_total32, s->exact_total32, d->exact_total32, 32);
-		CombineLevel(s->probabilistic_total64, d->probabilistic_total64, s->exact_total64, d->exact_total64, 64);
-		CombineLevel(s->probabilistic_total128, d->probabilistic_total128, dummy, dummy, 64);
+		// Combine arrays at each level
+		CombineLevel(s->probabilistic_total8, d->probabilistic_total8, 8);
+		CombineLevel(s->probabilistic_total16, d->probabilistic_total16, 16);
+		CombineLevel(s->probabilistic_total32, d->probabilistic_total32, 32);
+		CombineLevel(s->probabilistic_total64, d->probabilistic_total64, 64);
+		CombineLevel(s->probabilistic_total128, d->probabilistic_total128, 64);
 #endif
 		d->exact_count += s->exact_count;
 	}

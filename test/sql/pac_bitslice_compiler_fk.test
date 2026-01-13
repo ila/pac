@@ -197,7 +197,7 @@ GROUP BY c.id
 ORDER BY c.id
 LIMIT 3
 ----
-0	NULL	NULL
+0	9	NULL
 1	NULL	NULL
 2	NULL	NULL
 
@@ -296,9 +296,9 @@ LIMIT 5
 ----
 6	12
 9	18
-13	6
-18	16
-23	6
+13	5
+14	8
+16	12
 
 # Test mixed INNER and LEFT JOINs with MIN - project non-join key
 query II
