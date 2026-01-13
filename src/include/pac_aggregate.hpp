@@ -35,12 +35,19 @@ unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const Bo
 void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 
 // Declare the noisy-sample helper so other translation units (pac_count.cpp) can call it.
-// Overload with use_deterministic_noise parameter (when true, uses Box-Muller; when false, uses
-// std::normal_distribution)
+// is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen,
-                                    bool use_deterministic_noise);
-// Backward compatibility overload (defaults to deterministic)
-double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen);
+                                    bool use_deterministic_noise = true, uint64_t is_null = 0);
+
+// PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
+// Uses rnd&63 as threshold, returns true if bitcount >= threshold
+static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
+	return __builtin_popcountll(key_hash) >= (rnd & 63);
+}
+
+// PacNoiseInNull: probabilistically returns true based on bit count in key_hash.
+// Probability = popcount(key_hash) / 64. If mi==0, returns deterministic bit 0.
+bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen);
 
 // Bind data used by PAC aggregates to carry the `mi` parameter.
 struct PacBindData : public FunctionData {

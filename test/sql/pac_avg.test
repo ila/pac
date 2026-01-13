@@ -160,7 +160,7 @@ true
 # Edge cases
 # ===========================================================
 
-# Single row - pac_avg should return value itself (with noise)
+# Single row - pac_avg may return NULL based on key_hash bit pattern
 statement ok
 CREATE TABLE test_single AS
 SELECT 1 AS rowid, 42.0 AS value
@@ -168,7 +168,7 @@ SELECT 1 AS rowid, 42.0 AS value
 query I
 SELECT pac_avg(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_single
 ----
-true
+false
 
 statement ok
 DROP TABLE test_single

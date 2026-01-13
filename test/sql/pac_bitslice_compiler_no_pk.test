@@ -28,19 +28,19 @@ pRAGMA add_pac_privacy_unit('bitslice_a');
 query I
 SELECT SUM(val) FROM bitslice_a
 ----
-77
+99
 
 query I
 SELECT COUNT(val) AS c FROM bitslice_a
 ----
-25
+26
 
 # SUM with JOIN (no GROUP BY)
 query I
 SELECT SUM(a.val)
 FROM bitslice_a a JOIN bitslice_b b ON a.grp = b.grp
 ----
-385
+496
 
 # COUNT with JOIN + GROUP BY
 query II
@@ -49,10 +49,10 @@ FROM bitslice_a a INNER JOIN bitslice_b b ON a.grp = b.grp
 GROUP BY b.other
 ORDER BY b.other
 ----
-0	34
-1	32
-2	30
-3	29
+0	40
+1	29
+2	31
+3	30
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -64,10 +64,10 @@ LEFT JOIN bitslice_b b ON a.grp = b.grp
 GROUP BY b.other
 ORDER BY b.other
 ----
-0	34
-1	32
-2	30
-3	29
+0	41
+1	30
+2	31
+3	31
 
 # Test LEFT JOIN with NULL handling (no PK)
 statement ok
@@ -81,10 +81,10 @@ WHERE b.other IS NOT NULL
 GROUP BY b.other
 ORDER BY b.other
 ----
-0	99
-1	86
-2	95
-3	105
+0	148
+1	107
+2	124
+3	116
 
 statement ok
 DELETE FROM bitslice_a WHERE id = 100;
@@ -101,12 +101,12 @@ pRAGMA add_pac_privacy_unit('bitslice_with_rowid');
 query I
 SELECT SUM(val) FROM bitslice_with_rowid
 ----
-33
+51
 
 query I
 SELECT COUNT(rowid) FROM bitslice_with_rowid
 ----
-9
+12
 
 # Test RIGHT JOIN with no-PK tables, aggregating with filtering condition
 query III
@@ -116,10 +116,10 @@ RIGHT JOIN bitslice_b b ON a.grp = b.grp AND a.grp2 = 0
 GROUP BY b.other
 ORDER BY b.other
 ----
-0	7	30
-1	7	28
-2	5	23
-3	6	24
+0	12	54
+1	10	43
+2	8	36
+3	10	47
 
 # Cleanup
 statement ok

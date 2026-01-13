@@ -159,13 +159,13 @@ SELECT COUNT(*) = 4 FROM (
 ----
 true
 
-# Test all NULLs column - should return ~0
+# Test all NULLs column - should return NULL (no valid rows counted)
 statement ok
 CREATE TABLE test_all_nulls AS
 SELECT i AS rowid, NULL::INTEGER AS all_null_col FROM range(100) t(i)
 
 query I
-SELECT abs(pac_count(hash(rowid)::UBIGINT, all_null_col, 0.0)) < 10 FROM test_all_nulls
+SELECT pac_count(hash(rowid)::UBIGINT, all_null_col, 0.0) IS NULL FROM test_all_nulls
 ----
 true
 

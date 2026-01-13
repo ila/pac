@@ -81,28 +81,50 @@ static inline double DeterministicNormalSample(std::mt19937_64 &gen, bool &has_s
 	return mean + z0 * stddev;
 }
 
+// PacNoiseInNull: probabilistically returns true based on bit count in key_hash
+// Probability = popcount(key_hash) / 64. If mi==0, returns deterministic bit 0.
+bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen) {
+	if (mi == 0.0) {
+		return !(key_hash & 1);
+	}
+	return PacNoisedSelect(~key_hash, gen());
+}
+
 // Finalize: compute noisy sample from the 64 counters (works on double array)
 // If use_deterministic_noise is true, uses platform-agnostic Box-Muller; otherwise uses std::normal_distribution
+// is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
+// Returns: noise + counters[0] (the deterministic counter at bit 0)
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen,
-                                    bool use_deterministic_noise) {
-	// mi=0 means no noise - return counter 42 directly (no RNG consumption)
+                                    bool use_deterministic_noise, uint64_t is_null) {
+	D_ASSERT(~is_null != 0); // at least one bit must be valid
+
+	// mi=0 means no noise - return 2*counter[0] directly (no RNG consumption)
+	// Factor of 2 accounts for the missing random counter yJ term
 	if (mi == 0.0) {
-		return counters[41];
+		D_ASSERT(!(is_null & 1)); // bit 0 must be valid for mi=0
+		return 2.0 * counters[0];
 	}
-	constexpr int N = 64;
-	// Compute empirical (second-moment) variance across the 64 counters and use it
-	// to determine the noise variance. We reuse ComputeSecondMomentVariance here.
-	vector<double> vals(counters, counters + N);
+
+	// Compact the counters array, removing entries where is_null bit is set
+	vector<double> vals;
+	vals.reserve(64);
+	for (int i = 0; i < 64; i++) {
+		if (!((is_null >> i) & 1)) {
+			vals.push_back(counters[i]);
+		}
+	}
+	int N = static_cast<int>(vals.size());
+
 	// Compute delta using the shared exported helper (validates mi as well)
 	double delta = ComputeDeltaFromValues(vals, mi);
 
-	// Pick random index J in [0, N-1] to select the base counter yJ (same semantics as before)
+	// Pick random index J in [0, N-1] to select the base counter yJ
 	int J = static_cast<int>(DeterministicUniformRange(gen, N));
-	double yJ = counters[J];
+	double yJ = vals[J];
 
 	if (delta <= 0.0 || !std::isfinite(delta)) {
 		// If there's no variance, return the selected counter value without noise.
-		return yJ;
+		return yJ + counters[0];
 	}
 
 	// Sample normal(0, sqrt(delta)) using either deterministic Box-Muller or std::normal_distribution
@@ -123,12 +145,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 		std::normal_distribution<double> normal_dist(0.0, std::sqrt(delta));
 		noise = normal_dist(gen);
 	}
-	return yJ + noise;
-}
-
-// Backward compatibility: overload without use_deterministic_noise defaults to deterministic
-double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen) {
-	return PacNoisySampleFrom64Counters(counters, mi, gen, true);
+	return yJ + noise + counters[0];
 }
 
 struct PacAggregateLocalState : public FunctionLocalState {

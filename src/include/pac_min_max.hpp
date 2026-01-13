@@ -179,6 +179,7 @@ struct PacMinMaxState {
 
 	bool initialized;
 	uint16_t update_count;
+	uint64_t key_hash; // OR of all key_hashes seen (for PacNoiseInNull)
 	T global_bound;
 	T extremes[64];
 
@@ -189,6 +190,7 @@ struct PacMinMaxState {
 		}
 		global_bound = init;
 		update_count = 0;
+		key_hash = 0;
 		initialized = true;
 	}
 
@@ -208,9 +210,8 @@ struct PacMinMaxState {
 	}
 
 	void GetTotalsAsDouble(double *dst) const {
-		T init = InitValue();
 		for (int i = 0; i < 64; i++) {
-			dst[i] = (extremes[i] == init) ? 0.0 : ToDouble(extremes[i]);
+			dst[i] = ToDouble(extremes[i]);
 		}
 	}
 
@@ -221,6 +222,7 @@ struct PacMinMaxState {
 		if (!initialized) {
 			Initialize();
 		}
+		key_hash |= src.key_hash;
 		for (int i = 0; i < 64; i++) {
 			extremes[i] = PAC_BETTER(extremes[i], src.extremes[i]);
 		}
@@ -325,6 +327,7 @@ DEFINE_UPDATE_HUGE(uhugeint_t, false)
 template <typename T, bool IS_MAX>
 inline void PacMinMaxUpdateOne(PacMinMaxState<T, IS_MAX> &state, uint64_t key_hash, T value, ArenaAllocator &a) {
 	state.EnsureState(a);
+	state.key_hash |= key_hash;
 #ifndef PAC_NOBOUNDOPT
 	if (!PAC_IS_BETTER(value, state.global_bound)) {
 		return;

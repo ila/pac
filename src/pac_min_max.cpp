@@ -92,6 +92,7 @@ template <typename T, bool IS_MAX>
 static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<MinMaxState<T, IS_MAX> *>(states);
 	auto data = FlatVector::GetData<T>(result);
+	auto &result_mask = FlatVector::Validity(result);
 
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	std::mt19937_64 gen(seed);
@@ -103,6 +104,12 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		state_ptrs[i]->FlushBuffer(*state_ptrs[i], input.allocator);
 #endif
 		auto *s = state_ptrs[i]->GetState();
+		// Check if we should return NULL based on key_hash
+		uint64_t key_hash = s ? s->key_hash : 0;
+		if (PacNoiseInNull(key_hash, mi, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 		double buf[64];
 		if (s && s->initialized) {
 			s->GetTotalsAsDouble(buf);
@@ -112,7 +119,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		for (int j = 0; j < 64; j++) {
 			buf[j] /= 2.0; // if we add noise of the same scale to a min or max, it gets twice too big
 		}
-		data[offset + i] = FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
+		data[offset + i] = FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, gen, true, ~key_hash));
 	}
 }
 

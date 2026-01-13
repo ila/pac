@@ -31,6 +31,7 @@ template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)total
 PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                         ArenaAllocator &allocator) {
+	state.key_hash |= key_hash;
 #ifdef PAC_NOCASCADING
 	AddToTotalsSimple(state.probabilistic_total128, value, key_hash); // directly add the value to the final total
 #else
@@ -63,6 +64,7 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum total
 PacSumUpdateOneInternal(PacSumDoubleState &state, uint64_t key_hash, double value, ArenaAllocator &) {
+	state.key_hash |= key_hash;
 	AddToTotalsSimple(state.probabilistic_total, value, key_hash);
 }
 
@@ -70,6 +72,7 @@ PacSumUpdateOneInternal(PacSumDoubleState &state, uint64_t key_hash, double valu
 template <bool SIGNED>
 AUTOVECTORIZE inline void PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
                                                   ArenaAllocator &allocator) {
+	state.key_hash |= key_hash;
 #ifndef PAC_NOCASCADING
 	PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total128, idx_t(64));
 #endif
@@ -278,6 +281,7 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 			continue; // src has no state allocated, nothing to combine
 		}
 		auto *d = d_wrapper->EnsureState(allocator);
+		d->key_hash |= s->key_hash;
 #ifdef PAC_NOCASCADING
 		for (int j = 0; j < 64; j++) {
 			d->probabilistic_total128[j] += s->probabilistic_total128[j];
@@ -347,6 +351,7 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 			continue; // src has no state allocated
 		}
 		auto *d = d_wrapper->EnsureState(allocator);
+		d->key_hash |= s->key_hash;
 		d->exact_count += s->exact_count;
 		for (int j = 0; j < 64; j++) {
 			d->probabilistic_total[j] += s->probabilistic_total[j];
@@ -377,6 +382,12 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 			continue;
 		}
 #endif
+		// Check if we should return NULL based on key_hash
+		uint64_t key_hash = s ? s->key_hash : 0;
+		if (PacNoiseInNull(key_hash, mi, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 		double buf[64];
 		if (s) {
 			s->Flush(input.allocator);
@@ -397,8 +408,7 @@ static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &re
 				buf[j] /= divisor;
 			}
 		}
-		// the random counter we choose to read is #42 (but we start counting from 0, so [41])
-		data[offset + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen) + buf[41]);
+		data[offset + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen, true, ~key_hash));
 	}
 }
 

@@ -50,7 +50,7 @@ GROUP BY id
 ORDER BY id
 LIMIT 1
 ----
-0	0	0
+0	NULL	NULL
 
 # Single GROUP BY with multiple aggregates (SUM, COUNT, AVG) on FK child table
 query IIII
@@ -60,8 +60,8 @@ GROUP BY id
 ORDER BY id
 LIMIT 2
 ----
-0	0	0	0.00
-1	1	1	1.00
+0	NULL	NULL	NULL
+1	NULL	NULL	NULL
 
 # Create a deep chain (child -> deep1 -> deep2 -> deepleaf)
 statement ok
@@ -107,11 +107,11 @@ GROUP BY id
 ORDER BY id
 LIMIT 5
 ----
-0	0
-1	0
-2	0
-3	0
-4	0
+0	NULL
+1	NULL
+2	NULL
+3	NULL
+4	NULL
 
 # Test with multiple INNER JOINs in the FK chain with MAX - project non-join key
 query II
@@ -123,11 +123,11 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 5
 ----
-0	0
-1	0
-2	0
-3	0
-4	0
+0	NULL
+1	NULL
+2	NULL
+3	NULL
+4	NULL
 
 # Test with full FK chain explicit joins - project non-join key
 query II
@@ -140,11 +140,11 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 5
 ----
-0	0
-1	1
-2	0
-3	0
-4	1
+0	NULL
+1	NULL
+2	NULL
+3	NULL
+4	NULL
 
 # Test reverse join order with AVG - project non-join key from leaf table
 query II
@@ -155,9 +155,9 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 3
 ----
-0	0.00
-1	1.00
-2	0.00
+0	NULL
+1	NULL
+2	NULL
 
 # Test with multiple aggregates on joined tables (SUM and MAX) - project non-join key
 query III
@@ -169,9 +169,9 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 3
 ----
-0	0	0
-1	1	0
-2	0	0
+0	NULL	NULL
+1	NULL	NULL
+2	NULL	NULL
 
 # Create side table for testing multiple FK paths to same PU
 statement ok
@@ -197,9 +197,9 @@ GROUP BY c.id
 ORDER BY c.id
 LIMIT 3
 ----
-0	0	0
-1	5	0
-2	0	0
+0	NULL	NULL
+1	NULL	NULL
+2	NULL	NULL
 
 # Test with HAVING clause on joined aggregates - project non-join key
 query II
@@ -211,7 +211,7 @@ HAVING SUM(d1.val) > 5
 ORDER BY d1.id
 LIMIT 1
 ----
-5	10
+6	12
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -226,9 +226,9 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 3
 ----
-0	0
-1	0
-2	0
+0	NULL
+1	NULL
+2	NULL
 
 statement ok
 DELETE FROM bitslice_deepleaf WHERE id = 100;
@@ -241,7 +241,7 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 1
 ----
-0	0	0
+0	NULL	NULL
 
 # Test multiple LEFT JOINs in the FK chain - project non-join key
 query II
@@ -253,11 +253,11 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 5
 ----
-0	0
-1	1
-2	0
-3	3
-4	0
+0	NULL
+1	NULL
+2	NULL
+3	NULL
+4	NULL
 
 # Test LEFT JOIN with complex aggregates - project non-join key
 query IIIII
@@ -267,9 +267,9 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 3
 ----
-0	0	0.00	0	0
-1	1	1.00	0	0
-2	0	0.00	0	0
+0	NULL	NULL	NULL	NULL
+1	NULL	NULL	NULL	NULL
+2	NULL	NULL	NULL	NULL
 
 # Test LEFT JOIN from child to side table - project non-join key (c.id)
 query III
@@ -280,9 +280,9 @@ GROUP BY c.id
 ORDER BY c.id
 LIMIT 3
 ----
-0	0	2
-1	5	0
-2	0	0
+0	NULL	NULL
+1	NULL	NULL
+2	NULL	NULL
 
 # Test LEFT JOIN with HAVING clause - project non-join key
 query II
@@ -294,11 +294,11 @@ HAVING SUM(d1.val) >= 5
 ORDER BY d1.id
 LIMIT 5
 ----
-5	10
 6	12
-8	8
-15	10
-16	11
+9	18
+13	6
+18	16
+23	6
 
 # Test mixed INNER and LEFT JOINs with MIN - project non-join key
 query II
@@ -310,11 +310,11 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 5
 ----
-0	0
-1	0
-2	0
-3	0
-4	0
+0	NULL
+1	NULL
+2	NULL
+3	NULL
+4	NULL
 
 # ========== UNION / UNION ALL TEST CASES ==========
 

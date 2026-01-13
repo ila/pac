@@ -168,6 +168,7 @@ struct PacSumIntState {
 	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
 
 #ifdef PAC_NOCASCADING
+	uint64_t key_hash;                    // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t exact_count;                 // total count of values added (for pac_avg)
 	hugeint_t probabilistic_total128[64]; // final total (non-cascading mode only)
 #ifdef PAC_UNSAFENULL
@@ -193,6 +194,7 @@ struct PacSumIntState {
 	T32 exact_total32; // sum of values at level 32 since last flush (fits in T32 after flush)
 	T64 exact_total64; // sum of values at level 64 since last flush
 
+	uint64_t key_hash;    // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t exact_count; // total count of values added (for pac_avg)
 
 	// All levels lazily allocated via arena allocator (nullptr if not allocated)
@@ -383,6 +385,7 @@ struct PacSumDoubleState {
 #ifdef PAC_UNSAFENULL
 	bool seen_null;
 #endif
+	uint64_t key_hash;    // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t exact_count; // total count of values added (for pac_avg)
 	double probabilistic_total[64];
 

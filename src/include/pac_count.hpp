@@ -83,6 +83,7 @@ struct PacCountState {
 	uint64_t probabilistic_total8[8]; // SWAR packed uint8_t counters
 	uint8_t exact_total8;             // counts updates, flush at 255
 #endif
+	uint64_t key_hash;                // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t probabilistic_total[64]; // final totals
 
 #ifndef PAC_GODBOLT
@@ -116,6 +117,7 @@ struct PacCountState {
 // NOCASCADING: simple direct update to uint64_t[64]
 template <>
 inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
+	agg.key_hash |= hash;
 	for (int i = 0; i < 64; i++) {
 #ifdef PAC_NOSIMD
 		if ((hash >> i) & 1) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
@@ -144,6 +146,7 @@ void PacCountUpdateSWAR(PacCountState &state, uint64_t key_hash) {
 #ifndef PAC_GODBOLT
 template <>
 inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &) {
+	agg.key_hash |= hash;
 	PacCountUpdateSWAR(agg, hash);
 	if (++agg.exact_total8 == 255) {
 		agg.FlushLevel();
@@ -180,12 +183,13 @@ struct PacCountStateWrapper {
 		return s;
 	}
 
-	// Flush buffered hashes + key_hash into dst state
+	// Flush buffered hashes into dst state
 	AUTOVECTORIZE inline void FlushBufferInternal(PacCountState &dst, uint64_t *__restrict__ hash_buf, uint64_t cnt) {
 		if (cnt + dst.exact_total8 >= 255) {
 			dst.FlushLevel(); // make room
 		}
 		for (uint64_t i = 0; i < cnt; i++) {
+			dst.key_hash |= hash_buf[i];
 			PacCountUpdateSWAR(dst, hash_buf[i]);
 		}
 	}
@@ -205,7 +209,7 @@ struct PacCountStateWrapper {
 // PacCountUpdateOne: direct state update (bypasses buffering for ungrouped aggregates)
 template <>
 inline void PacCountUpdateOne(PacCountStateWrapper &agg, uint64_t key_hash, ArenaAllocator &a) {
-	PacCountUpdateOne(*agg.EnsureState(a), key_hash, a);
+	PacCountUpdateOne(*agg.EnsureState(a), key_hash, a); // inner state tracks key_hash
 }
 
 // PacCountBufferOrUpdateOne: buffered update for scatter/grouped aggregates

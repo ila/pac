@@ -129,6 +129,7 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 		PacCountState *ss = sa[i]->GetState();
 		if (ss) { // we have an allocated state: flush it into dst
 			PacCountState &ds = *da[i]->EnsureState(aggr.allocator);
+			ds.key_hash |= ss->key_hash;
 			ss->FlushLevel();
 			for (int j = 0; j < 64; j++) {
 				ds.probabilistic_total[j] += ss->probabilistic_total[j];
@@ -140,6 +141,7 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
+	auto &result_mask = FlatVector::Validity(result);
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	std::mt19937_64 gen(seed);
 	double mi = input.bind_data->Cast<PacBindData>().mi;
@@ -149,14 +151,19 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 		aggs[i]->FlushBuffer(*aggs[i], input.allocator); // flush values into yourself
 #endif
 		PacCountState *s = aggs[i]->GetState();
+		uint64_t key_hash = s ? s->key_hash : 0;
+		// Check if we should return NULL based on key_hash
+		if (PacNoiseInNull(key_hash, mi, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 		if (s) {
 			s->FlushLevel(); // flush uint8_t level into uint64_t totals
 			s->GetTotalsAsDouble(buf);
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		data[offset + i] =
-		    static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen)) + static_cast<int64_t>(buf[41]);
+		data[offset + i] = static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen, true, ~key_hash));
 	}
 }
 
