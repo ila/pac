@@ -75,6 +75,19 @@ LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
 	throw InternalException("PAC Compiler: could not find LogicalAggregate node in plan");
 }
 
+// Find all LogicalAggregate nodes in the plan tree
+void FindAllAggregates(unique_ptr<LogicalOperator> &op, vector<LogicalAggregate *> &aggregates) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		aggregates.push_back(&op->Cast<LogicalAggregate>());
+	}
+	for (auto &child : op->children) {
+		FindAllAggregates(child, aggregates);
+	}
+}
+
 LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child) {
 	if (!root) {
 		return nullptr;

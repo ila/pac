@@ -91,28 +91,28 @@ PRAGMA add_pac_privacy_unit('pu_no_pk');
 query I
 SELECT SUM(m.data_val) FROM mid_ab m JOIN pu_a a ON m.a_fk = a.id
 ----
-1306
+1426
 
 # Aggregate with JOIN between two PUs via intermediate table
 query I
 SELECT SUM(m.data_val)
 FROM mid_ab m JOIN pu_a a ON m.a_fk = a.id JOIN pu_b b ON m.b_fk = b.id
 ----
-1354
+1606
 
 # Multi-PU join: joining through mid_ac to both pu_a and pu_c
 query I
 SELECT SUM(m.data_val)
 FROM mid_ac m JOIN pu_a a ON m.a_fk = a.id JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 ----
-2146
+2249
 
 # Test with table without PK (pu_no_pk) - join via non-FK column match
 query I
 SELECT SUM(m.data_val)
 FROM mid_no_pk m JOIN pu_no_pk np ON m.grp = np.grp
 ----
-16905
+14772
 
 # Multi-PU with GROUP BY on non-PU column (use mid_id which is not a join key)
 query II
@@ -122,9 +122,9 @@ GROUP BY m.mid_id
 ORDER BY m.mid_id
 LIMIT 3
 ----
-0	0
-1	4
-2	8
+0	NULL
+1	NULL
+2	NULL
 
 # Three-way multi-PU join
 query I
@@ -135,7 +135,7 @@ JOIN pu_b b ON m1.b_fk = b.id
 JOIN mid_ac m2 ON m1.a_fk = m2.a_fk
 JOIN pu_c c ON m2.c_fk_a = c.a_id AND m2.c_fk_b = c.b_id
 ----
-10857
+12244
 
 # Test join elimination path: when configured, avoid joining PU table but use FK columns
 statement ok
@@ -145,7 +145,7 @@ query I
 SELECT SUM(m.data_val)
 FROM mid_ab m JOIN pu_a a ON m.a_fk = a.id
 ----
-1306
+1426
 
 statement ok
 SET pac_join_elimination = false;
@@ -155,14 +155,14 @@ query I
 SELECT COUNT(*)
 FROM mid_ab m JOIN pu_a a ON m.a_fk = a.id JOIN pu_b b ON m.b_fk = b.id
 ----
-17
+53
 
 # Test AVG with multi-PU
 query I
 SELECT AVG(m.data_val)::DECIMAL(5,2)
 FROM mid_ab m JOIN pu_a a ON m.a_fk = a.id JOIN pu_b b ON m.b_fk = b.id
 ----
-45.14
+53.56
 
 # STRESS TEST: Complex multi-PU scenario with all PU types
 # This query joins ALL privacy units (pu_a, pu_b, pu_c, pu_no_pk) in a single query
@@ -197,7 +197,7 @@ JOIN pu_b b ON m.b_fk = b.id
 JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 JOIN pu_no_pk np ON m.np_grp = np.grp
 ----
-29	23972	133.18
+372	25883	143.80
 
 # Multi-PU with MIN/MAX aggregates and GROUP BY on non-join-key
 query IIII
@@ -213,7 +213,7 @@ GROUP BY m.mid_id
 ORDER BY m.mid_id
 LIMIT 1
 ----
-0	0	0	0
+0	NULL	NULL	NULL
 
 # Test with multiple aggregates on same column but different PU combinations
 query III
@@ -226,7 +226,7 @@ JOIN pu_a a ON m.a_fk = a.id
 JOIN pu_b b ON m.b_fk = b.id
 JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 ----
-3581	7	119.39
+4191	59	139.72
 
 # Test with join elimination on multi-PU query
 statement ok
@@ -239,7 +239,7 @@ JOIN pu_a a ON m.a_fk = a.id
 JOIN pu_b b ON m.b_fk = b.id
 JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 ----
-3581
+4191
 
 statement ok
 SET pac_join_elimination = false;

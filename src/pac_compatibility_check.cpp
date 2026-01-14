@@ -111,11 +111,11 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 }
 
 // Forward declaration
-static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding,
-                                   const vector<string> &pu_tables, LogicalOperator &root);
+static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding, const vector<string> &pu_tables,
+                                  LogicalOperator &root);
 
 // Helper: Find the operator in the plan that produces a given table_index
-static LogicalOperator* FindOperatorByTableIndex(LogicalOperator &op, idx_t table_index) {
+static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t table_index) {
 	// Check if this operator produces the table_index
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
@@ -148,8 +148,8 @@ static LogicalOperator* FindOperatorByTableIndex(LogicalOperator &op, idx_t tabl
 // If the binding comes from an aggregate expression, it's safe (the value has been aggregated).
 // If the binding comes from a GROUP BY column, we need to trace that column's source further.
 // If we reach a PU table column directly (or via join key equivalence), we reject.
-static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding,
-                                   const vector<string> &pu_tables, LogicalOperator &root) {
+static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding, const vector<string> &pu_tables,
+                                  LogicalOperator &root) {
 	// Find the operator that produces this binding's table_index
 	auto *source_op = FindOperatorByTableIndex(root, binding.table_index);
 	if (!source_op) {
@@ -204,7 +204,7 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 // plan_root is the full plan root (used for tracing bindings)
 // current_op is the operator we're currently checking
 static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOperator &plan_root,
-                                         const vector<string> &pu_tables) {
+                                        const vector<string> &pu_tables) {
 	auto trace_expressions = [&](vector<unique_ptr<Expression>> &expressions) {
 		for (auto &expr : expressions) {
 			if (!expr) {

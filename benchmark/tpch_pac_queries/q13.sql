@@ -1,10 +1,10 @@
 SELECT
     c_count,
-    pac_count(hash(c_orders.c_custkey)) AS custdist
+    count(*) AS custdist
 FROM (
          SELECT
              customer.c_custkey,
-             COUNT(orders.o_orderkey) AS c_count
+             pac_count(hash(orders.o_orderkey), o_orderkey) AS c_count
          FROM
              customer
                  LEFT OUTER JOIN orders

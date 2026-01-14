@@ -23,6 +23,10 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 // Throws InternalException if not found.
 LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op);
 
+// Find all LogicalAggregate nodes in the plan tree.
+// Returns a vector of pointers to all aggregates found.
+void FindAllAggregates(unique_ptr<LogicalOperator> &op, vector<LogicalAggregate *> &aggregates);
+
 // Find the parent LogicalProjection of a given child node.
 // Returns nullptr if not found.
 LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child);

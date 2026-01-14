@@ -297,7 +297,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 							if (!parent->children.empty() && parent->children[0].get() == current_proj) {
 								// Add a pass-through expression for the FK column
 								auto pass_through_binding = ColumnBinding(current_proj->table_index, deepest_proj_idx);
-								parent_proj.expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, pass_through_binding));
+								parent_proj.expressions.push_back(
+								    make_uniq<BoundColumnRefExpression>(col_type, pass_through_binding));
 
 								// Update for next iteration
 								deepest_proj_idx = parent_proj.expressions.size() - 1;
@@ -386,11 +387,23 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	// Combine all hash expressions with AND
 	auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
-	// Now we need to edit the aggregate node to use pac functions
-	auto *agg = FindTopAggregate(plan);
+	// Find ALL aggregate nodes in the plan (not just the topmost one)
+	// For queries with nested aggregates like TPC-H Q13, we need to find all of them
+	// but only modify the BOTTOMMOST one (closest to the PU table)
+	vector<LogicalAggregate *> all_aggregates;
+	FindAllAggregates(plan, all_aggregates);
 
-	// Use the helper function to modify aggregates with PAC functions
-	ModifyAggregatesWithPacFunctions(input, agg, combined_hash_expr);
+	if (all_aggregates.empty()) {
+		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
+	}
+
+	// For nested aggregates, we only want to modify the bottommost aggregate
+	// (the one closest to the base table scan). The outer aggregates operate on
+	// already-aggregated data and should be left as-is.
+	// Since FindAllAggregates does a pre-order traversal, the last aggregate in the
+	// vector is the bottommost one.
+	auto *bottommost_agg = all_aggregates.back();
+	ModifyAggregatesWithPacFunctions(input, bottommost_agg, combined_hash_expr);
 }
 
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
@@ -439,11 +452,22 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	// Combine all hash expressions with AND
 	auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
-	// Now we need to edit the aggregate node to use pac functions
-	auto *agg = FindTopAggregate(plan);
+	// Find ALL aggregate nodes in the plan (not just the topmost one)
+	// This is needed for queries with nested aggregates like TPC-H Q13
+	vector<LogicalAggregate *> all_aggregates;
+	FindAllAggregates(plan, all_aggregates);
 
-	// Use the helper function to modify aggregates with PAC functions
-	ModifyAggregatesWithPacFunctions(input, agg, combined_hash_expr);
+	if (all_aggregates.empty()) {
+		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
+	}
+
+	// For nested aggregates, we only want to modify the bottommost aggregate
+	// (the one closest to the base table scan). The outer aggregates operate on
+	// already-aggregated data and should be left as-is.
+	// Since FindAllAggregates does a pre-order traversal, the last aggregate in the
+	// vector is the bottommost one.
+	auto *bottommost_agg = all_aggregates.back();
+	ModifyAggregatesWithPacFunctions(input, bottommost_agg, combined_hash_expr);
 }
 
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,

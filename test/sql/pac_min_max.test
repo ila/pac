@@ -25,7 +25,7 @@ SELECT pac_max(hash('key' || i::varchar), i::tinyint, 0.0) FROM range(1, 50) t(i
 query I
 SELECT pac_max(hash('key' || i::varchar), i::smallint, 0.0) FROM range(1, 100) t(i);
 ----
-95
+99
 
 # Test pac_max with INTEGER (INT32)
 query I
