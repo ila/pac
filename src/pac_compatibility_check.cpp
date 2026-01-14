@@ -261,18 +261,23 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 	}
 }
 
-// Helper: check if the plan contains self-joins (same table scanned multiple times)
-static bool ContainsSelfJoin(const LogicalOperator &op) {
+// Helper: check if the plan contains self-joins of privacy unit tables
+// (same PU table scanned multiple times)
+static bool ContainsSelfJoinOfPU(const LogicalOperator &op, const vector<string> &pu_tables) {
 	std::unordered_map<string, idx_t> scan_counts;
 	CountScans(op, scan_counts);
 
-	// Check if any table is scanned more than once
+	// Create a set of PU table names for quick lookup
+	std::unordered_set<string> pu_set(pu_tables.begin(), pu_tables.end());
+
+	// Check if any PU table is scanned more than once
 	for (auto &kv : scan_counts) {
 		// Skip internal PAC sample tables
 		if (kv.first.rfind("_pac_internal_sample_", 0) == 0) {
 			continue;
 		}
-		if (kv.second > 1) {
+		// Only check PU tables
+		if (pu_set.find(kv.first) != pu_set.end() && kv.second > 1) {
 			return true;
 		}
 	}
@@ -510,7 +515,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			}
 			return result; // Skip PAC compilation, execute query normally
 		}
-		if (ContainsSelfJoin(*plan)) {
+		if (ContainsSelfJoinOfPU(*plan, result.scanned_pu_tables)) {
 			if (is_conservative) {
 				throw InvalidInputException("PAC rewrite: self-joins are not supported for PAC compilation");
 			}

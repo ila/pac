@@ -23,6 +23,145 @@ static bool GetBooleanSetting(ClientContext &context, const string &setting_name
 	return default_value;
 }
 
+// Helper: Propagate PK columns through projections between table scan and aggregate
+// Returns an updated hash expression that references the correct bindings at the aggregate level
+static unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, LogicalGet &pu_get,
+                                                            unique_ptr<Expression> hash_expr,
+                                                            LogicalAggregate *target_agg) {
+	// Find all projections between the PU table scan and the target aggregate
+	vector<LogicalProjection *> projections;
+
+	// Walk up from the aggregate to find projections
+	LogicalOperator *current = target_agg;
+	while (current) {
+		if (current->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			projections.push_back(&current->Cast<LogicalProjection>());
+		}
+
+		// Check if we've reached the table scan
+		if (current->type == LogicalOperatorType::LOGICAL_GET) {
+			auto &get = current->Cast<LogicalGet>();
+			if (get.table_index == pu_get.table_index) {
+				break;
+			}
+		}
+
+		// Move to first child (depth-first search)
+		if (!current->children.empty()) {
+			current = current->children[0].get();
+		} else {
+			break;
+		}
+	}
+
+	// If there are no projections, return the original hash expression
+	if (projections.empty()) {
+		return hash_expr->Copy();
+	}
+
+	// Process projections from bottom to top (closest to table scan first)
+	// We need to add the hash expression columns to each projection
+	std::reverse(projections.begin(), projections.end());
+
+	// Extract all column references from the hash expression
+	vector<ColumnBinding> hash_bindings;
+	ExpressionIterator::EnumerateExpression(hash_expr, [&](Expression &expr) {
+		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+			hash_bindings.push_back(col_ref.binding);
+		}
+	});
+
+	// Map from old binding to new binding as we propagate through projections
+	std::unordered_map<uint64_t, ColumnBinding> binding_map;
+	auto hash_binding_key = [](const ColumnBinding &b) -> uint64_t {
+		return (static_cast<uint64_t>(b.table_index) << 32) | static_cast<uint64_t>(b.column_index);
+	};
+
+	// Initialize map with identity mappings for the original bindings
+	for (auto &binding : hash_bindings) {
+		binding_map[hash_binding_key(binding)] = binding;
+	}
+
+	// Propagate through each projection
+	for (auto *proj : projections) {
+#ifdef DEBUG
+		Printer::Print("PropagatePKThroughProjections: Processing projection #" + std::to_string(proj->table_index));
+#endif
+		// For each binding we're tracking, add it to this projection if not already present
+		std::unordered_map<uint64_t, ColumnBinding> new_binding_map;
+
+		for (auto &kv : binding_map) {
+			auto old_binding = kv.second;
+
+			// Check if this binding is already in the projection's expressions
+			idx_t existing_idx = DConstants::INVALID_INDEX;
+			for (idx_t i = 0; i < proj->expressions.size(); i++) {
+				if (proj->expressions[i]->type == ExpressionType::BOUND_COLUMN_REF) {
+					auto &expr_ref = proj->expressions[i]->Cast<BoundColumnRefExpression>();
+					if (expr_ref.binding.table_index == old_binding.table_index &&
+					    expr_ref.binding.column_index == old_binding.column_index) {
+						existing_idx = i;
+						break;
+					}
+				}
+			}
+
+			idx_t new_idx;
+			if (existing_idx != DConstants::INVALID_INDEX) {
+				// Already in projection, use existing index
+				new_idx = existing_idx;
+			} else {
+				// Add to projection
+				// Get the type from the child operator
+				LogicalType col_type;
+				if (!proj->children.empty()) {
+					auto &child = proj->children[0];
+					auto child_bindings = child->GetColumnBindings();
+					for (idx_t i = 0; i < child_bindings.size(); i++) {
+						if (child_bindings[i].table_index == old_binding.table_index &&
+						    child_bindings[i].column_index == old_binding.column_index) {
+							col_type = child->types[i];
+							break;
+						}
+					}
+				}
+				auto col_binding = ColumnBinding(old_binding.table_index, old_binding.column_index);
+				auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, col_binding);
+				proj->expressions.push_back(std::move(col_ref));
+				new_idx = proj->expressions.size() - 1;
+			}
+
+			// Update mapping: old binding -> new binding in this projection's output
+			ColumnBinding new_binding(proj->table_index, new_idx);
+			new_binding_map[hash_binding_key(old_binding)] = new_binding;
+		}
+
+		binding_map = std::move(new_binding_map);
+	}
+
+	// Now update the hash expression to use the new bindings
+	auto updated_hash = hash_expr->Copy();
+	ExpressionIterator::EnumerateExpression(updated_hash, [&](Expression &expr) {
+		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+			auto key = hash_binding_key(col_ref.binding);
+			if (binding_map.find(key) != binding_map.end()) {
+				auto old_binding = col_ref.binding;
+				col_ref.binding = binding_map[key];
+#ifdef DEBUG
+				Printer::Print(
+				    "PropagatePKThroughProjections: Updated binding [" + std::to_string(old_binding.table_index) + "." +
+				    std::to_string(old_binding.column_index) + "] -> [" + std::to_string(col_ref.binding.table_index) +
+				    "." + std::to_string(col_ref.binding.column_index) + "]");
+#endif
+			}
+		}
+	});
+
+	return updated_hash;
+}
+
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                          const vector<string> &gets_present, const vector<string> &fk_path,
@@ -179,188 +318,86 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				last_table_name = connecting_table;
 			}
 
-			// Find the FK column(s) that reference the PU
-			auto it = check.table_metadata.find(last_table_name);
-			if (it == check.table_metadata.end()) {
-				throw InternalException("PAC compiler: missing metadata for table " + last_table_name);
-			}
+			// Check if the PU table itself is in the query
+			// If it is, it's simpler and more reliable to use it directly
+			unique_ptr<LogicalOperator> *pu_table_ref = FindNodeRefByTable(&plan, privacy_unit);
 
-			vector<string> fk_cols;
-			for (auto &fk : it->second.fks) {
-				if (fk.first == privacy_unit) {
-					fk_cols = fk.second;
-					break;
+			if (pu_table_ref && pu_table_ref->get()) {
+				// PU table is in the query - use it directly (simpler path)
+				auto pu_get = &pu_table_ref->get()->Cast<LogicalGet>();
+
+				vector<string> pu_pks;
+				for (auto &pk : check.table_metadata.at(privacy_unit).pks) {
+					pu_pks.push_back(pk);
 				}
-			}
 
-			if (fk_cols.empty()) {
-				throw InternalException("PAC compiler: no FK found from " + last_table_name + " to " + privacy_unit);
-			}
-
-			// Find the LogicalGet for the last table and ensure FK columns are projected
-			unique_ptr<LogicalOperator> *last_table_ref = FindNodeRefByTable(&plan, last_table_name);
-			if (!last_table_ref || !last_table_ref->get()) {
-				throw InternalException("PAC compiler: could not find LogicalGet for last table " + last_table_name);
-			}
-			auto last_get = &last_table_ref->get()->Cast<LogicalGet>();
-
-			// Ensure FK columns are projected in the table scan
-			for (auto &fk_col : fk_cols) {
-				idx_t proj_idx = EnsureProjectedColumn(*last_get, fk_col);
-				if (proj_idx == DConstants::INVALID_INDEX) {
-					throw InternalException("PAC compiler: failed to project FK column " + fk_col);
-				}
-			}
-
-			// Now we need to find the projection that feeds the aggregate and add the FK columns there
-			auto *agg = FindTopAggregate(plan);
-			if (!agg || agg->children.empty()) {
-				throw InternalException("PAC compiler: could not find aggregate");
-			}
-
-			// The aggregate's input should be a projection (either #7 or #8 based on the plan output)
-			LogicalOperator *agg_input = agg->children[0].get();
-			LogicalProjection *input_projection = nullptr;
-
-			// Find the DEEPEST (last) projection in the aggregate's input chain
-			// We need to add the FK column to the projection closest to the join
-			LogicalOperator *current = agg_input;
-			while (current) {
-				if (current->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-					input_projection = &current->Cast<LogicalProjection>();
-					// Keep going deeper to find the last projection
-					if (!current->children.empty()) {
-						LogicalOperator *next = current->children[0].get();
-						// Check if the next operator is also a projection
-						if (next->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-							current = next;
-							continue;
-						}
-					}
-					// Found the deepest projection
-					break;
-				}
-				if (!current->children.empty()) {
-					current = current->children[0].get();
-				} else {
-					break;
-				}
-			}
-
-			// Handle two cases: with projections and without projections
-			if (!input_projection) {
-				// Case 1: No projection in the aggregate's input chain
-				// We can directly reference FK columns from the table scan
-				// This is the simple case - just use BuildXorHashFromPKs like the original code did
-				hash_input_expr = BuildXorHashFromPKs(input, *last_get, fk_cols);
-			} else {
-				// Case 2: There are projections in the aggregate's input chain
-				// We need to add FK columns to projections and propagate them through all layers
-				vector<unique_ptr<Expression>> fk_col_exprs;
-				idx_t projection_table_idx = input_projection->table_index;
-
-				for (auto &fk_col : fk_cols) {
-					// Find this FK column in the orders table scan
-					idx_t proj_idx = DConstants::INVALID_INDEX;
-					for (idx_t i = 0; i < last_get->GetColumnIds().size(); i++) {
-						auto col_idx = last_get->GetColumnIds()[i];
-						if (!col_idx.IsVirtualColumn()) {
-							idx_t primary = col_idx.GetPrimaryIndex();
-							if (primary < last_get->names.size() && last_get->names[primary] == fk_col) {
-								proj_idx = i;
-								break;
-							}
-						}
-					}
-
+				// Ensure PK columns are projected
+				for (auto &pk : pu_pks) {
+					idx_t proj_idx = EnsureProjectedColumn(*pu_get, pk);
 					if (proj_idx == DConstants::INVALID_INDEX) {
-						throw InternalException("PAC compiler: FK column not found in table scan");
-					}
-
-					auto col_binding = ColumnBinding(last_get->table_index, proj_idx);
-					auto col_index_obj = last_get->GetColumnIds()[proj_idx];
-					auto &col_type = last_get->GetColumnType(col_index_obj);
-
-					// Add this as a new expression in the deepest projection
-					input_projection->expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
-
-					// Now propagate this column through all parent projections up to the aggregate
-					idx_t deepest_proj_idx = input_projection->expressions.size() - 1;
-					LogicalProjection *current_proj = input_projection;
-
-					// Walk up from the deepest projection to the aggregate
-					LogicalOperator *parent = agg_input;
-					while (parent && parent != current_proj) {
-						if (parent->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-							auto &parent_proj = parent->Cast<LogicalProjection>();
-							// Check if parent_proj's child is current_proj
-							if (!parent->children.empty() && parent->children[0].get() == current_proj) {
-								// Add a pass-through expression for the FK column
-								auto pass_through_binding = ColumnBinding(current_proj->table_index, deepest_proj_idx);
-								parent_proj.expressions.push_back(
-								    make_uniq<BoundColumnRefExpression>(col_type, pass_through_binding));
-
-								// Update for next iteration
-								deepest_proj_idx = parent_proj.expressions.size() - 1;
-								current_proj = &parent_proj;
-
-								// Continue searching for more parent projections
-								parent = agg_input;
-								continue;
-							}
-						}
-
-						// Traverse down to find projections
-						if (!parent->children.empty()) {
-							bool found_child = false;
-							for (auto &child : parent->children) {
-								if (child.get() == current_proj) {
-									found_child = true;
-									break;
-								}
-							}
-							if (found_child) {
-								break;
-							}
-							parent = parent->children[0].get();
-						} else {
-							break;
-						}
-					}
-
-					// Create a reference to the projected column for our hash expression
-					// Use the column from the projection that directly feeds the aggregate
-					LogicalProjection *agg_input_proj = nullptr;
-					if (agg_input->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-						agg_input_proj = &agg_input->Cast<LogicalProjection>();
-					}
-
-					if (agg_input_proj) {
-						idx_t final_proj_idx = agg_input_proj->expressions.size() - 1;
-						auto new_col_binding = ColumnBinding(agg_input_proj->table_index, final_proj_idx);
-						fk_col_exprs.push_back(make_uniq<BoundColumnRefExpression>(col_type, new_col_binding));
-					} else {
-						// Fallback: use the deepest projection
-						auto new_col_binding = ColumnBinding(projection_table_idx, deepest_proj_idx);
-						fk_col_exprs.push_back(make_uniq<BoundColumnRefExpression>(col_type, new_col_binding));
+						throw InternalException("PAC compiler: failed to project PK column " + pk);
 					}
 				}
 
-				// Build XOR of FK columns
-				unique_ptr<Expression> xor_expr;
-				if (fk_col_exprs.size() == 1) {
-					xor_expr = std::move(fk_col_exprs[0]);
-				} else {
-					auto left = std::move(fk_col_exprs[0]);
-					for (size_t i = 1; i < fk_col_exprs.size(); ++i) {
-						auto right = std::move(fk_col_exprs[i]);
-						left = input.optimizer.BindScalarFunction("^", std::move(left), std::move(right));
-					}
-					xor_expr = std::move(left);
+				// Build hash from PU's PK columns
+				auto base_hash_expr = BuildXorHashFromPKs(input, *pu_get, pu_pks);
+
+				// Find the aggregate to propagate through
+				auto *agg = FindTopAggregate(plan);
+				if (!agg) {
+					throw InternalException("PAC compiler: could not find aggregate");
 				}
 
-				// Hash the XOR result
-				hash_input_expr = input.optimizer.BindScalarFunction("hash", std::move(xor_expr));
+				// Propagate through projections
+				hash_input_expr = PropagatePKThroughProjections(*plan, *pu_get, std::move(base_hash_expr), agg);
+			} else {
+				// PU table is NOT in the query - use FK column from connecting table
+				// Find the FK column(s) that reference the PU
+				auto it = check.table_metadata.find(last_table_name);
+				if (it == check.table_metadata.end()) {
+					throw InternalException("PAC compiler: missing metadata for table " + last_table_name);
+				}
+
+				vector<string> fk_cols;
+				for (auto &fk : it->second.fks) {
+					if (fk.first == privacy_unit) {
+						fk_cols = fk.second;
+						break;
+					}
+				}
+
+				if (fk_cols.empty()) {
+					throw InternalException("PAC compiler: no FK found from " + last_table_name + " to " +
+					                        privacy_unit);
+				}
+
+				// Find the LogicalGet for the last table and ensure FK columns are projected
+				unique_ptr<LogicalOperator> *last_table_ref = FindNodeRefByTable(&plan, last_table_name);
+				if (!last_table_ref || !last_table_ref->get()) {
+					throw InternalException("PAC compiler: could not find LogicalGet for last table " +
+					                        last_table_name);
+				}
+				auto last_get = &last_table_ref->get()->Cast<LogicalGet>();
+
+				// Ensure FK columns are projected in the table scan
+				for (auto &fk_col : fk_cols) {
+					idx_t proj_idx = EnsureProjectedColumn(*last_get, fk_col);
+					if (proj_idx == DConstants::INVALID_INDEX) {
+						throw InternalException("PAC compiler: failed to project FK column " + fk_col);
+					}
+				}
+
+				// Build hash expression from FK columns at the table scan level
+				auto base_hash_expr = BuildXorHashFromPKs(input, *last_get, fk_cols);
+
+				// Find the aggregate to propagate through
+				auto *agg = FindTopAggregate(plan);
+				if (!agg) {
+					throw InternalException("PAC compiler: could not find aggregate");
+				}
+
+				// Use PropagatePKThroughProjections to propagate the hash expression through all projections
+				hash_input_expr = PropagatePKThroughProjections(*plan, *last_get, std::move(base_hash_expr), agg);
 			}
 		} else {
 			// Original behavior: locate the privacy-unit LogicalGet
@@ -446,6 +483,13 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			hash_input_expr = BuildXorHashFromPKs(input, get, pks);
 		}
 
+		// Find the aggregate to propagate through
+		auto *agg = FindTopAggregate(plan);
+		if (agg) {
+			// Propagate the hash expression through all projections between table scan and aggregate
+			hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), agg);
+		}
+
 		hash_exprs.push_back(std::move(hash_input_expr));
 	}
 
@@ -522,7 +566,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// For multi-PU support, we need to gather FK paths and missing tables for all PUs
 	// and deduplicate the tables that need to be joined
 	std::unordered_set<string> all_missing_tables;
-	vector<string> fk_path_to_use; // We'll use the first FK path as the base path
+	vector<string> fk_path_to_use; // We'll use the first FK path as the base
 
 	if (pu_present_in_tree) {
 		// Case a) query scans PU table(s) - all PUs are in scanned_pu_tables
