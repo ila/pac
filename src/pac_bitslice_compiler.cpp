@@ -446,6 +446,18 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       const vector<string> &pu_table_names, const PACCompatibilityResult &check) {
 
+	// Find ALL aggregate nodes in the plan first
+	// For nested aggregates (like Q13), we need to use the bottommost one
+	vector<LogicalAggregate *> all_aggregates;
+	FindAllAggregates(plan, all_aggregates);
+
+	if (all_aggregates.empty()) {
+		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
+	}
+
+	// Use the bottommost aggregate (closest to table scans) for both propagation and modification
+	auto *target_agg = all_aggregates.back();
+
 	// Build hash expressions for each privacy unit
 	vector<unique_ptr<Expression>> hash_exprs;
 
@@ -483,12 +495,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			hash_input_expr = BuildXorHashFromPKs(input, get, pks);
 		}
 
-		// Find the aggregate to propagate through
-		auto *agg = FindTopAggregate(plan);
-		if (agg) {
-			// Propagate the hash expression through all projections between table scan and aggregate
-			hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), agg);
-		}
+		// Propagate the hash expression through all projections between table scan and the target aggregate
+		hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), target_agg);
 
 		hash_exprs.push_back(std::move(hash_input_expr));
 	}
@@ -496,22 +504,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	// Combine all hash expressions with AND
 	auto combined_hash_expr = BuildAndFromHashes(input, hash_exprs);
 
-	// Find ALL aggregate nodes in the plan (not just the topmost one)
-	// This is needed for queries with nested aggregates like TPC-H Q13
-	vector<LogicalAggregate *> all_aggregates;
-	FindAllAggregates(plan, all_aggregates);
-
-	if (all_aggregates.empty()) {
-		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
-	}
-
-	// For nested aggregates, we only want to modify the bottommost aggregate
-	// (the one closest to the base table scan). The outer aggregates operate on
-	// already-aggregated data and should be left as-is.
-	// Since FindAllAggregates does a pre-order traversal, the last aggregate in the
-	// vector is the bottommost one.
-	auto *bottommost_agg = all_aggregates.back();
-	ModifyAggregatesWithPacFunctions(input, bottommost_agg, combined_hash_expr);
+	// Modify the bottommost aggregate with PAC functions
+	ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr);
 }
 
 void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
@@ -533,8 +527,9 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	}
 	string pu_names_joined;
 	for (size_t i = 0; i < privacy_units.size(); ++i) {
-		if (i > 0)
+		if (i > 0) {
 			pu_names_joined += "_";
+		}
 		pu_names_joined += privacy_units[i];
 	}
 	string filename = path + pu_names_joined + "_" + query_hash + "_bitslice.sql";
