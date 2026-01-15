@@ -63,24 +63,32 @@ static unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &pla
 	// We need to add the hash expression columns to each projection
 	std::reverse(projections.begin(), projections.end());
 
-	// Extract all column references from the hash expression
-	vector<ColumnBinding> hash_bindings;
+	// Extract all column references from the hash expression, including their types
+	struct BindingInfo {
+		ColumnBinding binding;
+		LogicalType type;
+	};
+	vector<BindingInfo> hash_bindings;
 	ExpressionIterator::EnumerateExpression(hash_expr, [&](Expression &expr) {
 		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-			hash_bindings.push_back(col_ref.binding);
+			hash_bindings.push_back({col_ref.binding, col_ref.return_type});
 		}
 	});
 
 	// Map from old binding to new binding as we propagate through projections
 	std::unordered_map<uint64_t, ColumnBinding> binding_map;
+	// Also track types for each binding
+	std::unordered_map<uint64_t, LogicalType> type_map;
 	auto hash_binding_key = [](const ColumnBinding &b) -> uint64_t {
 		return (static_cast<uint64_t>(b.table_index) << 32) | static_cast<uint64_t>(b.column_index);
 	};
 
-	// Initialize map with identity mappings for the original bindings
-	for (auto &binding : hash_bindings) {
-		binding_map[hash_binding_key(binding)] = binding;
+	// Initialize maps with identity mappings for the original bindings
+	for (auto &info : hash_bindings) {
+		auto key = hash_binding_key(info.binding);
+		binding_map[key] = info.binding;
+		type_map[key] = info.type;
 	}
 
 	// Propagate through each projection
@@ -92,6 +100,7 @@ static unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &pla
 		std::unordered_map<uint64_t, ColumnBinding> new_binding_map;
 
 		for (auto &kv : binding_map) {
+			auto original_key = kv.first;
 			auto old_binding = kv.second;
 
 			// Check if this binding is already in the projection's expressions
@@ -112,20 +121,8 @@ static unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &pla
 				// Already in projection, use existing index
 				new_idx = existing_idx;
 			} else {
-				// Add to projection
-				// Get the type from the child operator
-				LogicalType col_type;
-				if (!proj->children.empty()) {
-					auto &child = proj->children[0];
-					auto child_bindings = child->GetColumnBindings();
-					for (idx_t i = 0; i < child_bindings.size(); i++) {
-						if (child_bindings[i].table_index == old_binding.table_index &&
-						    child_bindings[i].column_index == old_binding.column_index) {
-							col_type = child->types[i];
-							break;
-						}
-					}
-				}
+				// Add to projection using the type we stored from the original expression
+				auto col_type = type_map[original_key];
 				auto col_binding = ColumnBinding(old_binding.table_index, old_binding.column_index);
 				auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, col_binding);
 				proj->expressions.push_back(std::move(col_ref));
@@ -134,7 +131,7 @@ static unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &pla
 
 			// Update mapping: old binding -> new binding in this projection's output
 			ColumnBinding new_binding(proj->table_index, new_idx);
-			new_binding_map[hash_binding_key(old_binding)] = new_binding;
+			new_binding_map[original_key] = new_binding;
 		}
 
 		binding_map = std::move(new_binding_map);
@@ -191,8 +188,28 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		}
 	}
 
+	// Check if any "missing" tables are actually already present in the plan
+	// This can happen with correlated subqueries where the FK path starts from a subquery table
+	// but the outer query already has the connecting table
+	std::unordered_set<string> actually_present;
+	for (auto &table : missing_set) {
+		if (FindNodeRefByTable(&plan, table) != nullptr) {
+			actually_present.insert(table);
+#ifdef DEBUG
+			Printer::Print("ModifyPlanWithoutPU: Table " + table + " marked as missing but already present in plan");
+#endif
+		}
+	}
+
+	// Remove actually present tables from missing_set
+	for (auto &table : actually_present) {
+		missing_set.erase(table);
+	}
+
 	std::unordered_map<string, unique_ptr<LogicalGet>> get_map;
 	vector<string> ordered_table_names;
+	// Track tables that were marked as missing but are actually present - these can serve as connection points
+	vector<string> actually_present_in_fk_order;
 	auto idx = GetNextTableIndex(plan);
 
 	// Build ordered_table_names based on fk_path order, only including missing tables
@@ -210,6 +227,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			Printer::Print("ModifyPlanWithoutPU: Added table " + table + " to join chain");
 #endif
 			idx++;
+		} else if (actually_present.find(table) != actually_present.end()) {
+			// Track the order of already-present tables in the FK path
+			actually_present_in_fk_order.push_back(table);
 		}
 	}
 
@@ -314,6 +334,10 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			string last_table_name;
 			if (!ordered_table_names.empty()) {
 				last_table_name = ordered_table_names.back();
+			} else if (!actually_present_in_fk_order.empty()) {
+				// No new joins were added, but we have tables that were already present in the FK path
+				// Use the last one as it's closest to the PU
+				last_table_name = actually_present_in_fk_order.back();
 			} else {
 				last_table_name = connecting_table;
 			}

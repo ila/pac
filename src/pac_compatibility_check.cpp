@@ -41,11 +41,11 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
 	// Handle different logical join operator types that derive from LogicalJoin
 	if (op.type == LogicalOperatorType::LOGICAL_JOIN || op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
 	    op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN || op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
-	    op.type == LogicalOperatorType::LOGICAL_POSITIONAL_JOIN) {
+	    op.type == LogicalOperatorType::LOGICAL_POSITIONAL_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
 		auto &join = op.Cast<LogicalJoin>();
 		// Allow INNER and LEFT joins; reject all others
 		if (join.join_type != JoinType::INNER && join.join_type != JoinType::LEFT &&
-		    join.join_type != JoinType::RIGHT) {
+		    join.join_type != JoinType::RIGHT && join.join_type != JoinType::SEMI) {
 			// Non-inner/left join detected: signal disallowed join via boolean return to let caller throw
 			return true;
 		}
@@ -302,35 +302,6 @@ static bool ExpressionsContainSubquery(const vector<unique_ptr<Expression>> &exp
 	return false;
 }
 
-// Helper: check if the plan contains subqueries
-static bool ContainsSubquery(const LogicalOperator &op) {
-	// Check if any expressions in this operator contain subqueries
-	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = op.Cast<LogicalAggregate>();
-		if (ExpressionsContainSubquery(aggr.expressions) || ExpressionsContainSubquery(aggr.groups)) {
-			return true;
-		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
-		auto &filter = op.Cast<LogicalFilter>();
-		if (ExpressionsContainSubquery(filter.expressions)) {
-			return true;
-		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto &proj = op.Cast<LogicalProjection>();
-		if (ExpressionsContainSubquery(proj.expressions)) {
-			return true;
-		}
-	}
-
-	// Recursively check children
-	for (auto &child : op.children) {
-		if (ContainsSubquery(*child)) {
-			return true;
-		}
-	}
-	return false;
-}
-
 PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
                                             const vector<string> &pac_tables, PACOptimizerInfo *optimizer_info) {
 	PACCompatibilityResult result;
@@ -522,12 +493,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			return result; // Skip PAC compilation, execute query normally
 		}
 		if (ContainsDisallowedJoin(*plan)) {
-			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
-			}
-			return result; // Skip PAC compilation, execute query normally
-		}
-		if (ContainsSubquery(*plan)) {
 			if (is_conservative) {
 				throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
 			}

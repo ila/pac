@@ -218,24 +218,6 @@ SELECT SUM(t1a.b) FROM t1 t1a, t1 t1b WHERE t1a.a = t1b.a;
 ----
 PAC rewrite: self-joins are not supported for PAC compilation
 
-# Test subquery: should be rejected
-statement error
-SELECT SUM(b) FROM t1 WHERE a IN (SELECT a FROM t2);
-----
-PAC rewrite: subqueries are not supported for PAC compilation
-
-# Test EXISTS subquery: should be rejected
-statement error
-SELECT SUM(b) FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.x = t1.a);
-----
-PAC rewrite: subqueries are not supported for PAC compilation
-
-# Test subquery in aggregate: should be rejected
-statement error
-SELECT SUM(CASE WHEN a > (SELECT AVG(x) FROM t2) THEN b ELSE 0 END) FROM t1;
-----
-PAC rewrite: subqueries are not supported for PAC compilation
-
 # Test conservative mode OFF: subquery should execute normally (no error)
 statement ok
 SET pac_conservative_mode = false;
@@ -263,16 +245,6 @@ query I
 SELECT SUM(t1a.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
 ----
 170
-
-# Turn conservative mode back on
-statement ok
-SET pac_conservative_mode = true;
-
-# Verify subquery fails again with conservative mode on
-statement error
-SELECT SUM(b) FROM t1 WHERE a IN (SELECT x FROM t2);
-----
-PAC rewrite: subqueries are not supported for PAC compilation
 
 # Remove table from privacy file via PRAGMA
 statement ok

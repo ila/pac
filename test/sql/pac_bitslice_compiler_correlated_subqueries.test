@@ -1,0 +1,119 @@
+# name: test/sql/pac_bitslice_compiler_correlated_subqueries.test
+# description: Test PAC bitslice compiler with correlated subqueries (semi-joins)
+# group: [sql]
+
+require pac
+
+# Set up TPC-H schema with customer as privacy unit
+statement ok
+CREATE TABLE customer (
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_address VARCHAR,
+    c_nationkey INTEGER,
+    c_phone VARCHAR,
+    c_acctbal DECIMAL(15,2),
+    c_mktsegment VARCHAR,
+    c_comment VARCHAR
+);
+
+statement ok
+CREATE TABLE orders (
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderstatus VARCHAR,
+    o_totalprice DECIMAL(15,2),
+    o_orderdate DATE,
+    o_orderpriority VARCHAR,
+    o_clerk VARCHAR,
+    o_shippriority INTEGER,
+    o_comment VARCHAR,
+    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+);
+
+statement ok
+CREATE TABLE lineitem (
+    l_orderkey INTEGER,
+    l_partkey INTEGER,
+    l_suppkey INTEGER,
+    l_linenumber INTEGER,
+    l_quantity DECIMAL(15,2),
+    l_extendedprice DECIMAL(15,2),
+    l_discount DECIMAL(15,2),
+    l_tax DECIMAL(15,2),
+    l_returnflag VARCHAR,
+    l_linestatus VARCHAR,
+    l_shipdate DATE,
+    l_commitdate DATE,
+    l_receiptdate DATE,
+    l_shipinstruct VARCHAR,
+    l_shipmode VARCHAR,
+    l_comment VARCHAR,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey)
+);
+
+# Insert test data
+statement ok
+INSERT INTO customer VALUES
+    (1, 'Customer#1', 'Address1', 1, '111-111-1111', 1000.00, 'BUILDING', 'comment1'),
+    (2, 'Customer#2', 'Address2', 1, '222-222-2222', 2000.00, 'AUTOMOBILE', 'comment2'),
+    (3, 'Customer#3', 'Address3', 1, '333-333-3333', 3000.00, 'MACHINERY', 'comment3');
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, 'O', 100.00, '1993-07-15', '1-URGENT', 'Clerk#1', 0, 'comment1'),
+    (2, 1, 'O', 200.00, '1993-08-01', '2-HIGH', 'Clerk#2', 0, 'comment2'),
+    (3, 2, 'O', 300.00, '1993-07-20', '1-URGENT', 'Clerk#3', 0, 'comment3'),
+    (4, 2, 'F', 400.00, '1993-08-15', '3-MEDIUM', 'Clerk#4', 0, 'comment4'),
+    (5, 3, 'O', 500.00, '1993-09-01', '2-HIGH', 'Clerk#5', 0, 'comment5'),
+    (6, 3, 'O', 600.00, '1992-12-15', '1-URGENT', 'Clerk#6', 0, 'comment6');
+
+statement ok
+INSERT INTO lineitem VALUES
+    (1, 1, 1, 1, 10, 100.00, 0.05, 0.01, 'N', 'O', '1993-08-01', '1993-07-20', '1993-08-05', 'DELIVER IN PERSON', 'TRUCK', 'comment1'),
+    (2, 2, 2, 1, 20, 200.00, 0.05, 0.01, 'N', 'O', '1993-08-10', '1993-08-05', '1993-08-15', 'TAKE BACK RETURN', 'MAIL', 'comment2'),
+    (3, 3, 3, 1, 15, 150.00, 0.05, 0.01, 'N', 'O', '1993-07-25', '1993-07-22', '1993-07-28', 'DELIVER IN PERSON', 'RAIL', 'comment3'),
+    (3, 4, 4, 2, 25, 250.00, 0.05, 0.01, 'N', 'O', '1993-07-30', '1993-07-25', '1993-08-02', 'NONE', 'SHIP', 'comment4'),
+    (4, 5, 5, 1, 30, 300.00, 0.05, 0.01, 'R', 'F', '1993-08-20', '1993-08-18', '1993-08-25', 'COLLECT COD', 'FOB', 'comment5'),
+    (5, 6, 6, 1, 35, 350.00, 0.05, 0.01, 'N', 'O', '1993-09-05', '1993-09-10', '1993-09-15', 'DELIVER IN PERSON', 'TRUCK', 'comment6');
+
+# Configure PAC
+statement ok
+pragma add_pac_privacy_unit('customer');
+
+statement ok
+SET pac_join_elimination = true;
+
+statement ok
+set pac_seed = 42;
+
+# Test correlated subquery with EXISTS (semi-join) - similar to TPC-H Q04
+# This query finds order priorities for orders in a date range that have at least one lineitem
+# where the commit date is before the receipt date (late commitment)
+query II
+SELECT
+    o_orderpriority,
+    count(*) AS order_count
+FROM
+    orders
+WHERE
+    o_orderdate >= CAST('1993-07-01' AS date)
+    AND o_orderdate < CAST('1993-10-01' AS date)
+    AND EXISTS (
+        SELECT
+            *
+        FROM
+            lineitem
+        WHERE
+            l_orderkey = o_orderkey
+            AND l_commitdate < l_receiptdate)
+GROUP BY
+    o_orderpriority
+ORDER BY
+    o_orderpriority;
+----
+1-URGENT	2
+2-HIGH	4
+3-MEDIUM	NULL
+
