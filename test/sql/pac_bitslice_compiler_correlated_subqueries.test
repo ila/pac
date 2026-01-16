@@ -192,3 +192,82 @@ WHERE
     c_mktsegment = 'BUILDING';
 ----
 NULL	NULL	NULL
+
+# Test outer aggregate + inner aggregate with IN clause - both need joins to PU
+# This tests that when BOTH outer and inner queries scan FK-linked tables (not PU directly),
+# the compiler correctly adds joins to the PU for BOTH contexts and transforms all aggregates
+# Outer query: aggregate on lineitem (needs join to orders -> customer)
+# Inner query: aggregate on lineitem with IN clause (also needs join to orders -> customer)
+# Note: we have to join with orders twice here (once for outer, once for inner)
+query I
+SELECT
+    SUM(l_extendedprice) AS total_revenue
+FROM
+    lineitem
+WHERE
+    l_orderkey IN (
+        SELECT
+            l_orderkey
+        FROM
+            lineitem
+        GROUP BY
+            l_orderkey
+        HAVING
+            SUM(l_quantity) > 25
+    )
+    AND l_discount > 0.04;
+----
+NULL
+
+# Test correlated subquery where outer and inner both need separate joins to PU
+# This is a CORRELATED subquery (references outer table via l_partkey), unlike the IN clause which is uncorrelated
+# Even though it's correlated, we STILL need two separate joins because:
+# 1. The correlation is on l_partkey (product), not on the customer FK path
+# 2. Each aggregate operates in its own execution context (DELIM_JOIN semantics)
+# 3. Each aggregate needs its own hash expression from its local orders join
+#
+# Outer query: aggregate on lineitem (needs join to orders -> customer)
+# Inner query: correlated subquery on lineitem (also needs join to orders -> customer)
+#
+# The inner subquery evaluates independently for each outer row's l_partkey,
+# aggregating across ALL customers who have that part, so it needs its own
+# connection to the customer PU via orders.
+query I
+SELECT
+    SUM(l_extendedprice) AS total_revenue
+FROM
+    lineitem
+WHERE
+    l_quantity < (
+        SELECT
+            0.2 * AVG(l_quantity)
+        FROM
+            lineitem AS inner_lineitem
+        WHERE
+            inner_lineitem.l_partkey = lineitem.l_partkey
+    );
+----
+NULL
+
+# Test correlated subquery where outer query scans FK table (orders) directly
+# and inner subquery aggregates on a deeper FK table (lineitem)
+# This tests the AddColumnToDelimJoin fix where:
+# - Outer query scans orders (has FK to customer via o_custkey)
+# - Inner subquery scans lineitem (has FK to orders via l_orderkey)
+# - The o_custkey column needs to be added to DELIM_JOIN correlation
+# - Inner aggregate hashes by o_custkey (accessed via DELIM_GET)
+# This pattern appears in queries like:
+#   "For each order of customer X, what's the total line item price?"
+query III
+SELECT
+    o_orderkey,
+    o_totalprice,
+    (SELECT SUM(l_extendedprice)
+     FROM lineitem
+     WHERE l_orderkey = o_orderkey) AS order_total
+FROM orders
+WHERE o_custkey = 1
+ORDER BY o_orderkey;
+----
+1	100.00	NULL
+2	200.00	NULL

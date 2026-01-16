@@ -33,6 +33,21 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,
                             vector<string> &gets_missing, string &start_table_out, string &target_pu_out);
 
+// Result of AddColumnToDelimJoin - contains both the binding and the column type
+struct DelimColumnResult {
+	ColumnBinding binding;
+	LogicalType type;
+
+	bool IsValid() const {
+		return binding.table_index != DConstants::INVALID_INDEX;
+	}
+};
+
+// Add a column to a DELIM_JOIN's duplicate_eliminated_columns and update corresponding DELIM_GETs
+// Returns the ColumnBinding and LogicalType for accessing the column via DELIM_GET
+DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, LogicalGet &source_get,
+                                       const string &column_name, LogicalAggregate *target_agg);
+
 } // namespace duckdb
 
 #endif // PAC_COMPILER_HELPERS_HPP
