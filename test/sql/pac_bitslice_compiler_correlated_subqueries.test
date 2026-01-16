@@ -170,3 +170,25 @@ WHERE
     );
 ----
 NULL
+
+# Test correlated subqueries on FK-linked tables with PU table scanned
+# This tests the fix where aggregates in correlated subqueries that scan FK-linked tables
+# (like orders) should ALSO be transformed to PAC aggregates, not just the outer aggregate
+# Query: For each customer segment, compute statistics using correlated subqueries on orders
+query III
+SELECT
+    COUNT(*) as customer_count,
+    AVG((SELECT COUNT(*)
+         FROM orders
+         WHERE o_custkey = c_custkey
+           AND o_totalprice > 10000)) AS avg_high_value_orders,
+    AVG((SELECT SUM(o_totalprice)
+         FROM orders
+         WHERE o_custkey = c_custkey
+           AND YEAR(o_orderdate) = 1995)) AS avg_1995_total
+FROM
+    customer
+WHERE
+    c_mktsegment = 'BUILDING';
+----
+NULL	NULL	NULL

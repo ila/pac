@@ -383,16 +383,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 							// This table is in the FK chain - we need to join the rest of the path
 							// and use the final table (with FK to PU) for hashing
 
-							// Find where fk_target is in the FK path
-							size_t target_pos = 0;
-							for (size_t i = 0; i < fk_path.size(); i++) {
-								if (fk_path[i] == fk_target) {
-									target_pos = i;
-									break;
-								}
-							}
-
-							// The tables from fk_target onwards should have been added to the plan
 							// Find the last table in the FK path that has an FK to a PU
 							string hash_source_table;
 							vector<string> hash_source_fk_cols;
@@ -411,11 +401,13 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 												break;
 											}
 										}
-										if (found_pu_fk)
+										if (found_pu_fk) {
 											break;
+										}
 									}
-									if (found_pu_fk)
+									if (found_pu_fk) {
 										break;
+									}
 								}
 							}
 
@@ -622,13 +614,38 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		throw InternalException("PAC Compiler: no aggregate nodes found in plan");
 	}
 
-	// For correlated subqueries, the privacy unit table may appear in multiple contexts
-	// (e.g., both outer query and inner subquery). We need to transform ALL aggregates
-	// that have the privacy unit table in their subtree.
-	// Filter aggregates to only those that have at least one privacy unit table in their subtree.
-	// IMPORTANT: Also skip aggregates whose direct child is another aggregate (nested aggregates
-	// where the outer only depends on inner's result).
-	vector<LogicalAggregate *> target_aggregates = FilterTargetAggregates(all_aggregates, pu_table_names);
+	// Build a list of all tables that should trigger PAC transformation:
+	// 1. Privacy unit tables themselves
+	// 2. Tables that are FK-linked to privacy unit tables
+	vector<string> relevant_tables;
+	std::unordered_set<string> relevant_tables_set;
+
+	// Add PU tables
+	for (auto &pu : pu_table_names) {
+		relevant_tables.push_back(pu);
+		relevant_tables_set.insert(pu);
+	}
+
+	// Add FK-linked tables from the compatibility check results
+	for (auto &kv : check.fk_paths) {
+		auto &path = kv.second;
+		for (auto &table : path) {
+			if (relevant_tables_set.find(table) == relevant_tables_set.end()) {
+				relevant_tables.push_back(table);
+				relevant_tables_set.insert(table);
+			}
+		}
+	}
+
+#ifdef DEBUG
+	Printer::Print("ModifyPlanWithPU: relevant tables for PAC transformation:");
+	for (auto &t : relevant_tables) {
+		Printer::Print("  " + t);
+	}
+#endif
+
+	// Filter aggregates to those that have at least one relevant table in their subtree
+	vector<LogicalAggregate *> target_aggregates = FilterTargetAggregates(all_aggregates, relevant_tables);
 
 	if (target_aggregates.empty()) {
 		throw InternalException("PAC Compiler: no aggregate nodes with privacy unit tables found in plan");
@@ -645,48 +662,126 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		vector<unique_ptr<Expression>> hash_exprs;
 
 		for (auto &pu_table_name : pu_table_names) {
-			// Only process this PU if it's in the aggregate's subtree
-			if (!HasTableInSubtree(target_agg, pu_table_name)) {
-				continue;
-			}
+			// Check if this aggregate has the PU table in its subtree
+			if (HasTableInSubtree(target_agg, pu_table_name)) {
+				// Direct PU scan case: use PU's primary key
+				auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
+				auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
 
-			auto pu_scan_ptr = FindPrivacyUnitGetNode(plan, pu_table_name);
-			auto &get = pu_scan_ptr->get()->Cast<LogicalGet>();
+				// Determine if we should use rowid or PKs
+				bool use_rowid = false;
+				vector<string> pks;
 
-			// Determine if we should use rowid or PKs
-			bool use_rowid = false;
-			vector<string> pks;
+				auto it = check.table_metadata.find(pu_table_name);
+				if (it != check.table_metadata.end() && !it->second.pks.empty()) {
+					pks = it->second.pks;
+				} else {
+					use_rowid = true;
+				}
 
-			auto it = check.table_metadata.find(pu_table_name);
-			if (it != check.table_metadata.end() && !it->second.pks.empty()) {
-				pks = it->second.pks;
+				if (use_rowid) {
+					AddRowIDColumn(get);
+				} else {
+					// Ensure primary key columns are present in the LogicalGet (add them if necessary)
+					AddPKColumns(get, pks);
+				}
+
+				// Build the hash expression for this PU
+				unique_ptr<Expression> hash_input_expr;
+				if (use_rowid) {
+					// rowid is the last column added
+					auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
+					auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
+					auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
+					hash_input_expr = std::move(bound_hash);
+				} else {
+					hash_input_expr = BuildXorHashFromPKs(input, get, pks);
+				}
+
+				// Propagate the hash expression through all projections between table scan and this aggregate
+				hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), target_agg);
+
+				hash_exprs.push_back(std::move(hash_input_expr));
 			} else {
-				use_rowid = true;
+				// FK-linked table case: find FK columns that reference the PU
+				// Check which FK-linked tables are in this aggregate's subtree
+				for (auto &kv : check.fk_paths) {
+					auto &fk_table = kv.first;
+					auto &path = kv.second;
+
+					// Skip if this FK path doesn't lead to the current PU
+					if (path.empty() || path.back() != pu_table_name) {
+						continue;
+					}
+
+					// Check if the FK table is in this aggregate's subtree
+					if (!HasTableInSubtree(target_agg, fk_table)) {
+						continue;
+					}
+
+					// Find the FK columns from fk_table that reference the next table in the path
+					// The path is ordered: [fk_table, intermediate_table(s), pu_table]
+					// We need the FK columns from fk_table that reference the next table in the path
+
+					// Get metadata for the FK table
+					auto fk_it = check.table_metadata.find(fk_table);
+					if (fk_it == check.table_metadata.end()) {
+						continue;
+					}
+
+					// Find the FK that references the PU (possibly through intermediate tables)
+					// For now, let's find the FK that ultimately leads to the PU
+					string next_table_in_path = path.size() > 1 ? path[1] : pu_table_name;
+
+					vector<string> fk_cols;
+					for (auto &fk : fk_it->second.fks) {
+						if (fk.first == next_table_in_path) {
+							fk_cols = fk.second;
+							break;
+						}
+					}
+
+					if (fk_cols.empty()) {
+						continue;
+					}
+
+					// Find the LogicalGet for the FK table in this aggregate's subtree
+					// Search for all FK table nodes and find which one is accessible from this aggregate
+					vector<unique_ptr<LogicalOperator> *> fk_nodes;
+					FindAllNodesByTable(&plan, fk_table, fk_nodes);
+
+					// For each FK table instance, check if it's in this aggregate's subtree
+					// by checking if the aggregate has access to that table index
+					unique_ptr<LogicalOperator> *fk_scan_ptr = nullptr;
+					for (auto *node : fk_nodes) {
+						auto &node_get = node->get()->Cast<LogicalGet>();
+						idx_t node_table_idx = node_get.table_index;
+
+						// Check if this table index is in the aggregate's subtree
+						if (HasTableIndexInSubtree(target_agg, node_table_idx)) {
+							fk_scan_ptr = node;
+							break;
+						}
+					}
+
+					if (!fk_scan_ptr) {
+						continue;
+					}
+					auto &fk_get = fk_scan_ptr->get()->Cast<LogicalGet>();
+
+					// Ensure FK columns are present
+					AddPKColumns(fk_get, fk_cols);
+
+					// Build hash expression from FK columns
+					auto fk_hash_expr = BuildXorHashFromPKs(input, fk_get, fk_cols);
+
+					// Propagate through projections
+					fk_hash_expr = PropagatePKThroughProjections(*plan, fk_get, std::move(fk_hash_expr), target_agg);
+
+					hash_exprs.push_back(std::move(fk_hash_expr));
+					break; // Only process one FK path per PU per aggregate
+				}
 			}
-
-			if (use_rowid) {
-				AddRowIDColumn(get);
-			} else {
-				// Ensure primary key columns are present in the LogicalGet (add them if necessary)
-				AddPKColumns(get, pks);
-			}
-
-			// Build the hash expression for this PU
-			unique_ptr<Expression> hash_input_expr;
-			if (use_rowid) {
-				// rowid is the last column added
-				auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
-				auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
-				auto bound_hash = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
-				hash_input_expr = std::move(bound_hash);
-			} else {
-				hash_input_expr = BuildXorHashFromPKs(input, get, pks);
-			}
-
-			// Propagate the hash expression through all projections between table scan and this aggregate
-			hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), target_agg);
-
-			hash_exprs.push_back(std::move(hash_input_expr));
 		}
 
 		// Skip if no hash expressions were built for this aggregate

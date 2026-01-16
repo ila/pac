@@ -46,7 +46,8 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
 		auto &join = op.Cast<LogicalJoin>();
 		// Allow INNER and LEFT joins; reject all others
 		if (join.join_type != JoinType::INNER && join.join_type != JoinType::LEFT &&
-		    join.join_type != JoinType::RIGHT && join.join_type != JoinType::SEMI) {
+		    join.join_type != JoinType::RIGHT && join.join_type != JoinType::SEMI &&
+		    join.join_type != JoinType::SINGLE) {
 			// Non-inner/left join detected: signal disallowed join via boolean return to let caller throw
 			return true;
 		}
