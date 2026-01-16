@@ -240,8 +240,11 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 				}
 			}
 		}
-	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY) {
-		// For ORDER BY, check the child operator's output
+	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
+	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
+	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT) {
+		// For ORDER BY, TOP N, and LIMIT: check the child operator's output
+		// These operators just reorder/filter rows, they don't change the columns
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotFromPU(*child, plan_root, pu_tables);
 		}
