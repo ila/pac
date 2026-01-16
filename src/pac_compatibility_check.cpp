@@ -42,20 +42,22 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
 	// Handle different logical join operator types that derive from LogicalJoin
 	if (op.type == LogicalOperatorType::LOGICAL_JOIN || op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
 	    op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN || op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
-	    op.type == LogicalOperatorType::LOGICAL_POSITIONAL_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+	    op.type == LogicalOperatorType::LOGICAL_POSITIONAL_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
 		auto &join = op.Cast<LogicalJoin>();
-		// Allow INNER and LEFT joins; reject all others
 		if (join.join_type != JoinType::INNER && join.join_type != JoinType::LEFT &&
 		    join.join_type != JoinType::RIGHT && join.join_type != JoinType::SEMI &&
-		    join.join_type != JoinType::SINGLE) {
-			// Non-inner/left join detected: signal disallowed join via boolean return to let caller throw
+		    join.join_type != JoinType::SINGLE && join.join_type != JoinType::ANTI &&
+		    join.join_type != JoinType::RIGHT_ANTI && join.join_type != JoinType::RIGHT_SEMI &&
+		    join.join_type != JoinType::MARK) {
 			return true;
 		}
-	} else if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op.type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
-	           op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT ||
-	           op.type == LogicalOperatorType::LOGICAL_EXCEPT || op.type == LogicalOperatorType::LOGICAL_INTERSECT) {
+	} else if (op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) {
+		// CROSS_PRODUCT is allowed for PAC compilation
+		// Don't return true here, just continue checking children
+	} else if (op.type == LogicalOperatorType::LOGICAL_EXCEPT || op.type == LogicalOperatorType::LOGICAL_INTERSECT) {
 		// These operator types are disallowed for PAC compilation
-		// Note: UNION and UNION ALL are allowed
+		// Note: UNION, UNION ALL, CROSS_PRODUCT, and ANY_JOIN are allowed
 		return true;
 	}
 	for (auto &child : op.children) {

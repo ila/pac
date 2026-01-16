@@ -320,4 +320,46 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 	return target_aggregates;
 }
 
+// Check if a target node is inside a DELIM_JOIN's subquery branch (children[1]).
+// This is important for correlated subqueries where nodes in the subquery branch
+// cannot directly access tables from the outer query.
+bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOperator *target_node) {
+	if (!root || !root->get() || !target_node) {
+		return false;
+	}
+
+	auto &cur = *root;
+
+	// If this is a DELIM_JOIN, check if target is in children[1] (subquery side)
+	if (cur->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		if (cur->children.size() >= 2) {
+			// Check if target_node is in the subquery branch (children[1])
+			std::function<bool(LogicalOperator *)> find_target = [&](LogicalOperator *op) -> bool {
+				if (op == target_node) {
+					return true;
+				}
+				for (auto &child : op->children) {
+					if (find_target(child.get())) {
+						return true;
+					}
+				}
+				return false;
+			};
+
+			if (find_target(cur->children[1].get())) {
+				return true;
+			}
+		}
+	}
+
+	// Recursively check children
+	for (auto &child : cur->children) {
+		if (IsInDelimJoinSubqueryBranch(&child, target_node)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 } // namespace duckdb

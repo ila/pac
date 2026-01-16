@@ -63,6 +63,11 @@ void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_ind
 vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate *> &all_aggregates,
                                                   const vector<string> &target_table_names);
 
+// Check if a target node is inside a DELIM_JOIN's subquery branch (children[1]).
+// This is important for correlated subqueries where nodes in the subquery branch
+// cannot directly access tables from the outer query.
+bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOperator *target_node);
+
 } // namespace duckdb
 
 #endif // PAC_PLAN_TRAVERSAL_HPP
