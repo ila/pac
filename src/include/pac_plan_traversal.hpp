@@ -57,6 +57,12 @@ bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index);
 void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_index,
                               vector<unique_ptr<LogicalOperator> *> &results);
 
+// Filter aggregates to only those that have specified tables in their subtree
+// AND have base tables in their DIRECT children (not through nested aggregates).
+// This filters out outer aggregates that only depend on inner aggregate results.
+vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate *> &all_aggregates,
+                                                  const vector<string> &target_table_names);
+
 } // namespace duckdb
 
 #endif // PAC_PLAN_TRAVERSAL_HPP
