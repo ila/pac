@@ -412,10 +412,10 @@ AUTOVECTORIZE inline void PacMinMaxBufferOrUpdateOne(PacMinMaxStateWrapper<T, IS
 		uint64_t hashes[Wrapper::BUF_SIZE + 1];
 		for (int i = 0; i < Wrapper::BUF_SIZE; i++) {
 			vals[i] = agg.val_buf[i];
-			hashes[i] = agg.hash_buf[i];
+			dst.key_hash |= (hashes[i] = agg.hash_buf[i]);
 		}
 		vals[Wrapper::BUF_SIZE] = value;
-		hashes[Wrapper::BUF_SIZE] = key_hash;
+		dst.key_hash |= (hashes[Wrapper::BUF_SIZE] = key_hash);
 		Wrapper::FlushBufferInternal(dst, vals, hashes, Wrapper::BUF_SIZE + 1);
 		agg.n_buffered &= ~Wrapper::BUF_MASK;
 	} else {

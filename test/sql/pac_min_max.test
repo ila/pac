@@ -173,40 +173,40 @@ SELECT pac_min(hash('key' || i::varchar), i::integer, 0.0) FROM range(1, 100) t(
 # GROUP BY tests
 # =============================================================================
 
-# Test pac_max with GROUP BY (may return NULL based on key_hash bit pattern)
+# Test pac_max with GROUP BY (mi=0 returns actual values, not NULL)
 query II rowsort
 SELECT i % 3 as grp, pac_max(hash('key' || i::varchar), i::integer, 0.0)
 FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
-0	NULL
-1	NULL
-2	NULL
+0	99
+1	94
+2	95
 
-# Test pac_min with GROUP BY (may return NULL based on key_hash bit pattern)
+# Test pac_min with GROUP BY (mi=0 returns actual values, not NULL)
 query II rowsort
 SELECT i % 3 as grp, pac_min(hash('key' || i::varchar), i::integer, 0.0)
 FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
-0	NULL
-1	NULL
-2	NULL
+0	6
+1	7
+2	2
 
 # =============================================================================
 # Edge cases
 # =============================================================================
 
-# Test with single value
+# Test with single value (mi=0 returns actual value)
 query I
 SELECT pac_max(hash('single'), 42::integer, 0.0);
 ----
-NULL
+42
 
 query I
 SELECT pac_min(hash('single'), 42::integer, 0.0);
 ----
-NULL
+42
 
 # Test with large values (BIGINT)
 query I

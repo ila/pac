@@ -82,9 +82,9 @@ static inline double DeterministicNormalSample(std::mt19937_64 &gen, bool &has_s
 }
 
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash
-// Probability = popcount(key_hash) / 64. If mi==0, it returns 0 iff more than half of the bits were set.
+// Probability = popcount(key_hash) / 64. If mi==0, only return NULL when key_hash==0 (no values seen)
 bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen) {
-	return PacNoisedSelect(~key_hash, (mi == 0.0) ? 31 : gen());
+	return mi ? PacNoisedSelect(~key_hash, gen()) : !key_hash;
 }
 
 // Finalize: compute noisy sample from the 64 counters (works on double array)
