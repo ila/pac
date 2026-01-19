@@ -255,6 +255,13 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 }
 
 // helper: traverse the plan and count how many times each table/CTE name is scanned
+void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts);
+
+// Forward declarations for self-join detection
+static bool ContainsSelfJoinInSubqueries(const LogicalOperator &op, const std::unordered_set<string> &pu_set);
+static bool ContainsSelfJoinInScope(const LogicalOperator &op, const std::unordered_set<string> &pu_set);
+
+// helper: traverse the plan and count how many times each table/CTE name is scanned GLOBALLY (including subqueries)
 void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &scan = op.Cast<LogicalGet>();
@@ -266,41 +273,186 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 	// Handle CTEs: traverse into CTE definitions to find base table scans
 	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		auto &cte = op.Cast<LogicalMaterializedCTE>();
-		// CTE has two children:
-		// children[0] - the CTE definition (contains the table scans)
-		// children[1] - the main query that uses the CTE
-		// We need to traverse into the definition to find base table scans
 		if (!cte.children.empty() && cte.children[0]) {
 			CountScans(*cte.children[0], counts);
 		}
-		// Also traverse the main query
 		if (cte.children.size() > 1 && cte.children[1]) {
 			CountScans(*cte.children[1], counts);
 		}
-		return; // We've handled both children manually, don't use the generic loop
+		return;
 	}
+	// For global counting, traverse ALL children including subqueries
 	for (auto &child : op.children) {
 		CountScans(*child, counts);
 	}
 }
 
 // Helper: check if the plan contains self-joins of privacy unit tables
-// (same PU table scanned multiple times)
+// (same PU table scanned multiple times within any single scope)
 static bool ContainsSelfJoinOfPU(const LogicalOperator &op, const vector<string> &pu_tables) {
-	std::unordered_map<string, idx_t> scan_counts;
-	CountScans(op, scan_counts);
-
 	// Create a set of PU table names for quick lookup
 	std::unordered_set<string> pu_set(pu_tables.begin(), pu_tables.end());
+	return ContainsSelfJoinInScope(op, pu_set);
+}
 
-	// Check if any PU table is scanned more than once
-	for (auto &kv : scan_counts) {
+// Helper: check if a child subtree contains only aggregates (no table scans from the main query)
+// This helps identify if a join child is a scalar subquery
+static bool IsScalarSubquerySubtree(const LogicalOperator &op) {
+	// If we hit an aggregate with no groups, it's likely a scalar subquery result
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op.Cast<LogicalAggregate>();
+		if (aggr.groups.empty()) {
+			return true; // Ungrouped aggregate = scalar result
+		}
+	}
+	// Projections and filters don't change scalar-ness
+	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION ||
+	    op.type == LogicalOperatorType::LOGICAL_FILTER) {
+		for (auto &child : op.children) {
+			if (IsScalarSubquerySubtree(*child)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// helper: count scans within a SINGLE SCOPE (stops at subquery boundaries for self-join detection)
+static void CountScansInScope(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &scan = op.Cast<LogicalGet>();
+		auto table_entry = scan.GetTable();
+		if (table_entry) {
+			counts[table_entry->name]++;
+		}
+	}
+	// Handle CTEs: traverse into CTE definitions to find base table scans
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op.Cast<LogicalMaterializedCTE>();
+		if (!cte.children.empty() && cte.children[0]) {
+			CountScansInScope(*cte.children[0], counts);
+		}
+		if (cte.children.size() > 1 && cte.children[1]) {
+			CountScansInScope(*cte.children[1], counts);
+		}
+		return;
+	}
+	// Don't traverse into subquery-related joins - they represent subquery boundaries
+	// LOGICAL_DELIM_JOIN: correlated subqueries
+	// JoinType::SINGLE: scalar subqueries
+	// JoinType::MARK: EXISTS/IN subqueries
+	if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		// Only traverse the left child (the main query part)
+		if (!op.children.empty() && op.children[0]) {
+			CountScansInScope(*op.children[0], counts);
+		}
+		return;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op.Cast<LogicalJoin>();
+		// SINGLE joins are used for scalar subqueries (SELECT ... WHERE col > (SELECT ...))
+		// MARK joins are used for EXISTS/IN subqueries
+		if (join.join_type == JoinType::SINGLE || join.join_type == JoinType::MARK) {
+			// Only traverse left child - right child is the subquery
+			if (!op.children.empty() && op.children[0]) {
+				CountScansInScope(*op.children[0], counts);
+			}
+			return;
+		}
+		// For INNER joins, check if one side is a scalar subquery (ungrouped aggregate)
+		// This handles cases where scalar subqueries are optimized into INNER joins
+		if (join.join_type == JoinType::INNER && op.children.size() == 2) {
+			bool left_is_scalar = op.children[0] && IsScalarSubquerySubtree(*op.children[0]);
+			bool right_is_scalar = op.children[1] && IsScalarSubquerySubtree(*op.children[1]);
+			if (left_is_scalar && !right_is_scalar) {
+				// Left side is scalar subquery, only count right side
+				CountScansInScope(*op.children[1], counts);
+				return;
+			} else if (right_is_scalar && !left_is_scalar) {
+				// Right side is scalar subquery, only count left side
+				CountScansInScope(*op.children[0], counts);
+				return;
+			}
+			// If both or neither are scalar, treat as normal join
+		}
+	}
+	for (auto &child : op.children) {
+		CountScansInScope(*child, counts);
+	}
+}
+
+// Helper: recursively check for self-joins within each scope
+// Returns true if any scope has a PU table scanned more than once
+static bool ContainsSelfJoinInScope(const LogicalOperator &op, const std::unordered_set<string> &pu_set) {
+	// Count scans in the current scope (stops at subquery boundaries)
+	std::unordered_map<string, idx_t> scope_counts;
+	CountScansInScope(op, scope_counts);
+
+	// Check if any PU table is scanned more than once in this scope
+	for (auto &kv : scope_counts) {
 		// Skip internal PAC sample tables
 		if (kv.first.rfind("_pac_internal_sample_", 0) == 0) {
 			continue;
 		}
 		// Only check PU tables
 		if (pu_set.find(kv.first) != pu_set.end() && kv.second > 1) {
+			return true;
+		}
+	}
+
+	// Recursively check for self-joins within subqueries
+	// We need to traverse into subquery boundaries that CountScansInScope skipped
+	return ContainsSelfJoinInSubqueries(op, pu_set);
+}
+
+// Helper: recursively check subqueries for self-joins
+// This traverses the entire plan, recursing into subquery children that CountScansInScope skips
+static bool ContainsSelfJoinInSubqueries(const LogicalOperator &op, const std::unordered_set<string> &pu_set) {
+	// Check for subquery boundaries and recurse into them
+	if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		// DELIM_JOIN: left child is main query, right child is correlated subquery
+		// Recursively check for self-joins in both children
+		for (auto &child : op.children) {
+			if (child && ContainsSelfJoinInScope(*child, pu_set)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op.Cast<LogicalJoin>();
+		// SINGLE/MARK joins: right child is the subquery
+		if (join.join_type == JoinType::SINGLE || join.join_type == JoinType::MARK) {
+			// Recursively check for self-joins in both children
+			for (auto &child : op.children) {
+				if (child && ContainsSelfJoinInScope(*child, pu_set)) {
+					return true;
+				}
+			}
+			return false;
+		}
+		// For INNER joins with scalar subquery optimization, check both sides
+		if (join.join_type == JoinType::INNER && op.children.size() == 2) {
+			bool left_is_scalar = op.children[0] && IsScalarSubquerySubtree(*op.children[0]);
+			bool right_is_scalar = op.children[1] && IsScalarSubquerySubtree(*op.children[1]);
+			if (left_is_scalar || right_is_scalar) {
+				// Recursively check for self-joins in both children
+				for (auto &child : op.children) {
+					if (child && ContainsSelfJoinInScope(*child, pu_set)) {
+						return true;
+					}
+				}
+				return false;
+			}
+		}
+	}
+
+	// For all other operators, just recurse into children
+	for (auto &child : op.children) {
+		if (child && ContainsSelfJoinInSubqueries(*child, pu_set)) {
 			return true;
 		}
 	}
@@ -481,7 +633,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		if (!ContainsAggregation(*plan)) {
 			if (is_conservative) {
 				throw InvalidInputException(
-				    "Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
+					"Query does not contain any allowed aggregation (sum, count, avg, min, max)!");
 			}
 			return result; // Skip PAC compilation, execute query normally
 		}

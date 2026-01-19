@@ -218,6 +218,18 @@ SELECT SUM(t1a.b) FROM t1 t1a, t1 t1b WHERE t1a.a = t1b.a;
 ----
 PAC rewrite: self-joins are not supported for PAC compilation
 
+# Test self-join inside subquery: should also be rejected
+statement error
+SELECT SUM(b) FROM t1 WHERE a > (SELECT SUM(t1a.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a);
+----
+PAC rewrite: self-joins are not supported for PAC compilation
+
+# Test same table in main query and subquery (different scopes): should PASS
+query I
+SELECT SUM(b) FROM t1 WHERE a > (SELECT AVG(b) FROM t1);
+----
+NULL
+
 # Test conservative mode OFF: subquery should execute normally (no error)
 statement ok
 SET pac_conservative_mode = false;
