@@ -20,30 +20,28 @@
 #include "include/pac_count.hpp"
 #include "include/pac_sum_avg.hpp"
 #include "include/pac_min_max.hpp"
+#include "include/pac_parser.hpp"
 
 namespace duckdb {
 
-inline void PacScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "Pac " + name.GetString() + " 🐥");
-	});
+// Pragma function to save PAC metadata to file
+static void SavePACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+	auto filepath = parameters.values[0].ToString();
+	PACMetadataManager::Get().SaveToFile(filepath);
 }
 
-// NOTE: add/remove PAC privacy unit helpers and functions moved to src/include/pac_privacy_unit.hpp and
-// src/pac_privacy_unit.cpp
+// Pragma function to load PAC metadata from file
+static void LoadPACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+	auto filepath = parameters.values[0].ToString();
+	PACMetadataManager::Get().LoadFromFile(filepath);
+}
+
+// Pragma function to clear all PAC metadata
+static void ClearPACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+	PACMetadataManager::Get().Clear();
+}
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register a scalar function
-	auto pac_scalar_function = ScalarFunction("pac", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PacScalarFun);
-	loader.RegisterFunction(pac_scalar_function);
-
-	// Register add_pac_privacy_unit (1-arg)
-	// NOTE: scalar add/remove functions removed; prefer PRAGMA add_privacy_unit / PRAGMA remove_privacy_unit
-
-	// Register remove_pac_privacy_unit (1-arg)
-	// (removed scalar variants)
-
 	// Register pragma variants so they can be invoked as PRAGMA add_privacy_unit(...) / PRAGMA remove_privacy_unit(...)
 	auto add_privacy_unit_pragma =
 	    PragmaFunction::PragmaCall("add_pac_privacy_unit", AddPrivacyUnitPragma, {LogicalType::VARCHAR});
@@ -97,6 +95,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register pac_min/pac_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
+
+	// Register PAC parser extension
+	db.config.parser_extensions.push_back(PACParserExtension());
+
+	// Register PAC metadata management pragmas
+	auto save_pac_metadata_pragma =
+	    PragmaFunction::PragmaCall("save_pac_metadata", SavePACMetadataPragma, {LogicalType::VARCHAR});
+	loader.RegisterFunction(save_pac_metadata_pragma);
+
+	auto load_pac_metadata_pragma =
+	    PragmaFunction::PragmaCall("load_pac_metadata", LoadPACMetadataPragma, {LogicalType::VARCHAR});
+	loader.RegisterFunction(load_pac_metadata_pragma);
+
+	auto clear_pac_metadata_pragma = PragmaFunction::PragmaCall("clear_pac_metadata", ClearPACMetadataPragma, {});
+	loader.RegisterFunction(clear_pac_metadata_pragma);
 }
 
 void PacExtension::Load(ExtensionLoader &loader) {
