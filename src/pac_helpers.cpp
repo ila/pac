@@ -436,11 +436,10 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 		string schema = table_name.substr(0, dot_pos);
 		string tbl = table_name.substr(dot_pos + 1);
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-		if (!entry) {
-			// Even if table not found in catalog, check PAC metadata
-			goto check_pac_metadata;
+		if (entry) {
+			process_entry(entry.get());
 		}
-		process_entry(entry.get());
+		// If not found in catalog, continue to check PAC metadata below
 	} else {
 		// Non-qualified name: walk the search path
 		CatalogSearchPath path(context);
@@ -454,8 +453,7 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 		}
 	}
 
-check_pac_metadata:
-	// Now also check for PAC links in the metadata manager
+	// Also check for PAC links in the metadata manager
 	// PAC links supplement FK constraints, so we add them to the result
 	auto &metadata_mgr = PACMetadataManager::Get();
 	auto *pac_metadata = metadata_mgr.GetTableMetadata(unqualified_table_name);

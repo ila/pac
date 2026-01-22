@@ -1,4 +1,16 @@
 //
+// PAC Bitslice Compiler
+//
+// This file implements the bitslice compilation strategy for PAC (Privacy-Augmented Computation).
+// The bitslice compiler transforms query plans to add necessary joins and hash expressions for
+// computing PAC aggregates over privacy units.
+//
+// Key Concepts:
+// - Privacy Unit (PU): The entity that defines privacy boundaries (e.g., customer)
+// - FK Path: The chain of foreign keys from queried tables to the PU (e.g., lineitem -> orders -> customer)
+// - Hash Expression: A hash computed from FK columns that reference the PU (e.g., hash(o_custkey))
+// - Correlated Subqueries: Inner queries that reference outer query tables (require special handling)
+//
 // Created by ila on 12/21/25.
 //
 
@@ -16,7 +28,14 @@
 
 namespace duckdb {
 
-// Helper: Get boolean setting value with default
+/**
+ * GetBooleanSetting: Helper to safely retrieve boolean settings with defaults
+ *
+ * @param context - Client context containing settings
+ * @param setting_name - Name of the setting to retrieve
+ * @param default_value - Value to return if setting is not found or null
+ * @return The boolean value of the setting, or default_value if not found
+ */
 static bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value) {
 	Value val;
 	if (context.TryGetCurrentSetting(setting_name, val) && !val.IsNull()) {
@@ -28,42 +47,73 @@ static bool GetBooleanSetting(ClientContext &context, const string &setting_name
 /**
  * ModifyPlanWithoutPU: Transforms a query plan when the privacy unit (PU) table is NOT scanned directly
  *
- * Purpose: When the query doesn't directly scan the PU table, we need to join tables along the FK path
- * from the scanned tables to the PU table, then build hash expressions from the FK columns that reference the PU.
+ * PURPOSE:
+ * When a query doesn't directly scan the PU table (e.g., SELECT FROM lineitem), we need to:
+ * 1. Add joins to connect the scanned tables to the PU via foreign key relationships
+ * 2. Build hash expressions from the FK columns that reference the PU
+ * 3. Propagate these hash expressions to aggregates
+ * 4. Transform aggregates to use PAC functions (pac_sum, pac_avg, etc.)
  *
- * Arguments:
- * @param check - Compatibility check result containing table metadata and FK relationships
- * @param input - Optimizer extension input containing context and optimizer
- * @param plan - The logical plan to modify
- * @param gets_missing - Tables in the FK path that are NOT in the original query (need to be added as joins)
- * @param gets_present - Tables in the FK path that ARE already in the original query
- * @param fk_path - Ordered list of tables from the scanned table to the PU (e.g., [lineitem, orders, customer])
- * @param privacy_units - List of privacy unit table names (e.g., ["customer"])
+ * EXAMPLE:
+ * Query: SELECT SUM(l_quantity) FROM lineitem WHERE l_partkey = 100
+ * FK Path: lineitem -> orders -> customer (customer is PU)
+ * Missing: orders table (needs to be joined)
+ * Result: lineitem JOIN orders -> compute hash(o_custkey) -> pac_sum(l_quantity, hash)
  *
- * Logic:
- * 1. Identify which tables need to be joined (those in gets_missing)
- * 2. Find the "connecting table" - the last present table in the FK path (e.g., lineitem)
- * 3. For each instance of the connecting table in the plan (handles correlated subqueries):
- *    - Create a fresh join chain: connecting_table -> missing_table_1 -> ... -> missing_table_N
- *    - Replace the connecting table with this join chain
- *    - Track the table index of each "orders" table (or equivalent) for hash generation
- * 4. Find all aggregates that have FK-linked tables in their subtree
- * 5. For each aggregate:
- *    - Determine which "orders" table instance it should use (critical for correlated subqueries)
- *    - Build hash expression from the FK columns in "orders" that reference the PU
- *    - Propagate the hash expression through projections
- *    - Transform the aggregate to use PAC functions (pac_sum, pac_avg, etc.)
+ * ARGUMENTS:
+ * @param check - Compatibility check result with:
+ *   - table_metadata: Metadata for each table (PKs, FKs)
+ *   - scanned_non_pu_tables: Tables actually scanned in the query
+ *   - privacy_units: List of PU table names
+ * @param input - Optimizer extension input (context, optimizer)
+ * @param plan - The logical plan to modify (modified in-place)
+ * @param gets_missing - Tables in FK path NOT in original query (need to be added as joins)
+ * @param gets_present - Tables in FK path ALREADY in original query
+ * @param fk_path - Ordered list from scanned table to PU (e.g., [lineitem, orders, customer])
+ * @param privacy_units - List of PU table names (e.g., ["customer"])
  *
- * Correlated Subquery Handling:
- * - If a table appears in BOTH outer query and inner subquery, we find ALL instances and add joins to each
- * - Each aggregate gets the hash from its "closest" orders table (not crossing subquery boundaries)
- * - Example: In TPC-H Q17, lineitem appears in both outer and inner aggregate:
- *   * Outer aggregate gets hash from outer orders table
- *   * Inner aggregate gets hash from inner orders table (same lineitem.l_partkey correlation)
+ * CORRELATED SUBQUERY HANDLING:
+ * When a table appears in BOTH outer query AND inner subquery:
+ * - We find ALL instances of the connecting table in the plan
+ * - Add join chains to EACH instance independently
+ * - Map each aggregate to its "closest" FK table (not crossing subquery boundaries)
  *
- * Join Addition Rules:
- * - If the table referencing the PU is in both outer and subquery: join and add pac_aggregate in BOTH
- * - If inner query has no aggregate: still join if it references a table in the FK path to PU
+ * Example (TPC-H Q17):
+ *   SELECT SUM(l_extendedprice) FROM lineitem l1
+ *   WHERE l1.l_quantity < (
+ *     SELECT AVG(l2.l_quantity) FROM lineitem l2
+ *     WHERE l2.l_partkey = l1.l_partkey
+ *   )
+ * - Outer lineitem -> needs join to orders for outer aggregate
+ * - Inner lineitem -> needs separate join to orders for inner aggregate
+ * - Each aggregate gets hash from its own orders table instance
+ *
+ * ALGORITHM:
+ * 1. Determine which tables need to be joined (filter gets_missing by FK path)
+ * 2. If join_elimination enabled, skip joining PU tables themselves
+ * 3. Find "connecting table" - last present table in FK path (e.g., lineitem)
+ * 4. For each instance of connecting table:
+ *    a. Create fresh LogicalGet nodes for missing tables
+ *    b. Build join chain: connecting_table -> table1 -> table2 -> ...
+ *    c. Track table index of FK table (that references PU) for hash generation
+ *    d. Replace connecting table with join chain
+ * 5. Find all aggregates with FK-linked tables in their subtree
+ * 6. For each aggregate:
+ *    a. Determine which FK table instance it should use (closest accessible one)
+ *    b. Build hash expression from FK columns referencing PU
+ *    c. Propagate hash through projections
+ *    d. Transform aggregate to PAC aggregate
+ *
+ * JOIN ELIMINATION OPTIMIZATION:
+ * When enabled (pac_join_elimination=true), we skip joining the PU table itself
+ * if it's only needed for the foreign key columns (not for PU data).
+ * This reduces join overhead when the PU table is large.
+ *
+ * ACCESSIBILITY CHECKS:
+ * We ensure FK table columns are ACCESSIBLE from each aggregate:
+ * - Not blocked by MARK/SEMI/ANTI joins (which don't pass right-side columns)
+ * - Not in a separate subquery branch (would need DELIM_GET)
+ * If FK table is inaccessible, we add a fresh join to bring it into scope.
  */
 void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtensionInput &input,
                          unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
@@ -80,6 +130,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
 
 	// If join elimination is enabled, skip the PU tables themselves
+	// We only need the FK-linked table (e.g., orders), not the PU (e.g., customer)
 	if (join_elimination) {
 		for (auto &pu : privacy_units) {
 			missing_set.erase(pu);
@@ -154,7 +205,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		}
 	}
 
-	// Fallback
+	// Fallback: if no connecting table found in FK path, use any present table
 	if (connecting_table_for_joins.empty() && !gets_present.empty()) {
 		connecting_table_for_joins = gets_present[0];
 	}
@@ -174,6 +225,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	string connecting_table = ordered_table_names.empty() ? connecting_table_for_joins : connecting_table_for_missing;
 
 	// Find ALL instances of the connecting table (for correlated subqueries, there may be multiple)
+	// Example: In TPC-H Q17, lineitem appears in both outer query and subquery
 	vector<unique_ptr<LogicalOperator> *> all_connecting_nodes;
 	if (!connecting_table.empty()) {
 		FindAllNodesByTable(&plan, connecting_table, all_connecting_nodes);
@@ -201,10 +253,12 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	}
 
 	// For each instance of the connecting table, add the join chain
-	// Store the mapping from each instance to its corresponding orders table for hash generation
+	// Store the mapping from each instance to its corresponding FK table (e.g., orders) for hash generation
+	// This is critical for correlated subqueries: each instance gets its own FK table join
 	std::unordered_map<idx_t, idx_t> connecting_table_to_orders_table;
 
 	// First, find the FK table that has FK to PU (e.g., orders -> customer)
+	// This is the table whose FK columns we'll hash
 	string fk_table_with_pu_reference;
 	for (auto &table : fk_path) {
 		auto it = check.table_metadata.find(table);
@@ -224,6 +278,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		}
 	}
 
+	// Iterate over each instance of the connecting table and add joins
 	for (auto *target_ref : all_connecting_nodes) {
 		// Get the table index of this instance
 		auto &target_op = (*target_ref)->Cast<LogicalGet>();
@@ -238,7 +293,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		// Determine which tables need to be joined for THIS instance
 		vector<string> tables_to_join_for_instance = ordered_table_names;
 
-		// For subquery instances, check if we need to add a join
+		// SUBQUERY SPECIAL CASE:
+		// For subquery instances, check if we need to add a join to the FK table
+		// even though it's "present" in the outer query
 		if (is_in_subquery && !fk_table_with_pu_reference.empty() &&
 		    std::find(ordered_table_names.begin(), ordered_table_names.end(), fk_table_with_pu_reference) ==
 		        ordered_table_names.end()) {
@@ -442,7 +499,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 #endif
 
 	// Now find all aggregates and modify them with PAC functions
-	// Each aggregate needs a hash expression based on the orders table in its subtree
+	// Each aggregate needs a hash expression based on the FK table in its subtree
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);
 
@@ -466,10 +523,12 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 	               " aggregates with FK-linked tables");
 #endif
 
-	// For each target aggregate, find which orders table it has access to and build hash expression
+	// For each target aggregate, find which FK table it has access to and build hash expression
+	// IMPORTANT: We need to find the "closest" FK table instance for each aggregate
+	// to handle correlated subqueries correctly
 	for (auto *target_agg : target_aggregates) {
 		// Find which connecting table (lineitem) this aggregate has in its DIRECT path
-		// (not in a nested subquery), and use the corresponding orders table
+		// (not in a nested subquery), and use the corresponding FK table (orders)
 		idx_t orders_table_idx = DConstants::INVALID_INDEX;
 
 		// We need to find the "closest" connecting table to this aggregate
@@ -483,7 +542,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		vector<idx_t> candidate_conn_tables;
 		for (auto &kv : connecting_table_to_orders_table) {
 			idx_t conn_table_idx = kv.first;
-			if (HasTableIndexInSubtree(target_agg, conn_table_idx)) {
+			if (HasTableInSubtree(target_agg, conn_table_idx)) {
 				// Also check that this table's columns are accessible (not blocked by MARK/SEMI/ANTI joins)
 				if (AreTableColumnsAccessible(target_agg, conn_table_idx)) {
 					candidate_conn_tables.push_back(conn_table_idx);
@@ -1287,4 +1346,3 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 #endif
 }
 
-} // namespace duckdb

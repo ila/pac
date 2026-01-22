@@ -18,20 +18,116 @@
 namespace duckdb {
 
 // ============================================================================
+// Helper functions for column validation
+// ============================================================================
+
+/**
+ * FindMissingColumns: Checks which columns from a list don't exist in a table
+ *
+ * @param table - The table catalog entry to search
+ * @param column_names - List of column names to validate
+ * @return Vector of column names that were NOT found in the table
+ *
+ * This function performs case-insensitive column name matching.
+ */
+static vector<string> FindMissingColumns(const TableCatalogEntry &table, const vector<string> &column_names) {
+	vector<string> missing;
+	for (const auto &col_name : column_names) {
+		bool found = false;
+		for (auto &col : table.GetColumns().Logical()) {
+			if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(col_name)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			missing.push_back(col_name);
+		}
+	}
+	return missing;
+}
+
+/**
+ * FormatColumnList: Formats a list of column names for error messages
+ *
+ * Examples:
+ *   []           -> ""
+ *   ["col1"]     -> "'col1'"
+ *   ["a", "b"]   -> "'a', 'b'"
+ */
+static string FormatColumnList(const vector<string> &columns) {
+	if (columns.empty()) {
+		return "";
+	}
+	if (columns.size() == 1) {
+		return "'" + columns[0] + "'";
+	}
+
+	string result;
+	for (size_t i = 0; i < columns.size(); i++) {
+		if (i > 0) {
+			result += ", ";
+		}
+		result += "'" + columns[i] + "'";
+	}
+	return result;
+}
+
+/**
+ * ValidateColumnsExist: Validates that all columns exist in a table, throws exception if not
+ *
+ * @param table - The table catalog entry to search
+ * @param column_names - List of column names to validate
+ * @param table_name - Name of the table (for error messages)
+ * @param context_msg - Optional context for error message
+ *
+ * Throws CatalogException with detailed error message if any columns are missing.
+ */
+static void ValidateColumnsExist(const TableCatalogEntry &table, const vector<string> &column_names,
+                                 const string &table_name, const string &context_msg = "") {
+	auto missing = FindMissingColumns(table, column_names);
+	if (!missing.empty()) {
+		string error_msg;
+		if (missing.size() == 1) {
+			error_msg = "Column " + FormatColumnList(missing) + " does not exist in ";
+		} else {
+			error_msg = "Columns " + FormatColumnList(missing) + " do not exist in ";
+		}
+
+		if (context_msg.empty()) {
+			error_msg += "table '" + table_name + "'";
+		} else {
+			error_msg += context_msg;
+		}
+
+		throw CatalogException(error_msg);
+	}
+}
+
+// ============================================================================
 // Custom FunctionData for PAC DDL execution
 // ============================================================================
 
+/**
+ * PACDDLBindData: Stores information about a PAC DDL operation to execute
+ *
+ * The PAC parser extension needs to execute DDL operations (CREATE TABLE, ALTER TABLE)
+ * while also managing metadata. This struct stores the stripped SQL (with PAC clauses removed)
+ * and the table name to track which metadata was updated.
+ */
 struct PACDDLBindData : public TableFunctionData {
-	string stripped_sql;
-	bool executed;
-	string table_name; // Track which table's metadata was updated
+	string stripped_sql;    // SQL with PAC-specific clauses removed
+	bool executed;          // Whether the DDL has been executed
+	string table_name;      // Table whose metadata was updated
 
 	explicit PACDDLBindData(string sql, string tbl_name = "")
 	    : stripped_sql(std::move(sql)), executed(false), table_name(std::move(tbl_name)) {
 	}
 };
 
-// Global storage for the SQL to execute (workaround for bind function limitations)
+// Thread-local storage for pending DDL operations
+// This is a workaround for passing data between parse and bind phases
+// since the bind function can't directly receive custom parameters.
 static thread_local string g_pac_pending_sql;
 static thread_local string g_pac_pending_table_name;
 
@@ -39,6 +135,17 @@ static thread_local string g_pac_pending_table_name;
 // Static bind and execution functions for PAC DDL
 // ============================================================================
 
+/**
+ * PACDDLBindFunction: Executes the DDL and saves metadata to file
+ *
+ * This function runs during the bind phase of query execution. It:
+ * 1. Retrieves the pending SQL from thread-local storage
+ * 2. Executes the DDL using a separate connection (to avoid deadlocks)
+ * 3. Saves the updated PAC metadata to the JSON file
+ *
+ * The metadata is saved after every PAC DDL operation (CREATE/ALTER) to ensure
+ * it persists across database sessions. For in-memory databases, no file is saved.
+ */
 static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, TableFunctionBindInput &input,
                                                    vector<LogicalType> &return_types, vector<string> &names) {
 	// Get the pending SQL from thread-local storage
@@ -80,6 +187,9 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 	return make_uniq<PACDDLBindData>(sql_to_execute, table_name);
 }
 
+/**
+ * PACDDLExecuteFunction: Returns empty result set (DDL was already executed in bind)
+ */
 static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	// Nothing to output - DDL was already executed in bind
 	output.SetCardinality(0);
@@ -89,16 +199,41 @@ static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &da
 // PACMetadataManager Implementation
 // ============================================================================
 
+/**
+ * PACMetadataManager: Singleton that manages PAC table metadata in memory
+ *
+ * This class stores metadata for all PAC-protected tables:
+ * - Primary keys (PAC KEY)
+ * - Foreign key links (PAC LINK)
+ * - Protected columns (PROTECTED)
+ *
+ * The metadata is stored in memory and can be serialized to/from JSON files
+ * for persistence across database sessions.
+ */
 PACMetadataManager &PACMetadataManager::Get() {
 	static PACMetadataManager instance;
 	return instance;
 }
 
+/**
+ * AddOrUpdateTable: Adds a new table's metadata or updates existing metadata
+ *
+ * @param table_name - Name of the table
+ * @param metadata - Metadata for the table
+ *
+ * This function is thread-safe and locks the metadata map during the operation.
+ */
 void PACMetadataManager::AddOrUpdateTable(const string &table_name, const PACTableMetadata &metadata) {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	table_metadata[table_name] = metadata;
 }
 
+/**
+ * GetTableMetadata: Retrieves metadata for a table
+ *
+ * @param table_name - Name of the table
+ * @return Pointer to the table metadata, or nullptr if not found
+ */
 const PACTableMetadata *PACMetadataManager::GetTableMetadata(const string &table_name) const {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	auto it = table_metadata.find(table_name);
@@ -108,11 +243,22 @@ const PACTableMetadata *PACMetadataManager::GetTableMetadata(const string &table
 	return nullptr;
 }
 
+/**
+ * HasMetadata: Checks if metadata exists for a table
+ *
+ * @param table_name - Name of the table
+ * @return True if metadata exists, false otherwise
+ */
 bool PACMetadataManager::HasMetadata(const string &table_name) const {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	return table_metadata.find(table_name) != table_metadata.end();
 }
 
+/**
+ * GetAllTableNames: Retrieves a list of all table names with metadata
+ *
+ * @return Vector of table names
+ */
 vector<string> PACMetadataManager::GetAllTableNames() const {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	vector<string> names;
@@ -123,11 +269,35 @@ vector<string> PACMetadataManager::GetAllTableNames() const {
 	return names;
 }
 
+/**
+ * RemoveTable: Removes a table's metadata
+ *
+ * @param table_name - Name of the table
+ *
+ * This function is thread-safe and locks the metadata map during the operation.
+ */
 void PACMetadataManager::RemoveTable(const string &table_name) {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	table_metadata.erase(table_name);
 }
 
+/**
+ * SerializeToJSON: Converts a PACTableMetadata struct to JSON format
+ *
+ * JSON Structure:
+ * {
+ *   "table_name": "orders",
+ *   "primary_keys": ["o_orderkey"],
+ *   "links": [
+ *     {
+ *       "local_columns": ["o_custkey"],
+ *       "referenced_table": "customer",
+ *       "referenced_columns": ["c_custkey"]
+ *     }
+ *   ],
+ *   "protected_columns": ["o_totalprice", "o_orderdate"]
+ * }
+ */
 string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) const {
 	std::stringstream ss;
 	ss << "{\n";
@@ -187,6 +357,11 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) con
 	return ss.str();
 }
 
+/**
+ * SerializeAllToJSON: Serializes metadata for all tables to JSON format
+ *
+ * @return JSON string representing all table metadata
+ */
 string PACMetadataManager::SerializeAllToJSON() const {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	std::stringstream ss;
@@ -204,6 +379,13 @@ string PACMetadataManager::SerializeAllToJSON() const {
 	return ss.str();
 }
 
+/**
+ * SaveToFile: Saves metadata to a JSON file
+ *
+ * @param filepath - Path to the file
+ *
+ * Throws IOException if the file can't be opened or written.
+ */
 void PACMetadataManager::SaveToFile(const string &filepath) {
 	std::ofstream file(filepath);
 	if (!file.is_open()) {
@@ -213,6 +395,13 @@ void PACMetadataManager::SaveToFile(const string &filepath) {
 	file.close();
 }
 
+/**
+ * LoadFromFile: Loads metadata from a JSON file
+ *
+ * @param filepath - Path to the file
+ *
+ * Throws IOException if the file can't be opened or read.
+ */
 void PACMetadataManager::LoadFromFile(const string &filepath) {
 	std::ifstream file(filepath);
 	if (!file.is_open()) {
@@ -226,6 +415,12 @@ void PACMetadataManager::LoadFromFile(const string &filepath) {
 	DeserializeAllFromJSON(buffer.str());
 }
 
+/**
+ * DeserializeFromJSON: Parses JSON and constructs a PACTableMetadata struct
+ *
+ * This function supports both old format (single local_column/referenced_column)
+ * and new format (arrays local_columns/referenced_columns) for backward compatibility.
+ */
 PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
 	// Simple JSON parsing (for production, consider using a proper JSON library)
 	PACTableMetadata metadata;
@@ -333,7 +528,7 @@ PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
 					is_new_format = true;
 					string ref_cols_str = link_match[1].str();
 					std::regex col_regex(R"xxx("([^"]+)")xxx");
-					auto cols_begin = std::sregex_iterator(ref_cols_str.begin(), ref_cols_str.end(), col_regex);
+					auto cols_begin = std::sregex_iterator(ref_cols_str.begin(), refColsStr.end(), col_regex);
 					auto cols_end = std::sregex_iterator();
 					for (auto col_it = cols_begin; col_it != cols_end; ++col_it) {
 						link.referenced_columns.push_back((*col_it)[1].str());
@@ -375,6 +570,15 @@ PACTableMetadata PACMetadataManager::DeserializeFromJSON(const string &json) {
 	return metadata;
 }
 
+/**
+ * DeserializeAllFromJSON: Deserializes metadata for all tables from JSON format
+ *
+ * @param json - JSON string representing all table metadata
+ *
+ * This function clears existing metadata and parses the JSON to restore metadata
+ * for all tables. It expects the JSON to have a "tables" array containing individual
+ * table objects.
+ */
 void PACMetadataManager::DeserializeAllFromJSON(const string &json) {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	table_metadata.clear();
@@ -425,11 +629,28 @@ void PACMetadataManager::DeserializeAllFromJSON(const string &json) {
 	}
 }
 
+/**
+ * Clear: Clears all metadata for tables
+ *
+ * This function is thread-safe and locks the metadata map during the operation.
+ */
 void PACMetadataManager::Clear() {
 	std::lock_guard<std::mutex> lock(metadata_mutex);
 	table_metadata.clear();
 }
 
+/**
+ * GetMetadataFilePath: Constructs the path to the PAC metadata JSON file
+ *
+ * Format: <db_directory>/pac_metadata_<dbname>_<schema>.json
+ *
+ * For example:
+ *   - Database: /data/tpch.db
+ *   - Schema: main
+ *   - Result: /data/pac_metadata_tpch_main.json
+ *
+ * Returns empty string for in-memory databases (no file saved).
+ */
 string PACMetadataManager::GetMetadataFilePath(ClientContext &context) {
 	// Get the database path from the default catalog
 	auto &db_name = DatabaseManager::GetDefaultDatabase(context);
@@ -471,6 +692,15 @@ string PACMetadataManager::GetMetadataFilePath(ClientContext &context) {
 // PACParserExtension Implementation
 // ============================================================================
 
+/**
+ * ExtractTableName: Extracts table name from CREATE or ALTER TABLE statement
+ *
+ * Handles:
+ *   - CREATE TABLE table_name ...
+ *   - CREATE PAC TABLE table_name ...
+ *   - CREATE TABLE IF NOT EXISTS table_name ...
+ *   - ALTER TABLE table_name ...
+ */
 string PACParserExtension::ExtractTableName(const string &sql, bool is_create) {
 	if (is_create) {
 		// Match: CREATE [PAC] TABLE [IF NOT EXISTS] table_name
@@ -492,6 +722,13 @@ string PACParserExtension::ExtractTableName(const string &sql, bool is_create) {
 	return "";
 }
 
+/**
+ * ExtractPACPrimaryKey: Parses PAC KEY clause
+ *
+ * Syntax: PAC KEY (col1, col2, ...)
+ *
+ * Supports composite keys (multiple columns).
+ */
 bool PACParserExtension::ExtractPACPrimaryKey(const string &clause, vector<string> &pk_columns) {
 	// Match: PAC KEY (col1, col2, ...)
 	std::regex pk_regex(R"(pac\s+key\s*\(\s*([^)]+)\s*\))");
@@ -513,6 +750,14 @@ bool PACParserExtension::ExtractPACPrimaryKey(const string &clause, vector<strin
 	return false;
 }
 
+/**
+ * ExtractPACLink: Parses PAC LINK clause
+ *
+ * Syntax: PAC LINK (local_col1, local_col2, ...) REFERENCES table(ref_col1, ref_col2, ...)
+ *
+ * This defines a foreign key relationship for PAC. The number of local columns
+ * must match the number of referenced columns (composite key support).
+ */
 bool PACParserExtension::ExtractPACLink(const string &clause, PACLink &link) {
 	// Match: PAC LINK (col1, col2, ...) REFERENCES table_name(ref_col1, ref_col2, ...)
 	// Support both single and composite foreign keys
@@ -555,6 +800,13 @@ bool PACParserExtension::ExtractPACLink(const string &clause, PACLink &link) {
 	return false;
 }
 
+/**
+ * ExtractProtectedColumns: Parses PROTECTED clause
+ *
+ * Syntax: PROTECTED (col1, col2, ...)
+ *
+ * Protected columns are those that contain sensitive data and need PAC protection.
+ */
 bool PACParserExtension::ExtractProtectedColumns(const string &clause, vector<string> &protected_cols) {
 	// Match: PROTECTED (col1, col2, ...)
 	std::regex protected_regex(R"(protected\s*\(\s*([^)]+)\s*\))");
@@ -575,6 +827,17 @@ bool PACParserExtension::ExtractProtectedColumns(const string &clause, vector<st
 	return false;
 }
 
+/**
+ * StripPACClauses: Removes all PAC-specific clauses from SQL
+ *
+ * This is necessary because DuckDB's standard parser doesn't understand PAC syntax.
+ * We remove PAC clauses and execute the "clean" SQL, while storing PAC metadata separately.
+ *
+ * Removed clauses:
+ *   - PAC KEY (...)
+ *   - PAC LINK (...) REFERENCES table(...)
+ *   - PROTECTED (...)
+ */
 string PACParserExtension::StripPACClauses(const string &sql) {
 	string result = sql;
 
@@ -604,6 +867,22 @@ string PACParserExtension::StripPACClauses(const string &sql) {
 	return result;
 }
 
+/**
+ * ParseCreatePACTable: Parses CREATE PAC TABLE statement
+ *
+ * Syntax:
+ *   CREATE PAC TABLE table_name (
+ *     col1 INTEGER,
+ *     col2 VARCHAR,
+ *     PAC KEY (col1),
+ *     PAC LINK (col2) REFERENCES other_table(other_col),
+ *     PROTECTED (col1, col2)
+ *   );
+ *
+ * Returns:
+ *   - stripped_sql: SQL with PAC clauses removed
+ *   - metadata: Extracted PAC metadata (keys, links, protected columns)
+ */
 bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
@@ -652,6 +931,22 @@ bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripp
 	return true;
 }
 
+/**
+ * ParseAlterTableAddPAC: Parses ALTER PAC TABLE ... ADD ... statement
+ *
+ * Syntax:
+ *   ALTER PAC TABLE table_name ADD PAC KEY (col1);
+ *   ALTER PAC TABLE table_name ADD PAC LINK (col1) REFERENCES other(col2);
+ *   ALTER PAC TABLE table_name ADD PROTECTED (col1, col2);
+ *
+ * This operation is metadata-only (no actual DDL executed). It merges new
+ * metadata with existing metadata for the table.
+ *
+ * Validation:
+ *   - Columns must exist in the table
+ *   - Protected columns can't be added twice (idempotency check)
+ *   - PAC LINKs can't conflict (same local columns to different targets)
+ */
 bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
@@ -781,6 +1076,20 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	return true;
 }
 
+/**
+ * ParseAlterTableDropPAC: Parses ALTER PAC TABLE ... DROP ... statement
+ *
+ * Syntax:
+ *   ALTER PAC TABLE table_name DROP PAC LINK (col1);
+ *   ALTER PAC TABLE table_name DROP PROTECTED (col1, col2);
+ *
+ * This operation is metadata-only (no actual DDL executed). It removes
+ * metadata entries from the table's metadata.
+ *
+ * Validation:
+ *   - Table must have existing metadata
+ *   - Columns/links must exist in metadata (can't drop non-existent entries)
+ */
 bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
 	string query_lower = StringUtil::Lower(query);
 
@@ -893,6 +1202,20 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 	return true;
 }
 
+/**
+ * PACParseFunction: Main entry point for parsing PAC statements
+ *
+ * This function is called by DuckDB's parser extension mechanism for every query.
+ * It:
+ * 1. Cleans the query (removes semicolons, normalizes whitespace)
+ * 2. Attempts to parse as CREATE PAC TABLE
+ * 3. Attempts to parse as ALTER PAC TABLE DROP (checked before ADD)
+ * 4. Attempts to parse as ALTER PAC TABLE ADD
+ * 5. Returns empty result if no PAC syntax found (let normal parser handle it)
+ *
+ * The order matters: DROP must be checked before ADD because DROP statements
+ * also contain keywords like "protected" that might match ADD patterns.
+ */
 ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionInfo *info, const string &query) {
 	// Clean up query - preserve spaces but remove semicolons and newlines
 	string clean_query = query;
@@ -932,6 +1255,23 @@ ParserExtensionParseResult PACParserExtension::PACParseFunction(ParserExtensionI
 	return ParserExtensionParseResult(make_uniq<PACParseData>(stripped_sql, metadata, is_pac_ddl));
 }
 
+/**
+ * PACPlanFunction: Converts parsed PAC statement into execution plan
+ *
+ * This function:
+ * 1. Validates metadata (columns exist, tables exist)
+ * 2. Stores metadata in PACMetadataManager
+ * 3. Sets up a table function to execute the DDL
+ *
+ * For CREATE PAC TABLE:
+ *   - Executes the stripped SQL (CREATE TABLE without PAC clauses)
+ *   - Saves metadata to file
+ *
+ * For ALTER PAC TABLE:
+ *   - No DDL executed (metadata-only operation)
+ *   - Validates columns/tables exist
+ *   - Saves updated metadata to file
+ */
 ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInfo *info, ClientContext &context,
                                                               unique_ptr<ParserExtensionParseData> parse_data) {
 	auto &pac_data = dynamic_cast<PACParseData &>(*parse_data);
@@ -953,66 +1293,16 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 				auto &table = table_entry->Cast<TableCatalogEntry>();
 
 				// Validate ALL protected columns exist before adding any (atomic operation)
-				vector<string> missing_protected_cols;
-				for (const auto &col_name : pac_data.metadata.protected_columns) {
-					bool found = false;
-					for (auto &col : table.GetColumns().Logical()) {
-						if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(col_name)) {
-							found = true;
-							break;
-						}
-					}
-					if (!found) {
-						missing_protected_cols.push_back(col_name);
-					}
-				}
-				if (!missing_protected_cols.empty()) {
-					if (missing_protected_cols.size() == 1) {
-						throw CatalogException("Column '" + missing_protected_cols[0] + "' does not exist in table '" +
-						                       pac_data.metadata.table_name + "'");
-					} else {
-						string cols_list;
-						for (size_t i = 0; i < missing_protected_cols.size(); i++) {
-							if (i > 0)
-								cols_list += ", ";
-							cols_list += "'" + missing_protected_cols[i] + "'";
-						}
-						throw CatalogException("Columns " + cols_list + " do not exist in table '" +
-						                       pac_data.metadata.table_name + "'. No protected columns were added.");
-					}
+				if (!pac_data.metadata.protected_columns.empty()) {
+					ValidateColumnsExist(table, pac_data.metadata.protected_columns, pac_data.metadata.table_name,
+					                    "table '" + pac_data.metadata.table_name + "'. No protected columns were added.");
 				}
 
 				// Validate ALL columns in PAC LINKs exist before adding any (atomic operation)
 				for (const auto &link : pac_data.metadata.links) {
 					// Check local columns
-					vector<string> missing_local_cols;
-					for (const auto &local_col : link.local_columns) {
-						bool found = false;
-						for (auto &col : table.GetColumns().Logical()) {
-							if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(local_col)) {
-								found = true;
-								break;
-							}
-						}
-						if (!found) {
-							missing_local_cols.push_back(local_col);
-						}
-					}
-					if (!missing_local_cols.empty()) {
-						if (missing_local_cols.size() == 1) {
-							throw CatalogException("Column '" + missing_local_cols[0] + "' does not exist in table '" +
-							                       pac_data.metadata.table_name + "'");
-						} else {
-							string cols_list;
-							for (size_t i = 0; i < missing_local_cols.size(); i++) {
-								if (i > 0)
-									cols_list += ", ";
-								cols_list += "'" + missing_local_cols[i] + "'";
-							}
-							throw CatalogException("Columns " + cols_list + " do not exist in table '" +
-							                       pac_data.metadata.table_name + "'. PAC LINK was not added.");
-						}
-					}
+					ValidateColumnsExist(table, link.local_columns, pac_data.metadata.table_name,
+					                    "table '" + pac_data.metadata.table_name + "'. PAC LINK was not added.");
 
 					// Validate that referenced table exists
 					auto ref_table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
@@ -1023,35 +1313,8 @@ ParserExtensionPlanResult PACParserExtension::PACPlanFunction(ParserExtensionInf
 
 					// Check referenced columns
 					auto &ref_table = ref_table_entry->Cast<TableCatalogEntry>();
-					vector<string> missing_ref_cols;
-					for (const auto &ref_col : link.referenced_columns) {
-						bool found = false;
-						for (auto &col : ref_table.GetColumns().Logical()) {
-							if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(ref_col)) {
-								found = true;
-								break;
-							}
-						}
-						if (!found) {
-							missing_ref_cols.push_back(ref_col);
-						}
-					}
-					if (!missing_ref_cols.empty()) {
-						if (missing_ref_cols.size() == 1) {
-							throw CatalogException("Column '" + missing_ref_cols[0] +
-							                       "' does not exist in referenced table '" + link.referenced_table +
-							                       "'");
-						} else {
-							string cols_list;
-							for (size_t i = 0; i < missing_ref_cols.size(); i++) {
-								if (i > 0)
-									cols_list += ", ";
-								cols_list += "'" + missing_ref_cols[i] + "'";
-							}
-							throw CatalogException("Columns " + cols_list + " do not exist in referenced table '" +
-							                       link.referenced_table + "'. PAC LINK was not added.");
-						}
-					}
+					ValidateColumnsExist(ref_table, link.referenced_columns, link.referenced_table,
+					                    "referenced table '" + link.referenced_table + "'. PAC LINK was not added.");
 				}
 			} catch (const CatalogException &e) {
 				throw;
