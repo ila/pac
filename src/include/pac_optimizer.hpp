@@ -27,6 +27,16 @@ public:
 	// Throws a ParserException with an explanatory message when the plan is not compatible.
 };
 
+// Separate optimizer rule to handle DROP TABLE operations and clean up PAC metadata
+class PACDropTableRule : public OptimizerExtension {
+public:
+	PACDropTableRule() {
+		optimize_function = PACDropTableRuleFunction;
+	}
+
+	static void PACDropTableRuleFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
+};
+
 } // namespace duckdb
 
 #endif // DUCKDB_OPENPAC_REWRITE_RULE_HPP

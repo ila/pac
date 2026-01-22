@@ -20,30 +20,28 @@
 #include "include/pac_count.hpp"
 #include "include/pac_sum_avg.hpp"
 #include "include/pac_min_max.hpp"
+#include "include/pac_parser.hpp"
 
 namespace duckdb {
 
-inline void PacScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "Pac " + name.GetString() + " 🐥");
-	});
+// Pragma function to save PAC metadata to file
+static void SavePACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+	auto filepath = parameters.values[0].ToString();
+	PACMetadataManager::Get().SaveToFile(filepath);
 }
 
-// NOTE: add/remove PAC privacy unit helpers and functions moved to src/include/pac_privacy_unit.hpp and
-// src/pac_privacy_unit.cpp
+// Pragma function to load PAC metadata from file
+static void LoadPACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+	auto filepath = parameters.values[0].ToString();
+	PACMetadataManager::Get().LoadFromFile(filepath);
+}
+
+// Pragma function to clear all PAC metadata
+static void ClearPACMetadataPragma(ClientContext &context, const FunctionParameters &parameters) {
+	PACMetadataManager::Get().Clear();
+}
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register a scalar function
-	auto pac_scalar_function = ScalarFunction("pac", {LogicalType::VARCHAR}, LogicalType::VARCHAR, PacScalarFun);
-	loader.RegisterFunction(pac_scalar_function);
-
-	// Register add_pac_privacy_unit (1-arg)
-	// NOTE: scalar add/remove functions removed; prefer PRAGMA add_privacy_unit / PRAGMA remove_privacy_unit
-
-	// Register remove_pac_privacy_unit (1-arg)
-	// (removed scalar variants)
-
 	// Register pragma variants so they can be invoked as PRAGMA add_privacy_unit(...) / PRAGMA remove_privacy_unit(...)
 	auto add_privacy_unit_pragma =
 	    PragmaFunction::PragmaCall("add_pac_privacy_unit", AddPrivacyUnitPragma, {LogicalType::VARCHAR});
@@ -57,12 +55,97 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                               LogicalType::VARCHAR, DeletePrivacyUnitFileFun);
 	loader.RegisterFunction(delete_privacy_unit_file);
 
+	// Try to automatically load PAC metadata from database directory if it exists
+	auto &db = loader.GetDatabaseInstance();
+	try {
+		// Clear any existing metadata first (in case extension is reloaded)
+		PACMetadataManager::Get().Clear();
+
+		// Get all attached database paths and try to load metadata from the first one's directory
+		auto paths = db.GetDatabaseManager().GetAttachedDatabasePaths();
+		if (!paths.empty()) {
+			const string &db_path = paths[0];
+
+			// Extract database name from path (filename without extension)
+			// Or use "memory" as default for in-memory databases
+			string db_name = "memory";
+			size_t last_slash = db_path.find_last_of("/\\");
+			if (last_slash != string::npos && last_slash + 1 < db_path.length()) {
+				string filename = db_path.substr(last_slash + 1);
+				size_t dot_pos = filename.find_last_of('.');
+				if (dot_pos != string::npos) {
+					db_name = filename.substr(0, dot_pos);
+				} else {
+					db_name = filename;
+				}
+			} else if (last_slash == string::npos && !db_path.empty()) {
+				// No slash, so path is just the filename
+				size_t dot_pos = db_path.find_last_of('.');
+				if (dot_pos != string::npos) {
+					db_name = db_path.substr(0, dot_pos);
+				} else {
+					db_name = db_path;
+				}
+			}
+
+			// Default schema is "main"
+			string schema_name = DEFAULT_SCHEMA;
+
+			// Build metadata path with db and schema names
+			string metadata_path;
+			string filename = "pac_metadata_" + db_name + "_" + schema_name + ".json";
+
+			if (last_slash != string::npos) {
+				metadata_path = db_path.substr(0, last_slash + 1) + filename;
+			} else {
+				metadata_path = filename;
+			}
+
+#ifdef DEBUG
+			std::cerr << "[PAC DEBUG] LoadInternal: Checking for metadata at: " << metadata_path << std::endl;
+#endif
+
+			// Try to load the metadata file if it exists
+			std::ifstream test_file(metadata_path);
+			if (test_file.good()) {
+				test_file.close();
+				PACMetadataManager::Get().LoadFromFile(metadata_path);
+#ifdef DEBUG
+				std::cerr << "[PAC DEBUG] LoadInternal: Successfully loaded metadata from " << metadata_path
+				          << std::endl;
+				std::cerr << "[PAC DEBUG] LoadInternal: Loaded " << PACMetadataManager::Get().GetAllTableNames().size()
+				          << " tables" << std::endl;
+#endif
+			} else {
+#ifdef DEBUG
+				std::cerr << "[PAC DEBUG] LoadInternal: Metadata file not found at " << metadata_path << std::endl;
+#endif
+			}
+		} else {
+#ifdef DEBUG
+			std::cerr << "[PAC DEBUG] LoadInternal: No database paths available (in-memory DB?)" << std::endl;
+#endif
+		}
+	} catch (const std::exception &e) {
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata: " << e.what() << std::endl;
+#endif
+	} catch (...) {
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (unknown exception)" << std::endl;
+#endif
+	}
+
+	// Register PAC optimizer rule
 	auto pac_rewrite_rule = PACRewriteRule();
 	// attach PAC-specific optimizer info so the extension can coordinate replan state
 	auto pac_info = make_shared_ptr<PACOptimizerInfo>();
 	pac_rewrite_rule.optimizer_info = pac_info;
-	auto &db = loader.GetDatabaseInstance();
 	db.config.optimizer_extensions.push_back(pac_rewrite_rule);
+
+	// Register PAC DROP TABLE cleanup rule (separate rule to handle DROP TABLE operations)
+	auto pac_drop_table_rule = PACDropTableRule();
+	db.config.optimizer_extensions.push_back(pac_drop_table_rule);
 
 	db.config.AddExtensionOption("pac_privacy_file", "path for privacy units", LogicalType::VARCHAR);
 	// Add option to enable/disable PAC noise application (this is useful for testing, since noise affects result
@@ -100,6 +183,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register pac_min/pac_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
+
+	// Register PAC parser extension
+	db.config.parser_extensions.push_back(PACParserExtension());
+
+	// Register PAC metadata management pragmas
+	auto save_pac_metadata_pragma =
+	    PragmaFunction::PragmaCall("save_pac_metadata", SavePACMetadataPragma, {LogicalType::VARCHAR});
+	loader.RegisterFunction(save_pac_metadata_pragma);
+
+	auto load_pac_metadata_pragma =
+	    PragmaFunction::PragmaCall("load_pac_metadata", LoadPACMetadataPragma, {LogicalType::VARCHAR});
+	loader.RegisterFunction(load_pac_metadata_pragma);
+
+	auto clear_pac_metadata_pragma = PragmaFunction::PragmaCall("clear_pac_metadata", ClearPACMetadataPragma, {});
+	loader.RegisterFunction(clear_pac_metadata_pragma);
 }
 
 void PacExtension::Load(ExtensionLoader &loader) {

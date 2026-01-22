@@ -19,7 +19,9 @@ include_directories(benchmark/include)
 set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_privacy_unit.cpp
         src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp
         src/pac_count.cpp src/pac_sum_avg.cpp src/pac_min_max.cpp src/pac_bitslice_compiler.cpp src/pac_compiler_helpers.cpp
-        src/pac_expression_builder.cpp src/pac_plan_traversal.cpp src/pac_projection_propagation.cpp)
+        src/pac_expression_builder.cpp src/pac_plan_traversal.cpp src/pac_projection_propagation.cpp
+        src/pac_parser.cpp src/pac_metadata_manager.cpp src/pac_metadata_serialization.cpp src/pac_parser_helpers.cpp
+        src/pac_subquery_handler.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
@@ -35,9 +37,14 @@ add_executable(pac_test_runner
     src/test/test_runner.cpp
     src/test/test_plan_traversal.cpp
     src/test/test_schema_metadata.cpp
-    src/test/test_compiler_functions.cpp)
+    src/test/test_compiler_functions.cpp
+    src/test/test_pac_parser.cpp)
 target_link_libraries(pac_test_runner ${EXTENSION_NAME})
 
 # TPCH + PAC benchmark runner
 add_executable(pac_tpch_benchmark benchmark/pac_tpch_benchmark.cpp)
 target_link_libraries(pac_tpch_benchmark ${EXTENSION_NAME})
+
+# TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
+add_executable(pac_tpch_compiler_benchmark benchmark/pac_tpch_compiler_benchmark.cpp)
+target_link_libraries(pac_tpch_compiler_benchmark ${EXTENSION_NAME})

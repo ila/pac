@@ -218,6 +218,18 @@ SELECT SUM(t1a.b) FROM t1 t1a, t1 t1b WHERE t1a.a = t1b.a;
 ----
 PAC rewrite: self-joins are not supported for PAC compilation
 
+# Test self-join inside subquery: should also be rejected
+statement error
+SELECT SUM(b) FROM t1 WHERE a > (SELECT SUM(t1a.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a);
+----
+PAC rewrite: self-joins are not supported for PAC compilation
+
+# Test same table in main query and subquery (different scopes): should PASS
+query I
+SELECT SUM(b) FROM t1 WHERE a > (SELECT AVG(b) FROM t1);
+----
+NULL
+
 # Test conservative mode OFF: subquery should execute normally (no error)
 statement ok
 SET pac_conservative_mode = false;
@@ -263,3 +275,207 @@ DROP TABLE t3;
 # Reset privacy file
 statement ok
 SET pac_privacy_file = '';
+
+# ============================================================================
+# PROTECTED columns tests (PAC metadata PROTECTED attribute)
+# ============================================================================
+
+statement ok
+SET pac_conservative_mode = true;
+
+# Create a table with columns that will be marked as PROTECTED using CREATE PAC TABLE
+statement ok
+CREATE PAC TABLE sales(customer_id INTEGER, product_id INTEGER, amount DECIMAL(10,2), quantity INTEGER, PROTECTED (amount, quantity));
+
+statement ok
+INSERT INTO sales VALUES (1, 100, 50.00, 2), (1, 101, 30.00, 1), (2, 100, 75.00, 3), (2, 102, 25.00, 1);
+
+# PAC-compatible: protected column inside SUM aggregate
+query I
+SELECT SUM(amount) FROM sales;
+----
+180.00
+
+# Not PAC-compatible: protected column in GROUP BY
+statement error
+SELECT amount, COUNT(*) FROM sales GROUP BY amount;
+----
+PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+# Not PAC-compatible: protected column in SELECT without aggregate
+statement error
+SELECT amount FROM sales;
+----
+PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+# PAC-compatible: non-protected column in GROUP BY with protected column in aggregate
+query II
+SELECT product_id, SUM(amount) FROM sales GROUP BY product_id ORDER BY product_id;
+----
+100	125.00
+101	30.00
+102	25.00
+
+# Not PAC-compatible: protected column projected directly (even with other aggregates)
+statement error
+SELECT amount, SUM(quantity) FROM sales GROUP BY amount;
+----
+PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+# PAC-compatible: protected column in WHERE clause with aggregate in SELECT
+query I
+SELECT SUM(quantity) FROM sales WHERE amount > 30;
+----
+5
+
+# Create another table for join tests
+statement ok
+CREATE TABLE products(product_id INTEGER PRIMARY KEY, name VARCHAR, category VARCHAR);
+
+statement ok
+INSERT INTO products VALUES (100, 'Widget', 'Hardware'), (101, 'Gadget', 'Electronics'), (102, 'Gizmo', 'Hardware');
+
+# PAC-compatible: join with protected column only in aggregate
+query II
+SELECT products.category, SUM(sales.amount) FROM sales JOIN products ON sales.product_id = products.product_id GROUP BY products.category ORDER BY products.category;
+----
+Electronics	30.00
+Hardware	150.00
+
+# Not PAC-compatible: protected column in GROUP BY after join
+statement error
+SELECT sales.amount, COUNT(*) FROM sales JOIN products ON sales.product_id = products.product_id GROUP BY sales.amount;
+----
+PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+# Clean up protected columns test
+statement ok
+DROP TABLE sales;
+
+statement ok
+DROP TABLE products;
+
+# Test ALTER PAC TABLE to add PROTECTED columns
+statement ok
+CREATE TABLE employees(id INTEGER, name VARCHAR, salary DECIMAL(10,2), bonus DECIMAL(10,2));
+
+statement ok
+INSERT INTO employees VALUES (1, 'Alice', 50000.00, 5000.00), (2, 'Bob', 60000.00, 6000.00), (3, 'Charlie', 55000.00, 5500.00);
+
+# Add PROTECTED columns via ALTER PAC TABLE
+statement ok
+ALTER PAC TABLE employees ADD PROTECTED (salary);
+
+# PAC-compatible: protected column inside aggregate
+query I
+SELECT SUM(salary) FROM employees;
+----
+165000.00
+
+# Not PAC-compatible: protected column in GROUP BY
+statement error
+SELECT salary, COUNT(*) FROM employees GROUP BY salary;
+----
+PAC rewrite: protected column 'employees.salary' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+
+# Non-protected column 'bonus' can still be used freely in GROUP BY
+query II
+SELECT bonus, COUNT(*) FROM employees GROUP BY bonus ORDER BY bonus;
+----
+5000.00	1
+5500.00	1
+6000.00	1
+
+# Clean up
+statement ok
+DROP TABLE employees;
+
+# ============================================================================
+# Test cycle detection in foreign key relationships
+# ============================================================================
+
+# Create tables with circular foreign key dependencies
+# Tables need PROTECTED columns to be treated as implicit privacy units
+statement ok
+CREATE PAC TABLE cycle_a (id INTEGER PRIMARY KEY, b_id INTEGER, value_a INTEGER, PROTECTED (value_a));
+
+statement ok
+CREATE PAC TABLE cycle_b (id INTEGER PRIMARY KEY, c_id INTEGER, value_b INTEGER, PROTECTED (value_b));
+
+statement ok
+CREATE PAC TABLE cycle_c (id INTEGER PRIMARY KEY, a_id INTEGER, value_c INTEGER, PROTECTED (value_c));
+
+# Define PAC LINKs that form a cycle: cycle_a -> cycle_b -> cycle_c -> cycle_a
+statement ok
+ALTER PAC TABLE cycle_a ADD PAC LINK (b_id) REFERENCES cycle_b(id);
+
+statement ok
+ALTER PAC TABLE cycle_b ADD PAC LINK (c_id) REFERENCES cycle_c(id);
+
+statement ok
+ALTER PAC TABLE cycle_c ADD PAC LINK (a_id) REFERENCES cycle_a(id);
+
+# Insert some test data
+statement ok
+INSERT INTO cycle_a VALUES (1, 1, 100), (2, 2, 200);
+
+statement ok
+INSERT INTO cycle_b VALUES (1, 1, 300), (2, 2, 400);
+
+statement ok
+INSERT INTO cycle_c VALUES (1, 1, 500), (2, 2, 600);
+
+# Test 1: Query on cycle_b should detect FK link cycle
+statement error
+SELECT SUM(value_b) FROM cycle_b;
+----
+PAC rewrite: circular foreign key dependencies detected. PAC compilation requires acyclic foreign key relationships.
+
+# Test 2: Query on cycle_c should also detect FK link cycle
+statement error
+SELECT SUM(value_c) FROM cycle_c;
+----
+PAC rewrite: circular foreign key dependencies detected. PAC compilation requires acyclic foreign key relationships.
+
+# Test 3: Circular join query (A JOIN B JOIN C JOIN A)
+# This forms a query-level cycle independent of FK links
+statement error
+SELECT SUM(cycle_a.value_a) FROM cycle_a
+JOIN cycle_b ON cycle_a.b_id = cycle_b.id
+JOIN cycle_c ON cycle_b.c_id = cycle_c.id
+JOIN cycle_a AS cycle_a2 ON cycle_c.a_id = cycle_a2.id;
+----
+PAC rewrite: circular foreign key dependencies detected. PAC compilation requires acyclic foreign key relationships.
+
+# Test 4: With conservative mode off - should not throw error, just skip PAC compilation
+statement ok
+SET pac_conservative_mode = false;
+
+# FK link cycle - should succeed without PAC compilation
+query I
+SELECT SUM(value_b) FROM cycle_b;
+----
+700
+
+# Query-level cycle - should succeed without PAC compilation
+query I
+SELECT SUM(cycle_a.value_a) FROM cycle_a
+JOIN cycle_b ON cycle_a.b_id = cycle_b.id
+JOIN cycle_c ON cycle_b.c_id = cycle_c.id
+JOIN cycle_a AS cycle_a2 ON cycle_c.a_id = cycle_a2.id;
+----
+300
+
+# Reset conservative mode
+statement ok
+SET pac_conservative_mode = true;
+
+# Clean up cycle tables
+statement ok
+DROP TABLE cycle_a;
+
+statement ok
+DROP TABLE cycle_b;
+
+statement ok
+DROP TABLE cycle_c;

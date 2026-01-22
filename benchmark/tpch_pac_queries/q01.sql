@@ -22,7 +22,7 @@ SELECT
 
     pac_avg(hash(orders.o_custkey), l_discount) AS avg_disc,
 
-    pac_count(hash(orders.o_custkey)) AS count_order
+    pac_count(hash(orders.o_custkey), 1) AS count_order
 
 FROM
     lineitem

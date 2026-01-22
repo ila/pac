@@ -8,6 +8,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
@@ -58,6 +59,29 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 	}
 
 	return found_ptr;
+}
+
+// Find a LogicalGet node for a specific table within a given subtree
+LogicalGet *FindTableScanInSubtree(LogicalOperator *subtree, const string &table_name) {
+	if (!subtree) {
+		return nullptr;
+	}
+
+	if (subtree->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = subtree->Cast<LogicalGet>();
+		auto tblptr = get.GetTable();
+		if (tblptr && tblptr->name == table_name) {
+			return &get;
+		}
+	}
+
+	for (auto &child : subtree->children) {
+		if (auto *found = FindTableScanInSubtree(child.get(), table_name)) {
+			return found;
+		}
+	}
+
+	return nullptr;
 }
 
 LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op) {
@@ -360,6 +384,101 @@ bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOpera
 	}
 
 	return false;
+}
+
+// Check if a table's columns are accessible from the given starting operator.
+// Returns false if the table is in the right child of a MARK/SEMI/ANTI join,
+// because those join types don't output right-side columns (only the boolean mark).
+bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
+	if (!from_op) {
+		return false;
+	}
+
+	// Helper to check if table_index is in a subtree
+	std::function<bool(LogicalOperator *)> has_table_in_subtree = [&](LogicalOperator *op) -> bool {
+		if (!op) {
+			return false;
+		}
+		if (op->type == LogicalOperatorType::LOGICAL_GET) {
+			auto &get = op->Cast<LogicalGet>();
+			if (get.table_index == table_index) {
+				return true;
+			}
+		}
+		for (auto &child : op->children) {
+			if (has_table_in_subtree(child.get())) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	// Recursive helper that returns:
+	// - true if table is accessible (found in an accessible path)
+	// - false if table is not found or blocked by MARK/SEMI/ANTI join
+	std::function<bool(LogicalOperator *)> check_accessible = [&](LogicalOperator *op) -> bool {
+		if (!op) {
+			return false;
+		}
+
+		// If this is the target table, it's accessible from here
+		if (op->type == LogicalOperatorType::LOGICAL_GET) {
+			auto &get = op->Cast<LogicalGet>();
+			if (get.table_index == table_index) {
+				return true;
+			}
+		}
+
+		// Check for join types that block right-side column access
+		if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+		    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+			auto &join = op->Cast<LogicalJoin>();
+
+			// MARK, SEMI, and ANTI joins don't output right-side columns
+			if (join.join_type == JoinType::MARK || join.join_type == JoinType::SEMI ||
+			    join.join_type == JoinType::ANTI || join.join_type == JoinType::RIGHT_SEMI ||
+			    join.join_type == JoinType::RIGHT_ANTI) {
+
+				// Check if table is in the right child (blocked side)
+				if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
+					// Table is in the right child of a MARK/SEMI/ANTI join - columns NOT accessible
+					return false;
+				}
+
+				// Check left child (accessible side)
+				if (op->children.size() >= 1 && check_accessible(op->children[0].get())) {
+					return true;
+				}
+
+				return false;
+			}
+		}
+
+		// For DELIM_JOIN, the right side (subquery) columns are also not directly accessible
+		// to operators above the join (they're correlated)
+		if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+			if (op->children.size() >= 2 && has_table_in_subtree(op->children[1].get())) {
+				// Table is in the subquery branch - columns NOT accessible from above
+				return false;
+			}
+			// Check left child
+			if (op->children.size() >= 1 && check_accessible(op->children[0].get())) {
+				return true;
+			}
+			return false;
+		}
+
+		// For all other operators, check all children
+		for (auto &child : op->children) {
+			if (check_accessible(child.get())) {
+				return true;
+			}
+		}
+
+		return false;
+	};
+
+	return check_accessible(from_op);
 }
 
 } // namespace duckdb

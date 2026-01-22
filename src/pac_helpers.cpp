@@ -27,6 +27,7 @@
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "include/pac_optimizer.hpp"
+#include "include/pac_parser.hpp"
 
 using idx_set = std::unordered_set<idx_t>;
 
@@ -98,94 +99,6 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan) {
 		}
 	}
 	return (max_index == DConstants::INVALID_INDEX) ? 0 : (max_index + 1);
-}
-
-// Forward declarations of helper functions defined later in this file
-static void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out);
-static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator *skip, idx_set &out);
-static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map);
-
-void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
-                 unique_ptr<LogicalOperator> &new_node) {
-	// Validate inputs
-	if (!old_node) {
-		throw InternalException("ReplaceNode: old_node must not be null");
-	}
-	if (!new_node) {
-		throw InternalException("ReplaceNode: new_node must not be null");
-	}
-
-	// Keep pointer to the old subtree (before destruction)
-	LogicalOperator *old_subtree_ptr = old_node.get();
-	if (!old_subtree_ptr) {
-		throw InternalException("ReplaceNode: referenced old subtree is null");
-	}
-
-	// Collect top-level bindings from the old subtree (these are the bindings advertised by the old child)
-	vector<ColumnBinding> old_top_bindings = old_subtree_ptr->GetColumnBindings();
-
-	// Collect all table indices present in the old subtree so we can exclude them when computing external indices
-	idx_set old_subtree_indices;
-	CollectTableIndicesRecursive(old_subtree_ptr, old_subtree_indices);
-
-	// Compute external indices (everything in the plan except the old subtree)
-	idx_set external_indices;
-	CollectTableIndicesExcluding(root.get(), old_subtree_ptr, external_indices);
-
-	// Replace the slot with the new node (this destroys the old subtree)
-	old_node = std::move(new_node);
-	LogicalOperator *subtree_root = old_node.get();
-	if (!subtree_root) {
-		throw InternalException("ReplaceNode: inserted subtree is null after move");
-	}
-
-	// Collect table indices present in the newly inserted subtree
-	idx_set new_subtree_indices;
-	CollectTableIndicesRecursive(subtree_root, new_subtree_indices);
-
-	// Build index remapping for any new-subtree indices that collide with external indices
-	std::unordered_map<idx_t, idx_t> index_map;
-	if (!new_subtree_indices.empty()) {
-		idx_t next_idx = GetNextTableIndex(root);
-		for (auto idx : new_subtree_indices) {
-			if (idx == DConstants::INVALID_INDEX) {
-				continue;
-			}
-			if (external_indices.find(idx) != external_indices.end()) {
-				// find a fresh index not in external_indices and not in new_subtree_indices
-				while (external_indices.find(next_idx) != external_indices.end() ||
-				       new_subtree_indices.find(next_idx) != new_subtree_indices.end()) {
-					++next_idx;
-				}
-				index_map[idx] = next_idx;
-				external_indices.insert(next_idx);
-				++next_idx;
-			}
-		}
-	}
-
-	// Apply index remapping to the inserted subtree if necessary
-	if (!index_map.empty()) {
-		ApplyIndexMapToSubtree(subtree_root, index_map);
-	}
-
-	// After remap, get the new top-level bindings
-	vector<ColumnBinding> new_top_bindings = subtree_root->GetColumnBindings();
-
-	// Build positional replacement map from old_top_bindings -> new_top_bindings
-	ColumnBindingReplacer replacer;
-	const idx_t n = (std::min)(old_top_bindings.size(), new_top_bindings.size());
-	replacer.replacement_bindings.reserve(n);
-	for (idx_t i = 0; i < n; ++i) {
-		if (old_top_bindings[i] != new_top_bindings[i]) {
-			replacer.replacement_bindings.emplace_back(old_top_bindings[i], new_top_bindings[i]);
-		}
-	}
-
-	if (!replacer.replacement_bindings.empty()) {
-		replacer.stop_operator = subtree_root;
-		replacer.VisitOperator(*root);
-	}
 }
 
 static void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
@@ -291,6 +204,89 @@ static void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_m
 	}
 }
 
+void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
+                 unique_ptr<LogicalOperator> &new_node) {
+	// Validate inputs
+	if (!old_node) {
+		throw InternalException("ReplaceNode: old_node must not be null");
+	}
+	if (!new_node) {
+		throw InternalException("ReplaceNode: new_node must not be null");
+	}
+
+	// Keep pointer to the old subtree (before destruction)
+	LogicalOperator *old_subtree_ptr = old_node.get();
+	if (!old_subtree_ptr) {
+		throw InternalException("ReplaceNode: referenced old subtree is null");
+	}
+
+	// Collect top-level bindings from the old subtree (these are the bindings advertised by the old child)
+	vector<ColumnBinding> old_top_bindings = old_subtree_ptr->GetColumnBindings();
+
+	// Collect all table indices present in the old subtree so we can exclude them when computing external indices
+	idx_set old_subtree_indices;
+	CollectTableIndicesRecursive(old_subtree_ptr, old_subtree_indices);
+
+	// Compute external indices (everything in the plan except the old subtree)
+	idx_set external_indices;
+	CollectTableIndicesExcluding(root.get(), old_subtree_ptr, external_indices);
+
+	// Replace the slot with the new node (this destroys the old subtree)
+	old_node = std::move(new_node);
+	LogicalOperator *subtree_root = old_node.get();
+	if (!subtree_root) {
+		throw InternalException("ReplaceNode: inserted subtree is null after move");
+	}
+
+	// Collect table indices present in the newly inserted subtree
+	idx_set new_subtree_indices;
+	CollectTableIndicesRecursive(subtree_root, new_subtree_indices);
+
+	// Build index remapping for any new-subtree indices that collide with external indices
+	std::unordered_map<idx_t, idx_t> index_map;
+	if (!new_subtree_indices.empty()) {
+		idx_t next_idx = GetNextTableIndex(root);
+		for (auto idx : new_subtree_indices) {
+			if (idx == DConstants::INVALID_INDEX) {
+				continue;
+			}
+			if (external_indices.find(idx) != external_indices.end()) {
+				// find a fresh index not in external_indices and not in new_subtree_indices
+				while (external_indices.find(next_idx) != external_indices.end() ||
+				       new_subtree_indices.find(next_idx) != new_subtree_indices.end()) {
+					++next_idx;
+				}
+				index_map[idx] = next_idx;
+				external_indices.insert(next_idx);
+				++next_idx;
+			}
+		}
+	}
+
+	// Apply index remapping to the inserted subtree if necessary
+	if (!index_map.empty()) {
+		ApplyIndexMapToSubtree(subtree_root, index_map);
+	}
+
+	// After remap, get the new top-level bindings
+	vector<ColumnBinding> new_top_bindings = subtree_root->GetColumnBindings();
+
+	// Build positional replacement map from old_top_bindings -> new_top_bindings
+	ColumnBindingReplacer replacer;
+	const idx_t n = (std::min)(old_top_bindings.size(), new_top_bindings.size());
+	replacer.replacement_bindings.reserve(n);
+	for (idx_t i = 0; i < n; ++i) {
+		if (old_top_bindings[i] != new_top_bindings[i]) {
+			replacer.replacement_bindings.emplace_back(old_top_bindings[i], new_top_bindings[i]);
+		}
+	}
+
+	if (!replacer.replacement_bindings.empty()) {
+		replacer.stop_operator = subtree_root;
+		replacer.VisitOperator(*root);
+	}
+}
+
 // Find the primary key column name for a given table. Searches the client's catalog search path
 // for the table and returns the first column name of the primary key constraint (if any).
 // Returns empty string when no primary key exists.
@@ -391,6 +387,7 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 // Find foreign key constraints declared on the given table. Mirrors FindPrimaryKey's lookup logic
 // and returns a vector of (referenced_table_name, fk_column_names) pairs for every FOREIGN KEY
 // constraint defined on the table (i.e., where this table is the foreign-key side).
+// Also includes PAC LINK relationships defined in PAC metadata.
 vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context, const string &table_name) {
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
@@ -422,27 +419,46 @@ vector<std::pair<string, vector<string>>> FindForeignKeys(ClientContext &context
 		}
 	};
 
-	// If schema-qualified name is provided (schema.table), prefer that exact lookup
+	// Extract unqualified table name for PAC metadata lookup
+	string unqualified_table_name = table_name;
 	auto dot_pos = table_name.find('.');
+	if (dot_pos != string::npos) {
+		unqualified_table_name = table_name.substr(dot_pos + 1);
+	}
+
+	// If schema-qualified name is provided (schema.table), prefer that exact lookup
 	if (dot_pos != string::npos) {
 		string schema = table_name.substr(0, dot_pos);
 		string tbl = table_name.substr(dot_pos + 1);
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-		if (!entry)
-			return {};
-		process_entry(entry.get());
-		return result;
+		if (entry) {
+			process_entry(entry.get());
+		}
+		// If not found in catalog, continue to check PAC metadata below
+	} else {
+		// Non-qualified name: walk the search path
+		CatalogSearchPath path(context);
+		for (auto &entry_path : path.Get()) {
+			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
+			                              OnEntryNotFound::RETURN_NULL);
+			if (!entry) {
+				continue;
+			}
+			process_entry(entry.get());
+		}
 	}
 
-	// Non-qualified name: walk the search path
-	CatalogSearchPath path(context);
-	for (auto &entry_path : path.Get()) {
-		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
-		                              OnEntryNotFound::RETURN_NULL);
-		if (!entry) {
-			continue;
+	// Also check for PAC links in the metadata manager
+	// PAC links supplement FK constraints, so we add them to the result
+	auto &metadata_mgr = PACMetadataManager::Get();
+	auto *pac_metadata = metadata_mgr.GetTableMetadata(unqualified_table_name);
+
+	if (pac_metadata) {
+		// Add each PAC link as a foreign key relationship
+		for (auto &link : pac_metadata->links) {
+			// PAC links now support composite keys with local_columns and referenced_columns arrays
+			result.emplace_back(link.referenced_table, link.local_columns);
 		}
-		process_entry(entry.get());
 	}
 
 	return result;
@@ -631,6 +647,15 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method)
 	} catch (...) {
 		return default_method;
 	}
+}
+
+// Helper to safely retrieve boolean settings with defaults
+bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value) {
+	Value val;
+	if (context.TryGetCurrentSetting(setting_name, val) && !val.IsNull()) {
+		return val.GetValue<bool>();
+	}
+	return default_value;
 }
 
 // Helper to trace a binding back through the plan to find which LogicalGet it originates from

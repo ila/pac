@@ -19,8 +19,11 @@ struct ColumnMetadata {
 };
 
 struct PACCompatibilityResult {
-	// Map from scanned table name (start) to FK path vector of qualified table names from start to privacy unit
+	// Map from scanned table name (start) to FK/LINK path vector of table names from start to privacy unit
+	// This includes paths via both actual FK constraints AND PAC LINK metadata
 	std::unordered_map<string, vector<string>> fk_paths;
+	// List of tables that have protected columns (these are treated as implicit privacy units)
+	vector<string> tables_with_protected_columns;
 	// Lightweight per-table metadata (pk/fk) for scanned tables
 	std::unordered_map<string, ColumnMetadata> table_metadata;
 	// Whether plan passed basic PAC-eligibility checks (aggregation/join/window/distinct checks)

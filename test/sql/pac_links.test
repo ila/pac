@@ -1,0 +1,182 @@
+# name: test/sql/pac_links.test
+# description: Test PAC compilation with user-defined PAC LINKs (no actual FK constraints)
+# group: [sql]
+
+require pac
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ==============================================================================
+# Create tables WITHOUT FK constraints - only PAC LINKs define relationships
+# ==============================================================================
+
+# PU table (will be the privacy unit)
+statement ok
+CREATE TABLE users (
+    id INTEGER,
+    name VARCHAR
+);
+
+# Child table - NO FK constraint, will use PAC LINK
+statement ok
+CREATE TABLE orders (
+    id INTEGER,
+    user_id INTEGER,
+    grp INTEGER,
+    amount INTEGER
+);
+
+# Grandchild table - NO FK constraint, will use PAC LINK
+statement ok
+CREATE TABLE order_items (
+    id INTEGER,
+    order_id INTEGER,
+    grp INTEGER,
+    quantity INTEGER
+);
+
+# Deep chain table - NO FK constraint
+statement ok
+CREATE TABLE shipments (
+    id INTEGER,
+    item_id INTEGER,
+    grp INTEGER,
+    weight INTEGER
+);
+
+# Insert data using range()
+statement ok
+INSERT INTO users SELECT i AS id, 'User' || i AS name FROM range(5) t(i);
+
+statement ok
+INSERT INTO orders SELECT i AS id, (i % 5) AS user_id, (i % 3) AS grp, (i % 100) AS amount FROM range(25) t(i);
+
+statement ok
+INSERT INTO order_items SELECT i AS id, (i % 25) AS order_id, (i % 4) AS grp, (i % 50) AS quantity FROM range(100) t(i);
+
+statement ok
+INSERT INTO shipments SELECT i AS id, (i % 100) AS item_id, (i % 5) AS grp, (i % 200) AS weight FROM range(200) t(i);
+
+# ==============================================================================
+# Define PAC metadata with PAC LINKs (NO actual FK constraints exist!)
+# ==============================================================================
+
+statement ok
+ALTER PAC TABLE users ADD PAC KEY (id);
+
+statement ok
+ALTER PAC TABLE users ADD PROTECTED (name);
+
+statement ok
+ALTER PAC TABLE orders ADD PAC KEY (id);
+
+statement ok
+ALTER PAC TABLE orders ADD PAC LINK (user_id) REFERENCES users(id);
+
+statement ok
+ALTER PAC TABLE order_items ADD PAC KEY (id);
+
+statement ok
+ALTER PAC TABLE order_items ADD PAC LINK (order_id) REFERENCES orders(id);
+
+statement ok
+ALTER PAC TABLE shipments ADD PAC KEY (id);
+
+statement ok
+ALTER PAC TABLE shipments ADD PAC LINK (item_id) REFERENCES order_items(id);
+
+# ==============================================================================
+# Test 1: Basic aggregation on child table connected via PAC LINK
+# ==============================================================================
+
+query II
+SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
+----
+0	13
+1	10
+2	12
+
+# ==============================================================================
+# Test 2: Aggregation on grandchild table (2-level PAC LINK chain)
+# ==============================================================================
+
+query III
+SELECT grp, MIN(quantity), MAX(quantity) FROM order_items GROUP BY grp ORDER BY grp LIMIT 1;
+----
+0	7236922	7236969
+
+# ==============================================================================
+# Test 3: Deep chain aggregation (3-level PAC LINK chain)
+# ==============================================================================
+
+query II
+SELECT grp, SUM(weight) FROM shipments GROUP BY grp ORDER BY grp LIMIT 1;
+----
+0	NULL
+
+# ==============================================================================
+# Test 4: Multiple aggregates in single query
+# ==============================================================================
+
+query IIIII
+SELECT grp, COUNT(*), SUM(amount), MIN(amount), MAX(amount)
+FROM orders GROUP BY grp ORDER BY grp LIMIT 1;
+----
+0	13	215	7236922	7236944
+
+# ==============================================================================
+# Test 5: Explicit joins through PAC LINK chain
+# ==============================================================================
+
+query II
+SELECT o.grp, SUM(oi.quantity)
+FROM orders o
+INNER JOIN order_items oi ON oi.order_id = o.id
+GROUP BY o.grp ORDER BY o.grp;
+----
+0	1765
+1	1536
+2	1602
+
+# ==============================================================================
+# Test 6: Full chain join (users -> orders -> order_items -> shipments)
+# ==============================================================================
+
+query III
+SELECT u.id, COUNT(*), SUM(s.weight)
+FROM users u
+INNER JOIN orders o ON o.user_id = u.id
+INNER JOIN order_items oi ON oi.order_id = o.id
+INNER JOIN shipments s ON s.item_id = oi.id
+GROUP BY u.id
+ORDER BY u.id
+LIMIT 1;
+----
+0	NULL	NULL
+
+# ==============================================================================
+# Test 7: Subquery with PAC LINK chain
+# ==============================================================================
+
+query II
+SELECT grp, SUM(quantity) FROM order_items
+WHERE order_id IN (SELECT id FROM orders WHERE amount > 10)
+GROUP BY grp
+ORDER BY grp
+LIMIT 1;
+----
+0	842
+
+# ==============================================================================
+# Cleanup
+# ==============================================================================
+
+statement ok
+PRAGMA clear_pac_metadata;

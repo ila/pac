@@ -139,6 +139,49 @@ static string ReadFileToString(const string &path) {
 	return ss.str();
 }
 
+static string FindSchemaFile(const string &filename) {
+    // Try common relative locations
+    vector<string> candidates = {
+        filename,
+        "./" + filename,
+        "../" + filename,
+        "../../" + filename,
+        "benchmark/" + filename,
+        "../benchmark/" + filename,
+        "../../benchmark/" + filename
+    };
+
+    for (auto &cand : candidates) {
+        if (FileExists(cand)) {
+            return cand;
+        }
+    }
+
+    // Try relative to executable
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
+    if (len != -1) {
+        exe_path[len] = '\0';
+        string dir = string(exe_path);
+        auto pos = dir.find_last_of('/');
+        if (pos != string::npos) {
+            dir = dir.substr(0, pos);
+        }
+
+        for (int i = 0; i < 6; ++i) {
+            string cand = dir + "/benchmark/" + filename;
+            if (FileExists(cand)) {
+                return cand;
+            }
+            auto p2 = dir.find_last_of('/');
+            if (p2 == string::npos) break;
+            dir = dir.substr(0, p2);
+        }
+    }
+
+    return "";
+}
+
 // helper: find Rscript absolute path via 'which'
 static string FindRscriptAbsolute() {
     FILE *pipe = popen("which Rscript 2>/dev/null", "r");
@@ -261,6 +304,29 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
         // - If the DB file exists and the user explicitly provided a path -> warn and re-run dbgen (may recreate tables)
         // - If the DB file exists and the DB was derived from sf (user didn't provide a path) -> skip dbgen
         if (!db_exists || user_provided_db) {
+            // First create schema with PK/FK constraints
+            Log("Creating TPC-H schema with constraints...");
+            string schema_file = FindSchemaFile("pac_tpch_schema.sql");
+            if (schema_file.empty()) {
+                throw std::runtime_error("Cannot find pac_tpch_schema.sql");
+            }
+
+        	/*
+            std::ifstream schema_ifs(schema_file);
+            if (!schema_ifs.is_open()) {
+                throw std::runtime_error("Cannot open pac_tpch_schema.sql: " + schema_file);
+            }
+            std::stringstream schema_ss;
+            schema_ss << schema_ifs.rdbuf();
+            string schema_sql = schema_ss.str();
+
+            auto schema_result = con.Query(schema_sql);
+            if (schema_result->HasError()) {
+                throw std::runtime_error("Failed to create schema: " + schema_result->GetError());
+            }
+            */
+
+            // Now generate data
             char callbuf[128];
             snprintf(callbuf, sizeof(callbuf), "CALL dbgen(sf=%g);", sf);
             auto r_dbgen = con.Query(callbuf);

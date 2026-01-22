@@ -27,6 +27,12 @@ LogicalAggregate *FindTopAggregate(unique_ptr<LogicalOperator> &op);
 // Returns a vector of pointers to all aggregates found.
 void FindAllAggregates(unique_ptr<LogicalOperator> &op, vector<LogicalAggregate *> &aggregates);
 
+// Find a LogicalGet node for a specific table within a given subtree.
+// Unlike FindPrivacyUnitGetNode which searches the entire plan, this searches only within
+// the specified subtree (useful for finding the correct table scan when the same table
+// is scanned multiple times in different subqueries).
+LogicalGet *FindTableScanInSubtree(LogicalOperator *subtree, const string &table_name);
+
 // Find the parent LogicalProjection of a given child node.
 // Returns nullptr if not found.
 LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child);
@@ -67,6 +73,12 @@ vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate 
 // This is important for correlated subqueries where nodes in the subquery branch
 // cannot directly access tables from the outer query.
 bool IsInDelimJoinSubqueryBranch(unique_ptr<LogicalOperator> *root, LogicalOperator *target_node);
+
+// Check if a table's columns are accessible from the given starting operator.
+// Returns false if the table is in the right child of a MARK/SEMI/ANTI join,
+// because those join types don't output right-side columns (only the boolean mark).
+// This is important for IN/EXISTS subqueries where the subquery's columns aren't accessible.
+bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index);
 
 } // namespace duckdb
 

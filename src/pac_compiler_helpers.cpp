@@ -18,6 +18,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/optimizer_type.hpp"
 #include "include/pac_compatibility_check.hpp"
+#include "include/pac_parser.hpp"
 
 #include <vector>
 #include <duckdb/planner/planner.hpp>
@@ -122,14 +123,32 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	const auto &left_meta = lit->second;
 	const auto &right_meta = rit->second;
 
+	// Get PAC metadata manager for looking up PAC LINKs with referenced_columns
+	auto &metadata_mgr = PACMetadataManager::Get();
+
 	vector<JoinCondition> conditions;
 
 	// Try: left has FK referencing right
 	for (auto &fk : left_meta.fks) {
 		if (fk.first == right_table_name) {
 			const auto &left_fk_cols = fk.second;
-			const auto &right_pks = right_meta.pks;
-			BuildJoinConditions(left, right.get(), left_fk_cols, right_pks, left_table_name, right_table_name,
+			vector<string> right_cols = right_meta.pks;
+
+			// If right table has no PKs defined, try to get referenced_columns from PAC LINK
+			if (right_cols.empty()) {
+				auto *left_pac_metadata = metadata_mgr.GetTableMetadata(left_table_name);
+				if (left_pac_metadata) {
+					for (auto &link : left_pac_metadata->links) {
+						if (link.referenced_table == right_table_name && link.local_columns == left_fk_cols &&
+						    !link.referenced_columns.empty()) {
+							right_cols = link.referenced_columns;
+							break;
+						}
+					}
+				}
+			}
+
+			BuildJoinConditions(left, right.get(), left_fk_cols, right_cols, left_table_name, right_table_name,
 			                    conditions);
 			break;
 		}
@@ -140,8 +159,23 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 		for (auto &fk : right_meta.fks) {
 			if (fk.first == left_table_name) {
 				const auto &right_fk_cols = fk.second;
-				const auto &left_pks = left_meta.pks;
-				BuildJoinConditions(left, right.get(), left_pks, right_fk_cols, left_table_name, right_table_name,
+				vector<string> left_cols = left_meta.pks;
+
+				// If left table has no PKs defined, try to get referenced_columns from PAC LINK
+				if (left_cols.empty()) {
+					auto *right_pac_metadata = metadata_mgr.GetTableMetadata(right_table_name);
+					if (right_pac_metadata) {
+						for (auto &link : right_pac_metadata->links) {
+							if (link.referenced_table == left_table_name && link.local_columns == right_fk_cols &&
+							    !link.referenced_columns.empty()) {
+								left_cols = link.referenced_columns;
+								break;
+							}
+						}
+					}
+				}
+
+				BuildJoinConditions(left, right.get(), left_cols, right_fk_cols, left_table_name, right_table_name,
 				                    conditions);
 				break;
 			}
@@ -257,153 +291,6 @@ void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> 
 			gets_missing.push_back(table_in_path);
 		}
 	}
-}
-
-// Add a column to a DELIM_JOIN's duplicate_eliminated_columns and update corresponding DELIM_GETs
-// Returns the ColumnBinding and LogicalType for accessing the column via DELIM_GET
-DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, LogicalGet &source_get,
-                                       const string &column_name, LogicalAggregate *target_agg) {
-	// Find the DELIM_JOIN that is an ancestor of the target aggregate
-	// The DELIM_JOIN connects the outer query (containing source_get) to the subquery (containing target_agg)
-
-	// First, find the DELIM_JOIN by walking up from the root
-	LogicalComparisonJoin *delim_join = nullptr;
-	std::function<bool(LogicalOperator *)> find_delim_join = [&](LogicalOperator *op) -> bool {
-		if (!op)
-			return false;
-
-		if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
-			// Check if this DELIM_JOIN has the target aggregate in its subtree
-			// and the source_get in the other subtree
-			auto &join = op->Cast<LogicalComparisonJoin>();
-
-			// Check if target_agg is in children[1] (the subquery side)
-			bool agg_in_right = false;
-			std::function<bool(LogicalOperator *)> find_agg = [&](LogicalOperator *child) -> bool {
-				if (child == target_agg)
-					return true;
-				for (auto &c : child->children) {
-					if (find_agg(c.get()))
-						return true;
-				}
-				return false;
-			};
-
-			if (join.children.size() >= 2) {
-				agg_in_right = find_agg(join.children[1].get());
-			}
-
-			// Check if source_get is in children[0] (the outer query side)
-			bool source_in_left = false;
-			std::function<bool(LogicalOperator *)> find_source = [&](LogicalOperator *child) -> bool {
-				if (child->type == LogicalOperatorType::LOGICAL_GET) {
-					auto &get = child->Cast<LogicalGet>();
-					if (get.table_index == source_get.table_index)
-						return true;
-				}
-				for (auto &c : child->children) {
-					if (find_source(c.get()))
-						return true;
-				}
-				return false;
-			};
-
-			if (!join.children.empty()) {
-				source_in_left = find_source(join.children[0].get());
-			}
-
-			if (agg_in_right && source_in_left) {
-				delim_join = &join;
-				return true;
-			}
-		}
-
-		for (auto &child : op->children) {
-			if (find_delim_join(child.get()))
-				return true;
-		}
-		return false;
-	};
-
-	find_delim_join(plan.get());
-
-	DelimColumnResult invalid_result;
-	invalid_result.binding = ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
-	invalid_result.type = LogicalType::INVALID;
-
-	if (!delim_join) {
-		// No DELIM_JOIN found - return invalid result
-		return invalid_result;
-	}
-
-	// Ensure the column is projected in source_get
-	idx_t col_proj_idx = EnsureProjectedColumn(source_get, column_name);
-	if (col_proj_idx == DConstants::INVALID_INDEX) {
-		return invalid_result;
-	}
-
-	// Get the column type
-	auto col_index = source_get.GetColumnIds()[col_proj_idx];
-	auto col_type = source_get.GetColumnType(col_index);
-
-	// Create a column reference expression for the source column
-	auto source_binding = ColumnBinding(source_get.table_index, col_proj_idx);
-	auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, source_binding);
-
-	// Add to DELIM_JOIN's duplicate_eliminated_columns
-	idx_t new_col_idx = delim_join->duplicate_eliminated_columns.size();
-	delim_join->duplicate_eliminated_columns.push_back(std::move(col_ref));
-
-	// Find and update all DELIM_GETs in the subquery that reference this DELIM_JOIN
-	// We need to add the new column type to their chunk_types
-	std::function<void(LogicalOperator *)> update_delim_gets = [&](LogicalOperator *op) {
-		if (!op)
-			return;
-
-		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
-			auto &delim_get = op->Cast<LogicalDelimGet>();
-			// Add the new column type
-			delim_get.chunk_types.push_back(col_type);
-		}
-
-		for (auto &child : op->children) {
-			update_delim_gets(child.get());
-		}
-	};
-
-	// Only update DELIM_GETs in the subquery side (children[1])
-	if (delim_join->children.size() >= 2) {
-		update_delim_gets(delim_join->children[1].get());
-	}
-
-	// Find the DELIM_GET that the aggregate can access and return the binding for the new column
-	// Walk from aggregate to find the closest DELIM_GET
-	std::function<LogicalDelimGet *(LogicalOperator *)> find_delim_get = [&](LogicalOperator *op) -> LogicalDelimGet * {
-		if (!op)
-			return nullptr;
-
-		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
-			return &op->Cast<LogicalDelimGet>();
-		}
-
-		for (auto &child : op->children) {
-			auto result = find_delim_get(child.get());
-			if (result)
-				return result;
-		}
-		return nullptr;
-	};
-
-	auto *delim_get = find_delim_get(target_agg);
-	if (!delim_get) {
-		return invalid_result;
-	}
-
-	// Return binding and type for the new column in the DELIM_GET
-	DelimColumnResult result;
-	result.binding = ColumnBinding(delim_get->table_index, new_col_idx);
-	result.type = col_type;
-	return result;
 }
 
 } // namespace duckdb
