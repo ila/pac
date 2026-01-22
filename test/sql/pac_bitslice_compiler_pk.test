@@ -68,7 +68,7 @@ GROUP BY b.pk1
 ORDER BY b.pk1
 LIMIT 1
 ----
-0	13
+0	14
 
 # Test LEFT JOIN with aggregate on right table (composite PK)
 query III
@@ -79,9 +79,9 @@ GROUP BY b.val
 ORDER BY b.val
 LIMIT 3
 ----
-3	87	15
-4	126	21
-8	58	10
+3	90	9
+4	150	18
+8	60	6
 
 # Test RIGHT JOIN with composite PK table on right, aggregating with condition
 query III

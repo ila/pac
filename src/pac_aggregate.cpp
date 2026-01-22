@@ -90,13 +90,14 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, std::mt19937_64 &gen) {
 // Finalize: compute noisy sample from the 64 counters (works on double array)
 // If use_deterministic_noise is true, uses platform-agnostic Box-Muller; otherwise uses std::normal_distribution
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
-// Returns: noise + counters[0] (the deterministic counter at bit 0)
+// Returns: 2*yJ + noise where yJ is a randomly selected counter (each counter estimates sum/2)
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::mt19937_64 &gen,
                                     bool use_deterministic_noise, uint64_t is_null) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
 
 	// mi=0 means no noise - return 2*counter[0] directly (no RNG consumption)
 	// Factor of 2 accounts for the missing random counter yJ term
+	// Note: pac_sum_approx/pac_avg_approx override this with mean-based logic
 	if (mi == 0.0) {
 		D_ASSERT(!(is_null & 1)); // bit 0 must be valid for mi=0
 		return 2.0 * counters[0];
@@ -121,7 +122,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 
 	if (delta <= 0.0 || !std::isfinite(delta)) {
 		// If there's no variance, return the selected counter value without noise.
-		return yJ + counters[0];
+		return 2.0 * yJ;
 	}
 
 	// Sample normal(0, sqrt(delta)) using either deterministic Box-Muller or std::normal_distribution
@@ -142,7 +143,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 		std::normal_distribution<double> normal_dist(0.0, std::sqrt(delta));
 		noise = normal_dist(gen);
 	}
-	return yJ + noise + counters[0];
+	return 2.0 * yJ + noise;
 }
 
 struct PacAggregateLocalState : public FunctionLocalState {

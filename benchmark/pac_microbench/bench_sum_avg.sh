@@ -21,7 +21,7 @@ source "$SCRIPT_DIR/common.sh"
 RESULTS_FILE="$RESULTS_DIR/sum_avg_$(date +%Y%m%d_%H%M%S).csv"
 
 # Variants for ungrouped tests (eageralloc/nobuffering don't affect ungrouped)
-UNGROUPED_VARIANTS=(standard default nobuffering nocascading nosimd)
+UNGROUPED_VARIANTS=(standard default nobuffering) # nocascading nosimd)
 
 # Variants for grouped tests (includes allocation/buffering variants)
 GROUPED_VARIANTS=(standard default nobuffering nocascading)

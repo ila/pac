@@ -17,6 +17,20 @@
 
 namespace duckdb {
 
+// Mix key_hash with query_hash for uniform bit distribution.
+// Uses fmix64 (MurmurHash3 finalizer) for excellent avalanche properties.
+static inline uint64_t PacMixHash(uint64_t key_hash, uint64_t query_hash) {
+	// Combine key and query hashes, add constant to avoid 0->0 fixed point
+	uint64_t x = key_hash + query_hash + 1;
+	// Apply fmix64
+	x ^= x >> 33;
+	x *= 0xff51afd7ed558ccdULL;
+	x ^= x >> 33;
+	x *= 0xc4ceb9fe1a85ec53ULL;
+	x ^= x >> 33;
+	return x;
+}
+
 // Header for PAC aggregate helpers and public declarations used across pac_* files.
 // Contains bindings and small helpers shared between pac_aggregate, pac_count and pac_sum implementations.
 
@@ -40,9 +54,9 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
                                     bool use_deterministic_noise = true, uint64_t is_null = 0);
 
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
-// Uses rnd&63 as threshold, returns true if bitcount >= threshold
+// Uses rnd&63 as threshold, returns true if bitcount > threshold
 static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
-	return __builtin_popcountll(key_hash) >= (rnd & 63);
+	return __builtin_popcountll(key_hash) > (rnd & 63);
 }
 
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash.
@@ -58,8 +72,8 @@ struct PacBindData : public FunctionData {
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
 	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device {}(), double scale_div = 1.0,
 	                     bool use_det_noise = false)
-	    : mi(mi_val), seed(seed_val), query_hash((seed_val ^ PAC_MAGIC_HASH) * PAC_MAGIC_HASH),
-	      scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
+	    : mi(mi_val), seed(seed_val), query_hash((seed_val ^ PAC_MAGIC_HASH) + seed_val), scale_divisor(scale_div),
+	      use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		auto copy = make_uniq<PacBindData>(mi, seed, scale_divisor, use_deterministic_noise);

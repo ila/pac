@@ -54,9 +54,9 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) {
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(agg, PacMixHash(input_data[idx], query_hash), aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(agg, input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(agg, PacMixHash(input_data[idx], query_hash), aggr.allocator);
 #endif
 		}
 	}
@@ -74,9 +74,9 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(agg, PacMixHash(hashes[h_idx], query_hash), aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(agg, hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(agg, PacMixHash(hashes[h_idx], query_hash), aggr.allocator);
 #endif
 		}
 	}
@@ -93,9 +93,11 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vec
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) { // to protect against very many groups, thus uses buffering
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], PacMixHash(input_data[idx], query_hash),
+			                  aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], PacMixHash(input_data[idx], query_hash),
+			                          aggr.allocator);
 #endif
 		}
 	}
@@ -115,9 +117,10 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
 			// to protect against very many groups, thus uses buffering
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], PacMixHash(hashes[h_idx], query_hash), aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx] ^ query_hash, aggr.allocator);
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], PacMixHash(hashes[h_idx], query_hash),
+			                          aggr.allocator);
 #endif
 		}
 	}

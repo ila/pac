@@ -24,9 +24,16 @@ using int64_t = signed long long;
 #else
 #include "duckdb.hpp"
 #include "pac_aggregate.hpp"
+#include <random>
 namespace duckdb {
 void RegisterPacSumFunctions(ExtensionLoader &loader);
 void RegisterPacAvgFunctions(ExtensionLoader &loader);
+void RegisterPacSumApproxFunctions(ExtensionLoader &loader);
+void RegisterPacAvgApproxFunctions(ExtensionLoader &loader);
+
+// Profiling counters for pac_sum_approx performance analysis
+void ResetApproxCounters();
+void PrintApproxCounters();
 
 // ============================================================================
 // PAC_SUM(hash_key, value)  aggregate function
@@ -127,8 +134,8 @@ AUTOVECTORIZE static inline
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
 	for (int i = 0; i < BITS; i++) {
 		uint64_t bits = (key_hash >> i) & MASK;
-		int64_t expanded = -static_cast<int64_t>(bits); // 0x01 -> 0xFFFFFFFFFFFFFFFF, then mask
-		expanded &= (MASK * ((1ULL << BITS) - 1));      // mask to get 0xFF per lane
+		// Expand each 0x01 byte to 0xFF: (bits << BITS) - bits turns 0x01 into 0xFF per byte
+		uint64_t expanded = (bits << BITS) - bits;
 		total[i] += val_packed & expanded;
 	}
 }
@@ -205,7 +212,8 @@ struct PacSumIntState {
 	// NOCASCADING: dummy methods for uniform interface
 	void Flush(ArenaAllocator &) {
 	} // no-op
-	void GetTotalsAsDouble(double *dst) const {
+	void GetTotalsAsDouble(double *dst, std::mt19937_64 *gen = nullptr) const {
+		(void)gen; // unused in exact state
 		ToDoubleArray(probabilistic_total128, dst);
 	}
 #else
@@ -347,7 +355,9 @@ struct PacSumIntState {
 	}
 
 	// Get the probabilistic total as doubles, reading from the highest allocated level
-	void GetTotalsAsDouble(double *dst) const {
+	// Optional gen parameter for interface compatibility with PacSumApproxState (unused here)
+	void GetTotalsAsDouble(double *dst, std::mt19937_64 *gen = nullptr) const {
+		(void)gen; // unused in exact state
 		if (probabilistic_total128) {
 			ToDoubleArray(probabilistic_total128, dst);
 		} else if (probabilistic_total64) {
@@ -386,7 +396,9 @@ struct PacSumDoubleState {
 	uint64_t exact_count; // total count of values added (for pac_avg)
 	double probabilistic_total[64];
 
-	void GetTotalsAsDouble(double *dst) const {
+	// Optional gen parameter for interface compatibility with PacSumApproxState (unused here)
+	void GetTotalsAsDouble(double *dst, std::mt19937_64 *gen = nullptr) const {
+		(void)gen; // unused in exact state
 		for (int i = 0; i < 64; i++) {
 			dst[i] = probabilistic_total[i];
 		}
@@ -403,6 +415,135 @@ struct PacSumDoubleState {
 		return this;
 	}
 };
+
+// =========================
+// Approximate pac_sum state (adaptive 16-bit counters with scaling)
+// =========================
+// Uses only 16-bit SWAR counters with adaptive right-shifting to prevent overflow.
+// Since PAC aggregates add noise anyway, exact precision isn't required.
+// This provides consistent performance by always using the fast 16-bit path.
+//
+// Optimization: Instead of tracking exact_total (sum of abs values), we track:
+// - base: hugeint_t that accumulates subtracted min/max from counters
+// - bound: int32_t upper bound on counter magnitude after rebalancing
+// When overflow would occur, we first try to rebalance by subtracting min (or max
+// for negative totals) from all counters and adding to base. Only if that doesn't
+// help do we shift right (with minimum increment of 3 bits to amortize cost).
+template <bool SIGNED>
+struct PacSumApproxState {
+	typedef typename std::conditional<SIGNED, int16_t, uint16_t>::type T16;
+	typedef typename std::conditional<SIGNED, int64_t, uint64_t>::type T64;
+	typedef typename std::conditional<SIGNED, int32_t, uint32_t>::type T32;
+
+	uint64_t key_hash;    // OR of all key_hashes seen
+	uint64_t exact_count; // total count (for pac_avg_approx)
+	int8_t shift_amount;  // total right-shift applied (0-112)
+	T32 bound;            // cumulative sum of |shifted_value| - tight upper bound on any counter
+	double base_value;    // lost bits from value shifting (distributed to ~32 counters, so base/2 per counter)
+	double base_rebal;    // rebalancing deltas (subtracted from all 64 counters, so base/64 per counter)
+	double base_counter;  // lost bits from counter shifting (per-counter losses, so base/64 per counter)
+	uint64_t *probabilistic_total16; // 16 x uint64_t (lazily allocated)
+
+	// Interface methods (same as PacSumIntState for template compatibility)
+	PacSumApproxState *GetState() {
+		return this;
+	}
+	PacSumApproxState *EnsureState(ArenaAllocator &) {
+		return this;
+	}
+	void Flush(ArenaAllocator &) {
+	} // no cascading needed
+
+	// GetTotalsAsDouble with RNG for random low-bit filling
+	// base_value: lost bits from value shifting (each value goes to ~32 counters, so base_value/2 per counter)
+	// base_rebal: rebalancing deltas (subtracted from all 64 counters, so base_rebal/64 per counter)
+	// base_counter: lost bits from counter shifting (per-counter, so base_counter/64 per counter)
+	// counters are in shifted domain
+	// Total per counter = (counter << shift) + base_value/2 + base_rebal/64 + base_counter/64
+	void GetTotalsAsDouble(double *dst, std::mt19937_64 *gen = nullptr) const {
+		(void)gen; // unused for now
+		// Value losses distributed to ~50% of counters; rebal and counter losses are uniform across all 64
+		double per_counter_correction = base_value / 2.0 + (base_rebal + base_counter) / 64.0;
+		if (!probabilistic_total16) {
+			// No counters allocated - just return base contribution for all positions
+			for (int bit = 0; bit < 64; bit++) {
+				dst[bit] = per_counter_correction;
+			}
+			return;
+		}
+		const T16 *counters = reinterpret_cast<const T16 *>(probabilistic_total16);
+		constexpr int elements_per_u64 = 4;
+		double shift_multiplier = static_cast<double>(1ULL << shift_amount);
+		for (int bit = 0; bit < 64; bit++) {
+			int src_idx = (bit % 16) * elements_per_u64 + (bit / 16);
+			double counter_val = static_cast<double>(counters[src_idx]);
+			// counter is in shifted domain, scale up to original domain
+			double counter_original = counter_val * shift_multiplier;
+			// Add base contribution (distributed across counters)
+			dst[bit] = counter_original + per_counter_correction;
+		}
+	}
+};
+
+// Right-shift entire 16-bit SWAR array by N bits (arithmetic for signed)
+template <bool SIGNED>
+AUTOVECTORIZE inline void ApproxShiftArrayRight(uint64_t *buf, int8_t n = 1) {
+	if (!buf || n <= 0) {
+		return;
+	}
+	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
+	T16 *counters = reinterpret_cast<T16 *>(buf);
+	for (int i = 0; i < 64; i++) {
+		counters[i] = static_cast<T16>(counters[i] >> n);
+	}
+}
+
+// Sum the low bits that would be lost when shifting counters by n bits
+// Returns the total of all (counter[i] & ((1 << n) - 1)) values
+// This is needed to track precision loss when calling ApproxShiftArrayRight
+template <bool SIGNED>
+AUTOVECTORIZE inline int64_t ApproxSumLowBits(const uint64_t *buf, int8_t n) {
+	if (!buf || n <= 0) {
+		return 0;
+	}
+	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
+	const T16 *counters = reinterpret_cast<const T16 *>(buf);
+	int16_t mask = static_cast<int16_t>((1 << n) - 1);
+	int64_t total = 0;
+	for (int i = 0; i < 64; i++) {
+		total += counters[i] & mask;
+	}
+	return total;
+}
+
+// Find min and max of all 64 counters in the SWAR array
+template <bool SIGNED>
+AUTOVECTORIZE inline void ApproxFindMinMax(const uint64_t *buf, int16_t &out_min, int16_t &out_max) {
+	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
+	const T16 *counters = reinterpret_cast<const T16 *>(buf);
+	T16 min_val = counters[0];
+	T16 max_val = counters[0];
+	for (int i = 1; i < 64; i++) {
+		if (counters[i] < min_val) {
+			min_val = counters[i];
+		}
+		if (counters[i] > max_val) {
+			max_val = counters[i];
+		}
+	}
+	out_min = static_cast<int16_t>(min_val);
+	out_max = static_cast<int16_t>(max_val);
+}
+
+// Subtract a constant from all 64 counters in the SWAR array
+template <bool SIGNED>
+AUTOVECTORIZE inline void ApproxSubtractFromAll(uint64_t *buf, int16_t delta) {
+	using T16 = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
+	T16 *counters = reinterpret_cast<T16 *>(buf);
+	for (int i = 0; i < 64; i++) {
+		counters[i] = static_cast<T16>(counters[i] - static_cast<T16>(delta));
+	}
+}
 
 #ifndef PAC_NOBUFFERING
 // ============================================================================
@@ -443,6 +584,8 @@ struct PacSumStateWrapper {
 template <bool SIGNED>
 using PacSumIntStateWrapper = PacSumStateWrapper<PacSumIntState<SIGNED>, typename PacSumIntState<SIGNED>::T64>;
 using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
+template <bool SIGNED>
+using PacSumApproxStateWrapper = PacSumStateWrapper<PacSumApproxState<SIGNED>, typename PacSumApproxState<SIGNED>::T64>;
 #endif // PAC_NOBUFFERING
 
 } // namespace duckdb

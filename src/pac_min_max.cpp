@@ -34,7 +34,7 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, da
 		auto v_idx = value_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
 			// min/max do not use buffering for global aggregates (without GROUP BY) because it was  slower
-			PacMinMaxUpdateOne<T, IS_MAX>(agg, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
+			PacMinMaxUpdateOne<T, IS_MAX>(agg, PacMixHash(hashes[h_idx], query_hash), values[v_idx], aggr.allocator);
 		}
 	}
 }
@@ -58,9 +58,10 @@ static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, id
 		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
 			auto state = state_ptrs[sdata.sel->get_index(i)];
 #ifdef PAC_NOBUFFERING
-			PacMinMaxUpdateOne<T, IS_MAX>(*state, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
+			PacMinMaxUpdateOne<T, IS_MAX>(*state, PacMixHash(hashes[h_idx], query_hash), values[v_idx], aggr.allocator);
 #else
-			PacMinMaxBufferOrUpdateOne<T, IS_MAX>(*state, hashes[h_idx] ^ query_hash, values[v_idx], aggr.allocator);
+			PacMinMaxBufferOrUpdateOne<T, IS_MAX>(*state, PacMixHash(hashes[h_idx], query_hash), values[v_idx],
+			                                      aggr.allocator);
 #endif
 		}
 	}

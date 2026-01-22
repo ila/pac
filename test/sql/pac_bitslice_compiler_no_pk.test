@@ -33,7 +33,7 @@ SELECT SUM(val) FROM bitslice_a
 query I
 SELECT COUNT(val) AS c FROM bitslice_a
 ----
-29
+22
 
 # SUM with JOIN (no GROUP BY)
 query I
@@ -50,7 +50,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	43
+0	34
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -63,7 +63,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	44
+0	35
 
 # Test LEFT JOIN with NULL handling (no PK)
 statement ok
@@ -78,7 +78,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	196
+0	195
 
 statement ok
 DELETE FROM bitslice_a WHERE id = 100;
@@ -95,12 +95,12 @@ pRAGMA add_pac_privacy_unit('bitslice_with_rowid');
 query I
 SELECT SUM(val) FROM bitslice_with_rowid
 ----
-64
+63
 
 query I
 SELECT COUNT(rowid) FROM bitslice_with_rowid
 ----
-14
+10
 
 # Test RIGHT JOIN with no-PK tables, aggregating with filtering condition
 query III
@@ -111,7 +111,7 @@ GROUP BY b.other
 ORDER BY b.other
 LIMIT 1
 ----
-0	13	62
+0	9	61
 
 # Cleanup
 statement ok
