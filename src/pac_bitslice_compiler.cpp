@@ -19,6 +19,7 @@
 #include "include/pac_compatibility_check.hpp"
 #include "include/pac_compiler_helpers.hpp"
 #include "include/pac_projection_propagation.hpp"
+#include "include/pac_subquery_handler.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -27,21 +28,6 @@
 #include "duckdb/optimizer/optimizer.hpp"
 
 namespace duckdb {
-/**
- * GetBooleanSetting: Helper to safely retrieve boolean settings with defaults
- *
- * @param context - Client context containing settings
- * @param setting_name - Name of the setting to retrieve
- * @param default_value - Value to return if setting is not found or null
- * @return The boolean value of the setting, or default_value if not found
- */
-static bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value) {
-	Value val;
-	if (context.TryGetCurrentSetting(setting_name, val) && !val.IsNull()) {
-		return val.GetValue<bool>();
-	}
-	return default_value;
-}
 
 /**
  * ModifyPlanWithoutPU: Transforms a query plan when the privacy unit (PU) table is NOT scanned directly

@@ -23,15 +23,6 @@
 
 namespace duckdb {
 
-// Helper: Get boolean setting value with default
-static bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value) {
-	Value val;
-	if (context.TryGetCurrentSetting(setting_name, val) && !val.IsNull()) {
-		return val.GetValue<bool>();
-	}
-	return default_value;
-}
-
 static bool IsAllowedAggregate(const string &func) {
 	static const std::unordered_set<string> allowed = {"sum", "sum_no_overflow", "count", "count_star", "avg", "min",
 	                                                   "max"};
@@ -115,10 +106,6 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 	}
 	return false;
 }
-
-// Forward declaration
-static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding, const vector<string> &pu_tables,
-                                  LogicalOperator &root);
 
 // Helper: Find the operator in the plan that produces a given table_index
 static LogicalOperator *FindOperatorByTableIndex(LogicalOperator &op, idx_t table_index) {
