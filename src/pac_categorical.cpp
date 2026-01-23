@@ -264,6 +264,117 @@ static void PacLteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 }
 
 // ============================================================================
+// PAC_EQ: Compare scalar == counters (approximate equality), return 64-bit mask
+// ============================================================================
+static void PacEqFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &value_vec = args.data[0];
+	auto &list_vec = args.data[1];
+	idx_t count = args.size();
+
+	UnifiedVectorFormat value_data;
+	value_vec.ToUnifiedFormat(count, value_data);
+	auto values = UnifiedVectorFormat::GetData<double>(value_data);
+
+	UnifiedVectorFormat list_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+
+	auto result_data = FlatVector::GetData<uint64_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto &child_vec = ListVector::GetEntry(list_vec);
+
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<double>(child_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto value_idx = value_data.sel->get_index(i);
+		auto list_idx = list_data.sel->get_index(i);
+
+		if (!value_data.validity.RowIsValid(value_idx) || !list_data.validity.RowIsValid(list_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		double val = values[value_idx];
+		auto &entry = list_entries[list_idx];
+
+		if (entry.length != 64) {
+			throw InvalidInputException("pac_eq: counters list must have exactly 64 elements");
+		}
+
+		uint64_t mask = 0;
+		for (idx_t j = 0; j < 64; j++) {
+			auto child_idx = child_data.sel->get_index(entry.offset + j);
+			if (child_data.validity.RowIsValid(child_idx)) {
+				double counter_val = child_values[child_idx];
+				// Use approximate equality for floating point comparison
+				if (val == counter_val) {
+					mask |= (1ULL << j);
+				}
+			}
+		}
+		result_data[i] = mask;
+	}
+}
+
+// ============================================================================
+// PAC_NEQ: Compare scalar != counters, return 64-bit mask
+// ============================================================================
+static void PacNeqFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &value_vec = args.data[0];
+	auto &list_vec = args.data[1];
+	idx_t count = args.size();
+
+	UnifiedVectorFormat value_data;
+	value_vec.ToUnifiedFormat(count, value_data);
+	auto values = UnifiedVectorFormat::GetData<double>(value_data);
+
+	UnifiedVectorFormat list_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+
+	auto result_data = FlatVector::GetData<uint64_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto &child_vec = ListVector::GetEntry(list_vec);
+
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<double>(child_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto value_idx = value_data.sel->get_index(i);
+		auto list_idx = list_data.sel->get_index(i);
+
+		if (!value_data.validity.RowIsValid(value_idx) || !list_data.validity.RowIsValid(list_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		double val = values[value_idx];
+		auto &entry = list_entries[list_idx];
+
+		if (entry.length != 64) {
+			throw InvalidInputException("pac_neq: counters list must have exactly 64 elements");
+		}
+
+		uint64_t mask = 0;
+		for (idx_t j = 0; j < 64; j++) {
+			auto child_idx = child_data.sel->get_index(entry.offset + j);
+			if (child_data.validity.RowIsValid(child_idx)) {
+				double counter_val = child_values[child_idx];
+				if (val != counter_val) {
+					mask |= (1ULL << j);
+				}
+			}
+		}
+		result_data[i] = mask;
+	}
+}
+
+// ============================================================================
 // PAC_SELECT: Probabilistically select based on mask
 // ============================================================================
 // Returns true with probability proportional to popcount(mask)/64
@@ -453,6 +564,86 @@ static void PacMaskNotFunction(DataChunk &args, ExpressionState &state, Vector &
 }
 
 // ============================================================================
+// PAC_SCALE_COUNTERS: Multiply each element of a counters list by a scalar
+// Used in categorical queries where the aggregate is wrapped with arithmetic
+// e.g., 0.5 * sum(...) becomes pac_scale_counters(0.5, pac_sum_counters(...))
+// ============================================================================
+static void PacScaleCountersFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &scale_vec = args.data[0];
+	auto &counters_vec = args.data[1];
+	idx_t count = args.size();
+
+	UnifiedVectorFormat scale_data;
+	scale_vec.ToUnifiedFormat(count, scale_data);
+	auto scales = UnifiedVectorFormat::GetData<double>(scale_data);
+
+	// Result is a list of doubles
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &result_validity = FlatVector::Validity(result);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vector = ListVector::GetEntry(result);
+
+	idx_t total_elements = 0;
+
+	// First pass: count total elements needed
+	for (idx_t i = 0; i < count; i++) {
+		auto counters_child = ListVector::GetEntry(counters_vec);
+		UnifiedVectorFormat counters_data;
+		counters_vec.ToUnifiedFormat(count, counters_data);
+
+		if (!counters_data.validity.RowIsValid(counters_data.sel->get_index(i))) {
+			continue;
+		}
+
+		auto list_data = UnifiedVectorFormat::GetData<list_entry_t>(counters_data);
+		auto idx = counters_data.sel->get_index(i);
+		total_elements += list_data[idx].length;
+	}
+
+	ListVector::Reserve(result, total_elements);
+	auto child_data = FlatVector::GetData<double>(child_vector);
+
+	idx_t current_offset = 0;
+
+	UnifiedVectorFormat counters_format;
+	counters_vec.ToUnifiedFormat(count, counters_format);
+	auto list_entries_input = UnifiedVectorFormat::GetData<list_entry_t>(counters_format);
+
+	auto &input_child = ListVector::GetEntry(counters_vec);
+	UnifiedVectorFormat input_child_data;
+	input_child.ToUnifiedFormat(ListVector::GetListSize(counters_vec), input_child_data);
+	auto input_values = UnifiedVectorFormat::GetData<double>(input_child_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto scale_idx = scale_data.sel->get_index(i);
+		auto counters_idx = counters_format.sel->get_index(i);
+
+		if (!scale_data.validity.RowIsValid(scale_idx) || !counters_format.validity.RowIsValid(counters_idx)) {
+			result_validity.SetInvalid(i);
+			list_entries[i].offset = current_offset;
+			list_entries[i].length = 0;
+			continue;
+		}
+
+		double scale = scales[scale_idx];
+		auto &input_entry = list_entries_input[counters_idx];
+
+		list_entries[i].offset = current_offset;
+		list_entries[i].length = input_entry.length;
+
+		// Scale each element
+		for (idx_t j = 0; j < input_entry.length; j++) {
+			auto input_idx = input_child_data.sel->get_index(input_entry.offset + j);
+			child_data[current_offset + j] = scale * input_values[input_idx];
+		}
+
+		current_offset += input_entry.length;
+	}
+
+	ListVector::SetListSize(result, current_offset);
+}
+
+// ============================================================================
 // Bind function for pac_select (reads pac_seed setting)
 // ============================================================================
 static unique_ptr<FunctionData> PacSelectBind(ClientContext &ctx, ScalarFunction &func,
@@ -494,6 +685,14 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	ScalarFunction pac_lte("pac_lte", {LogicalType::DOUBLE, list_double_type}, LogicalType::UBIGINT, PacLteFunction);
 	loader.RegisterFunction(pac_lte);
 
+	// pac_eq(value, counters) -> mask
+	ScalarFunction pac_eq("pac_eq", {LogicalType::DOUBLE, list_double_type}, LogicalType::UBIGINT, PacEqFunction);
+	loader.RegisterFunction(pac_eq);
+
+	// pac_neq(value, counters) -> mask
+	ScalarFunction pac_neq("pac_neq", {LogicalType::DOUBLE, list_double_type}, LogicalType::UBIGINT, PacNeqFunction);
+	loader.RegisterFunction(pac_neq);
+
 	// pac_select(mask) -> bool
 	ScalarFunction pac_select_1("pac_select", {LogicalType::UBIGINT}, LogicalType::BOOLEAN, PacSelectFunction,
 	                            PacSelectBind, nullptr, nullptr, PacSelectInitLocal);
@@ -518,6 +717,11 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	// pac_mask_not(mask) -> mask
 	ScalarFunction pac_mask_not("pac_mask_not", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacMaskNotFunction);
 	loader.RegisterFunction(pac_mask_not);
+
+	// pac_scale_counters(scale, counters) -> scaled_counters
+	ScalarFunction pac_scale_counters("pac_scale_counters", {LogicalType::DOUBLE, list_double_type}, list_double_type,
+	                                  PacScaleCountersFunction);
+	loader.RegisterFunction(pac_scale_counters);
 }
 
 } // namespace duckdb

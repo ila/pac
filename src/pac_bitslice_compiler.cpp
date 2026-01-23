@@ -20,6 +20,7 @@
 #include "include/pac_compiler_helpers.hpp"
 #include "include/pac_projection_propagation.hpp"
 #include "include/pac_subquery_handler.hpp"
+#include "include/pac_categorical_rewriter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -298,47 +299,59 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			// - The subquery has: connecting_table (correlated with outer connecting_table)
 			// - The subquery needs its own fk_table join to get the FK columns for each row
 
-			vector<unique_ptr<LogicalOperator> *> fk_nodes;
-			FindAllNodesByTable(&plan, fk_table_with_pu_reference, fk_nodes);
-
-			bool fk_in_outer_query = false;
-			for (auto *fk_node : fk_nodes) {
-				if (!IsInDelimJoinSubqueryBranch(&plan, fk_node->get())) {
-					fk_in_outer_query = true;
-					break;
-				}
-			}
-
-			// Check if the connecting table is ALSO in the outer query
-			bool connecting_table_in_outer = false;
-			for (auto *conn_node : all_connecting_nodes) {
-				if (!IsInDelimJoinSubqueryBranch(&plan, conn_node->get())) {
-					connecting_table_in_outer = true;
-					break;
-				}
-			}
-
-			// Only skip adding FK join if:
-			// - FK table is in outer query AND
-			// - Connecting table is NOT in outer query (outer scans FK table directly)
-			// This means the subquery can access FK columns via DELIM_GET
-			bool can_use_delim_get = fk_in_outer_query && !connecting_table_in_outer;
-
-			if (!can_use_delim_get) {
-				// Need to add FK join for this subquery instance
-				tables_to_join_for_instance.push_back(fk_table_with_pu_reference);
+			// IMPORTANT: If the connecting table IS the FK table, we don't need to add a join
+			// (we can't join a table to itself via FK relationship)
+			if (connecting_table == fk_table_with_pu_reference) {
+				// The connecting table already IS the FK table - no join needed
+				// Just map it to itself for hash generation
+				connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
 #ifdef DEBUG
-				Printer::Print("ModifyPlanWithoutPU: Adding " + fk_table_with_pu_reference +
-				               " join for subquery instance #" + std::to_string(connecting_table_idx));
+				Printer::Print("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
+				               " is already the FK table (" + fk_table_with_pu_reference + "), no join needed");
+#endif
+			} else {
+				vector<unique_ptr<LogicalOperator> *> fk_nodes;
+				FindAllNodesByTable(&plan, fk_table_with_pu_reference, fk_nodes);
+
+				bool fk_in_outer_query = false;
+				for (auto *fk_node : fk_nodes) {
+					if (!IsInDelimJoinSubqueryBranch(&plan, fk_node->get())) {
+						fk_in_outer_query = true;
+						break;
+					}
+				}
+
+				// Check if the connecting table is ALSO in the outer query
+				bool connecting_table_in_outer = false;
+				for (auto *conn_node : all_connecting_nodes) {
+					if (!IsInDelimJoinSubqueryBranch(&plan, conn_node->get())) {
+						connecting_table_in_outer = true;
+						break;
+					}
+				}
+
+				// Only skip adding FK join if:
+				// - FK table is in outer query AND
+				// - Connecting table is NOT in outer query (outer scans FK table directly)
+				// This means the subquery can access FK columns via DELIM_GET
+				bool can_use_delim_get = fk_in_outer_query && !connecting_table_in_outer;
+
+				if (!can_use_delim_get) {
+					// Need to add FK join for this subquery instance
+					tables_to_join_for_instance.push_back(fk_table_with_pu_reference);
+#ifdef DEBUG
+					Printer::Print("ModifyPlanWithoutPU: Adding " + fk_table_with_pu_reference +
+					               " join for subquery instance #" + std::to_string(connecting_table_idx));
+#endif
+				}
+#ifdef DEBUG
+				else {
+					Printer::Print("ModifyPlanWithoutPU: FK table " + fk_table_with_pu_reference +
+					               " accessible via DELIM_GET for subquery instance #" +
+					               std::to_string(connecting_table_idx));
+				}
 #endif
 			}
-#ifdef DEBUG
-			else {
-				Printer::Print("ModifyPlanWithoutPU: FK table " + fk_table_with_pu_reference +
-				               " accessible via DELIM_GET for subquery instance #" +
-				               std::to_string(connecting_table_idx));
-			}
-#endif
 		}
 
 		// Only create joins if there are tables to join for this instance
@@ -390,13 +403,17 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			// and this instance can access it directly (not in a subquery branch)
 			// Find it and map the connecting table to it
 			// Search BOTH gets_present AND actually_present tables (tables marked missing but found in plan)
-			// IMPORTANT: We must also check that the FK table's columns are ACCESSIBLE
-			// (not blocked by MARK/SEMI/ANTI joins)
+			// IMPORTANT: We must find an FK table that is in the SAME SUBTREE as the connecting table,
+			// not just any accessible FK table. This is crucial for queries with multiple branches
+			// (e.g., CROSS_PRODUCT with different aggregates in each branch).
 			vector<string> all_present_tables;
 			all_present_tables.insert(all_present_tables.end(), gets_present.begin(), gets_present.end());
 			all_present_tables.insert(all_present_tables.end(), actually_present.begin(), actually_present.end());
 
 			bool found_accessible_fk_table = false;
+
+			// First, find the common ancestor of this connecting table in the plan
+			// We need to find an FK table that shares a subtree with this connecting table
 			for (auto &present_table : all_present_tables) {
 				// Check if this present table has an FK to the PU
 				auto it = check.table_metadata.find(present_table);
@@ -418,31 +435,94 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						vector<unique_ptr<LogicalOperator> *> fk_table_nodes;
 						FindAllNodesByTable(&plan, present_table, fk_table_nodes);
 						if (!fk_table_nodes.empty()) {
-							// For the main query instance, map to the FK table in the outer query
-							// BUT only if the FK table's columns are accessible (not on right side of MARK join)
+							// Find an FK table instance that is in the same subtree as the connecting table
+							// This is done by checking if BOTH tables are reachable from some common ancestor
 							for (auto *fk_node : fk_table_nodes) {
 								auto &fk_table_get = fk_node->get()->Cast<LogicalGet>();
 								idx_t fk_table_idx = fk_table_get.table_index;
 
-								// Check if this FK table is accessible from the plan root
-								// (not blocked by MARK/SEMI/ANTI joins)
-								if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
-									// Map connecting table to this FK table instance
-									connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
+								// IMPORTANT: If the FK table IS the connecting table (same index),
+								// they trivially share a subtree - just map it to itself
+								if (fk_table_idx == connecting_table_idx) {
+									if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
+										connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
 #ifdef DEBUG
-									Printer::Print("ModifyPlanWithoutPU: Mapped connecting table #" +
-									               std::to_string(connecting_table_idx) + " to FK table " +
-									               present_table + " #" + std::to_string(fk_table_idx) +
-									               " for hashing");
+										Printer::Print("ModifyPlanWithoutPU: Connecting table #" +
+										               std::to_string(connecting_table_idx) +
+										               " IS the FK table - mapping to itself");
 #endif
-									found_accessible_fk_table = true;
-									break;
+										found_accessible_fk_table = true;
+										break;
+									}
+									continue;
+								}
+
+								// Check if this FK table is in the same subtree as the connecting table
+								// by finding a common ancestor that has both table indices in its subtree
+								// The simplest check: find an operator that has BOTH table indices in its subtree
+								bool shares_subtree = false;
+
+								// Walk up from plan root and find smallest subtree containing both tables
+								std::function<bool(LogicalOperator *)> findCommonSubtree =
+								    [&](LogicalOperator *op) -> bool {
+									if (!op)
+										return false;
+
+									bool has_connecting = HasTableIndexInSubtree(op, connecting_table_idx);
+									bool has_fk = HasTableIndexInSubtree(op, fk_table_idx);
+
+									if (has_connecting && has_fk) {
+										// Both tables are in this subtree - check if they're in the SAME child
+										// (not in different branches of a join/cross product)
+										for (auto &child : op->children) {
+											bool child_has_connecting =
+											    HasTableIndexInSubtree(child.get(), connecting_table_idx);
+											bool child_has_fk = HasTableIndexInSubtree(child.get(), fk_table_idx);
+
+											if (child_has_connecting && child_has_fk) {
+												// Both in same child - recurse to find tighter common ancestor
+												return findCommonSubtree(child.get());
+											}
+										}
+										// Tables are in different children of this operator
+										// Check if this is a JOIN that connects them (valid) vs CROSS_PRODUCT (separate
+										// branches)
+										if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+										    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+										    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+											// Join connects them - they can reference each other
+											shares_subtree = true;
+											return true;
+										}
+										// CROSS_PRODUCT or other - tables are in independent branches
+										return false;
+									}
+									return false;
+								};
+
+								findCommonSubtree(plan.get());
+
+								if (shares_subtree) {
+									// Also verify the FK table's columns are accessible (not blocked by MARK/SEMI/ANTI)
+									if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
+										// Map connecting table to this FK table instance
+										connecting_table_to_orders_table[connecting_table_idx] = fk_table_idx;
+#ifdef DEBUG
+										Printer::Print("ModifyPlanWithoutPU: Mapped connecting table #" +
+										               std::to_string(connecting_table_idx) + " to FK table " +
+										               present_table + " #" + std::to_string(fk_table_idx) +
+										               " for hashing (same subtree)");
+#endif
+										found_accessible_fk_table = true;
+										break;
+									}
 								}
 #ifdef DEBUG
 								else {
 									Printer::Print("ModifyPlanWithoutPU: FK table " + present_table + " #" +
 									               std::to_string(fk_table_idx) +
-									               " is NOT accessible (blocked by MARK/SEMI/ANTI join)");
+									               " is NOT in same subtree as connecting table #" +
+									               std::to_string(connecting_table_idx));
 								}
 #endif
 							}
@@ -467,6 +547,18 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				auto table_ptr = target_op.GetTable();
 				if (table_ptr) {
 					connecting_table_name = table_ptr->name;
+				}
+
+				// IMPORTANT: If the connecting table IS the FK table with PU reference,
+				// we don't need to add any joins - just map it to itself for hash generation
+				if (connecting_table_name == fk_table_with_pu_reference) {
+					connecting_table_to_orders_table[connecting_table_idx] = connecting_table_idx;
+#ifdef DEBUG
+					Printer::Print("ModifyPlanWithoutPU: Connecting table #" + std::to_string(connecting_table_idx) +
+					               " (" + connecting_table_name +
+					               ") IS the FK table with PU reference, no join needed");
+#endif
+					continue; // Skip to next connecting table instance
 				}
 
 				// Build list of tables we need to join to reach fk_table_with_pu_reference
@@ -577,12 +669,19 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 		// First, collect all connecting table indices that appear in the aggregate's subtree
 		// AND whose columns are actually accessible (not in right side of MARK/SEMI/ANTI join)
+		// IMPORTANT: We must also verify that the MAPPED orders table is in the aggregate's subtree,
+		// not just the connecting table. This is crucial for CROSS_PRODUCT queries where the
+		// connecting table and orders table might be in different branches.
 		vector<idx_t> candidate_conn_tables;
 		for (auto &kv : connecting_table_to_orders_table) {
 			idx_t conn_table_idx = kv.first;
-			if (HasTableIndexInSubtree(target_agg, conn_table_idx)) {
-				// Also check that this table's columns are accessible (not blocked by MARK/SEMI/ANTI joins)
-				if (AreTableColumnsAccessible(target_agg, conn_table_idx)) {
+			idx_t orders_idx = kv.second;
+
+			// Check if BOTH the connecting table AND the orders table are in the aggregate's subtree
+			if (HasTableIndexInSubtree(target_agg, conn_table_idx) && HasTableIndexInSubtree(target_agg, orders_idx)) {
+				// Also check that both tables' columns are accessible (not blocked by MARK/SEMI/ANTI joins)
+				if (AreTableColumnsAccessible(target_agg, conn_table_idx) &&
+				    AreTableColumnsAccessible(target_agg, orders_idx)) {
 					candidate_conn_tables.push_back(conn_table_idx);
 				}
 			}
@@ -671,6 +770,11 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 									auto hash_input_expr = PropagatePKThroughProjections(
 									    *plan, node_get, std::move(base_hash_expr), target_agg);
 
+									// Skip if no direct path found (e.g., table is behind nested aggregate)
+									if (!hash_input_expr) {
+										continue;
+									}
+
 #ifdef DEBUG
 									Printer::Print("ModifyPlanWithoutPU: FK table #" + std::to_string(node_table_idx) +
 									               " hash expression propagated");
@@ -679,9 +783,14 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 									// Modify this aggregate with PAC functions
 									ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
 
+									// Mark as handled so we don't process this aggregate again
 									handled_via_direct_fk = true;
 									break;
 								}
+							}
+
+							if (handled_via_direct_fk) {
+								break;
 							}
 						}
 
@@ -789,6 +898,11 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 										auto hash_input_expr = PropagatePKThroughProjections(
 										    *plan, hash_source_get, std::move(base_hash_expr), target_agg);
 
+										// Skip if no direct path found
+										if (!hash_input_expr) {
+											continue;
+										}
+
 										// Modify this aggregate with PAC functions
 										ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
 
@@ -855,10 +969,6 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					}
 				}
 			}
-
-			if (!handled_via_direct_fk) {
-				throw InternalException("PAC Compiler: could not find any connecting table for aggregate");
-			}
 		}
 
 		// Skip to next aggregate if we already handled this one via direct FK
@@ -904,7 +1014,81 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		bool orders_in_aggregate_subtree = HasTableIndexInSubtree(target_agg, orders_table_idx);
 
 		if (!orders_in_aggregate_subtree) {
-			// The orders table is in the outer query - use AddColumnToDelimJoin to access it via DELIM_GET
+			// The selected orders table is not in this aggregate's subtree
+			// This can happen when the connecting_table_to_orders_table mapping points to a table
+			// in a different branch (e.g., correlated subquery vs uncorrelated subquery)
+			//
+			// First, try to find ANY FK table (table with FK to PU) directly in this aggregate's subtree
+			// This handles uncorrelated subqueries that have their own FK table instance
+			bool found_direct_fk = false;
+
+			for (auto &present_table : gets_present) {
+				auto it = check.table_metadata.find(present_table);
+				if (it == check.table_metadata.end())
+					continue;
+
+				// Check if this table has FK to PU
+				bool has_fk_to_pu = false;
+				vector<string> fk_cols;
+				for (auto &fk : it->second.fks) {
+					for (auto &pu : privacy_units) {
+						if (fk.first == pu) {
+							has_fk_to_pu = true;
+							fk_cols = fk.second;
+							break;
+						}
+					}
+					if (has_fk_to_pu)
+						break;
+				}
+
+				if (!has_fk_to_pu || fk_cols.empty())
+					continue;
+
+				// Find all instances of this FK table and check which one is in the aggregate's subtree
+				vector<unique_ptr<LogicalOperator> *> fk_table_nodes;
+				FindAllNodesByTable(&plan, present_table, fk_table_nodes);
+
+				for (auto *node : fk_table_nodes) {
+					auto &node_get = node->get()->Cast<LogicalGet>();
+					idx_t node_table_idx = node_get.table_index;
+
+					if (HasTableIndexInSubtree(target_agg, node_table_idx)) {
+						// Found an FK table directly in this aggregate's subtree - use it
+#ifdef DEBUG
+						Printer::Print("ModifyPlanWithoutPU: Found FK table " + present_table + " #" +
+						               std::to_string(node_table_idx) + " directly in aggregate subtree");
+#endif
+						// Ensure FK columns are projected
+						for (auto &fk_col : fk_cols) {
+							idx_t proj_idx = EnsureProjectedColumn(node_get, fk_col);
+							if (proj_idx == DConstants::INVALID_INDEX) {
+								throw InternalException("PAC compiler: failed to project FK column " + fk_col);
+							}
+						}
+
+						// Build hash expression
+						auto base_hash_expr = BuildXorHashFromPKs(input, node_get, fk_cols);
+						auto hash_input_expr =
+						    PropagatePKThroughProjections(*plan, node_get, std::move(base_hash_expr), target_agg);
+
+						// Modify this aggregate with PAC functions
+						ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
+
+						found_direct_fk = true;
+						break;
+					}
+				}
+
+				if (found_direct_fk)
+					break;
+			}
+
+			if (found_direct_fk) {
+				continue; // Move to next aggregate
+			}
+
+			// If still not found, fall back to AddColumnToDelimJoin for correlated subqueries
 #ifdef DEBUG
 			Printer::Print("ModifyPlanWithoutPU: Orders table #" + std::to_string(orders_table_idx) +
 			               " not in aggregate subtree, using AddColumnToDelimJoin");
@@ -1041,6 +1225,17 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 		// Build hash expression
 		auto base_hash_expr = BuildXorHashFromPKs(input, orders_get, fk_cols);
 		auto hash_input_expr = PropagatePKThroughProjections(*plan, orders_get, std::move(base_hash_expr), target_agg);
+
+		// Skip if no direct path found - this can happen for nested aggregates that operate
+		// on already-aggregated data (e.g., avg(total) over a GROUP BY sum). These aggregates
+		// don't need PAC transformation because they consume already-protected data.
+		if (!hash_input_expr) {
+#ifdef DEBUG
+			Printer::Print("ModifyPlanWithoutPU: Skipping aggregate - no direct path to orders table #" +
+			               std::to_string(orders_table_idx) + " (likely a nested aggregate on aggregated data)");
+#endif
+			continue;
+		}
 
 #ifdef DEBUG
 		Printer::Print("ModifyPlanWithoutPU: Built hash expression for aggregate using orders table #" +
@@ -1405,6 +1600,24 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		vector<string> unique_gets_missing(all_missing_tables.begin(), all_missing_tables.end());
 
 		ModifyPlanWithoutPU(check, input, plan, unique_gets_missing, gets_present, fk_path_to_use, privacy_units);
+	}
+
+	// ============================================================================
+	// CATEGORICAL QUERY HANDLING
+	// ============================================================================
+	// After the standard PAC transformation, check if this is a categorical query
+	// (outer query compares against inner PAC aggregate without its own aggregate).
+	// If so, rewrite to use _counters variants and pac_select for probabilistic filtering.
+	vector<CategoricalPatternInfo> categorical_patterns;
+	if (IsCategoricalQuery(plan, categorical_patterns)) {
+#ifdef DEBUG
+		Printer::Print("=== CATEGORICAL QUERY DETECTED ===");
+		Printer::Print("Found " + std::to_string(categorical_patterns.size()) + " categorical pattern(s)");
+#endif
+		RewriteCategoricalQuery(input, plan, categorical_patterns);
+#ifdef DEBUG
+		Printer::Print("=== CATEGORICAL REWRITE COMPLETE ===");
+#endif
 	}
 
 	// IMPORTANT: After all PAC modifications, resolve operator types for the entire plan tree

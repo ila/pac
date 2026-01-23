@@ -62,20 +62,61 @@ static bool FindPathToTableScan(LogicalOperator *current, idx_t target_table_ind
 	return false;
 }
 
+// Similar to FindPathToTableScan, but STOPS at nested aggregates.
+// This is used when we need to propagate columns only within the current aggregate's
+// direct subtree, not through nested aggregates (which have their own column scope).
+static bool FindDirectPathToTableScan(LogicalOperator *current, idx_t target_table_index, vector<PathEntry> &path,
+                                      bool is_start = true) {
+	if (!current) {
+		return false;
+	}
+
+	// Check if this is the target table scan
+	if (current->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = current->Cast<LogicalGet>();
+		if (get.table_index == target_table_index) {
+			return true;
+		}
+	}
+
+	// STOP at nested aggregates - they have their own column scope
+	// The is_start flag allows us to skip the starting aggregate itself
+	if (!is_start && current->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return false;
+	}
+
+	// Try each child
+	for (idx_t child_idx = 0; child_idx < current->children.size(); child_idx++) {
+		if (FindDirectPathToTableScan(current->children[child_idx].get(), target_table_index, path, false)) {
+			// Found it in this subtree - add current to path ONLY if it's not an aggregate
+			if (current->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+				path.push_back({current, child_idx});
+			}
+			return true;
+		}
+	}
+
+	return false;
+}
+
 unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, LogicalGet &pu_get,
                                                      unique_ptr<Expression> hash_expr, LogicalAggregate *target_agg) {
 	// Find ALL operators on the path between the PU table scan and the target aggregate
+	// IMPORTANT: Use FindDirectPathToTableScan which STOPS at nested aggregates.
+	// This prevents us from trying to propagate columns through nested aggregates,
+	// which would fail because aggregates create a new column scope.
 	vector<PathEntry> path_ops;
 
-	// Find the path from aggregate to the specific table scan
-	if (!FindPathToTableScan(target_agg, pu_get.table_index, path_ops)) {
-		// No path found - table scan is not in this aggregate's subtree
-		// This can happen with complex subqueries; return original expression
+	// Find the path from aggregate to the specific table scan, stopping at nested aggregates
+	if (!FindDirectPathToTableScan(target_agg, pu_get.table_index, path_ops, true)) {
+		// No direct path found - table scan is not in this aggregate's direct subtree
+		// (it may be behind a nested aggregate or in a different branch of the plan).
+		// Return nullptr to signal that this aggregate should NOT be transformed.
 #ifdef DEBUG
-		Printer::Print("PropagatePKThroughProjections: No path found from aggregate to table #" +
-		               std::to_string(pu_get.table_index) + ", returning original expression");
+		Printer::Print("PropagatePKThroughProjections: No direct path found from aggregate to table #" +
+		               std::to_string(pu_get.table_index) + ", returning nullptr to skip transformation");
 #endif
-		return hash_expr->Copy();
+		return nullptr;
 	}
 
 #ifdef DEBUG

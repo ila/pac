@@ -21,7 +21,7 @@ set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_privac
         src/pac_count.cpp src/pac_min_max.cpp src/pac_bitslice_compiler.cpp src/pac_compiler_helpers.cpp
         src/pac_expression_builder.cpp src/pac_plan_traversal.cpp src/pac_projection_propagation.cpp
         src/pac_parser.cpp src/pac_metadata_manager.cpp src/pac_metadata_serialization.cpp src/pac_parser_helpers.cpp
-        src/pac_subquery_handler.cpp src/pac_categorical.cpp src/pac_sum.cpp src/pac_avg.cpp)
+        src/pac_subquery_handler.cpp src/pac_categorical.cpp src/pac_categorical_rewriter.cpp src/pac_sum.cpp src/pac_avg.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
