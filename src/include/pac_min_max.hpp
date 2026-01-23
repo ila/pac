@@ -27,6 +27,8 @@ using int64_t = signed long long;
 namespace duckdb {
 void RegisterPacMinFunctions(ExtensionLoader &loader);
 void RegisterPacMaxFunctions(ExtensionLoader &loader);
+void RegisterPacMinCountersFunctions(ExtensionLoader &loader);
+void RegisterPacMaxCountersFunctions(ExtensionLoader &loader);
 
 // ============================================================================
 // PAC_MIN/PAC_MAX(hash_key, value) aggregate functions

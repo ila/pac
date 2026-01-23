@@ -18,8 +18,10 @@
 #include "include/pac_privacy_unit.hpp"
 #include "include/pac_aggregate.hpp"
 #include "include/pac_count.hpp"
-#include "include/pac_sum_avg.hpp"
+#include "include/pac_sum.hpp"
+#include "include/pac_avg.hpp"
 #include "include/pac_min_max.hpp"
+#include "include/pac_categorical.hpp"
 #include "include/pac_parser.hpp"
 
 namespace duckdb {
@@ -175,11 +177,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacAggregateFunctions(loader);
 	// Register pac_sum/pac_avg aggregate functions (moved to pac_sum_avg.cpp)
 	RegisterPacSumFunctions(loader);
+	RegisterPacSumCountersFunctions(loader);
 	RegisterPacAvgFunctions(loader);
+	RegisterPacAvgCountersFunctions(loader);
 	RegisterPacCountFunctions(loader);
+	RegisterPacCountCountersFunctions(loader);
 	// Register pac_min/pac_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
+	// Register _counters variants for categorical queries
+	RegisterPacMinCountersFunctions(loader);
+	RegisterPacMaxCountersFunctions(loader);
+
+	// Register PAC categorical functions (pac_gt, pac_lt, pac_select, pac_mask_and, etc.)
+	RegisterPacCategoricalFunctions(loader);
 
 	// Register PAC parser extension
 	db.config.parser_extensions.push_back(PACParserExtension());

@@ -35,7 +35,7 @@ void TestPACParser::TestJSONSerialization() {
 	TEST_ASSERT(json.find("\"users\"") != string::npos, "JSON should contain users");
 	TEST_ASSERT(json.find("\"salary\"") != string::npos, "JSON should contain salary");
 	// Deserialize from JSON
-	PACTableMetadata deserialized = PACMetadataManager::DeserializeFromJSON(json);
+	PACTableMetadata deserialized = PACMetadataManager::Get().DeserializeFromJSON(json);
 	// Verify deserialized data matches original
 	TEST_ASSERT(deserialized.table_name == "test_table", "Deserialized table_name should match");
 	TEST_ASSERT(deserialized.primary_key_columns.size() == 2, "Deserialized should have 2 PK columns");
@@ -287,7 +287,7 @@ void TestPACParser::TestCompositeKeyParsing() {
 	TEST_ASSERT(json.find("\"ref1\"") != string::npos, "JSON should contain ref1");
 	TEST_ASSERT(json.find("\"ref2\"") != string::npos, "JSON should contain ref2");
 
-	PACTableMetadata deserialized = PACMetadataManager::DeserializeFromJSON(json);
+	PACTableMetadata deserialized = PACMetadataManager::Get().DeserializeFromJSON(json);
 	TEST_ASSERT(deserialized.table_name == "test_composite", "Deserialized table name should match");
 	TEST_ASSERT(deserialized.links.size() == 1, "Deserialized should have 1 link");
 	TEST_ASSERT(deserialized.links[0].local_columns.size() == 2, "Deserialized link should have 2 local columns");

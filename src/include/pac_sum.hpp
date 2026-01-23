@@ -26,7 +26,7 @@ using int64_t = signed long long;
 #include "pac_aggregate.hpp"
 namespace duckdb {
 void RegisterPacSumFunctions(ExtensionLoader &loader);
-void RegisterPacAvgFunctions(ExtensionLoader &loader);
+void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 
 // ============================================================================
 // PAC_SUM(hash_key, value)  aggregate function
@@ -444,6 +444,74 @@ template <bool SIGNED>
 using PacSumIntStateWrapper = PacSumStateWrapper<PacSumIntState<SIGNED>, typename PacSumIntState<SIGNED>::T64>;
 using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
 #endif // PAC_NOBUFFERING
+
+// Forward declarations for pac_sum functions exported for pac_avg
+
+// State type selection (defined in pac_sum.cpp, needed by pac_avg.cpp)
+#ifdef PAC_NOBUFFERING
+template <bool SIGNED>
+using ScatterIntState = PacSumIntState<SIGNED>;
+using ScatterDoubleState = PacSumDoubleState;
+#else
+template <bool SIGNED>
+using ScatterIntState = PacSumIntStateWrapper<SIGNED>;
+using ScatterDoubleState = PacSumDoubleStateWrapper;
+
+// FlushBuffer - flushes src's buffer into dst's inner state (declared here, defined in pac_sum.cpp)
+template <bool SIGNED, typename WrapperT>
+void PacSumFlushBuffer(WrapperT &src, WrapperT &dst, ArenaAllocator &a);
+#endif
+
+// Size and initialize functions
+idx_t PacSumIntStateSize(const AggregateFunction &);
+void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p);
+idx_t PacSumDoubleStateSize(const AggregateFunction &);
+void PacSumDoubleInitialize(const AggregateFunction &, data_ptr_t state_ptr);
+
+// Update functions (simple updates)
+void PacSumUpdateTinyInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateSmallInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateInteger(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateBigInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateUTinyInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateUSmallInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateUInteger(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateUBigInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+void PacSumUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count);
+
+// Scatter update functions
+void PacSumScatterUpdateTinyInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateSmallInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateInteger(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateBigInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateUTinyInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateUSmallInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateUInteger(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateUBigInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count);
+
+// Combine functions
+void PacSumCombineSigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count);
+void PacSumCombineUnsigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count);
+void PacSumCombineDoubleWrapper(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count);
+
+// Finalize functions for pac_sum
+void PacSumFinalizeSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+void PacSumFinalizeUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+void PacSumFinalizeDoubleWrapper(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+
+// Generic finalize template (used by pac_avg)
+template <class State, class ACC_TYPE, bool SIGNED, bool DIVIDE_BY_COUNT = false>
+void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+
+// Bind function
+unique_ptr<FunctionData> PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args);
 
 } // namespace duckdb
 #endif // PAC_GODBOLT
