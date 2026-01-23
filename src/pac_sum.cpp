@@ -1,4 +1,4 @@
-#include "include/pac_sum_avg.hpp"
+#include "include/pac_sum.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include <cmath>
 #include <limits>
@@ -389,8 +389,8 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 }
 
 // Unified Finalize for both int and double states
-template <class State, class ACC_TYPE, bool SIGNED, bool DIVIDE_BY_COUNT = false>
-static void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+template <class State, class ACC_TYPE, bool SIGNED, bool DIVIDE_BY_COUNT>
+void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<State *>(states);
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
@@ -534,19 +534,7 @@ void PacSumFinalizeDoubleToHugeint(Vector &states, AggregateInputData &input, Ve
 	PacSumFinalize<ScatterDoubleState, hugeint_t, true>(states, input, result, count, offset);
 }
 
-// instantiate Finalize methods for pac_avg (with DIVIDE_BY_COUNT=true)
-void PacAvgFinalizeDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacSumFinalize<ScatterDoubleState, double, true, true>(states, input, result, count, offset);
-}
-void PacAvgFinalizeSignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacSumFinalize<ScatterIntState<true>, double, true, true>(states, input, result, count, offset);
-}
-void PacAvgFinalizeUnsignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                  idx_t offset) {
-	PacSumFinalize<ScatterIntState<false>, double, false, true>(states, input, result, count, offset);
-}
-
-static unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
+unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
 PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args) {
 	double mi = 128.0; // default
 	if (args.size() >= 3) {
@@ -568,18 +556,18 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 	return make_uniq<PacBindData>(mi, seed);
 }
 
-static idx_t PacSumIntStateSize(const AggregateFunction &) {
+idx_t PacSumIntStateSize(const AggregateFunction &) {
 	return sizeof(ScatterIntState<true>); // signed/unsigned have same wrapper size
 }
 
-static void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
+void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(ScatterIntState<true>));
 }
 
-static idx_t PacSumDoubleStateSize(const AggregateFunction &) {
+idx_t PacSumDoubleStateSize(const AggregateFunction &) {
 	return sizeof(ScatterDoubleState);
 }
-static void PacSumDoubleInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
+void PacSumDoubleInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
 	memset(state_ptr, 0, sizeof(ScatterDoubleState));
 }
 
@@ -687,132 +675,124 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(fcn_set);
 }
 
-// Helper to get the right pac_avg AggregateFunction for a given physical type (used by BindDecimalPacAvg)
-// Note: bind is set to nullptr - the caller (BindDecimalPacAvg) handles binding
-static AggregateFunction GetPacAvgAggregate(PhysicalType type) {
-	switch (type) {
-	case PhysicalType::INT16:
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateSmallInt,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateSmallInt);
-	case PhysicalType::INT32:
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateInteger,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateInteger);
-	case PhysicalType::INT64:
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateBigInt,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateBigInt);
-	case PhysicalType::INT128:
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateHugeInt,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeInt);
-	default:
-		throw InternalException("Unsupported physical type for pac_avg decimal");
-	}
-}
+// ============================================================================
+// PAC_SUM_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
+// ============================================================================
+// This variant is used when the sum result will be used in a comparison
+// in an outer categorical query. Instead of picking one counter and adding noise,
+// it returns all 64 counters so the outer query can evaluate the comparison
+// against all subsamples and produce a mask.
 
-// Dynamic dispatch for DECIMAL: selects the right integer implementation based on decimal width
-static unique_ptr<FunctionData> BindDecimalPacAvg(ClientContext &ctx, AggregateFunction &function,
-                                                  vector<unique_ptr<Expression>> &args) {
-	auto decimal_type = args[1]->return_type; // value is arg 1 (arg 0 is hash)
-	function = GetPacAvgAggregate(decimal_type.InternalType());
-	function.name = "pac_avg";
-	function.arguments[1] = decimal_type;
-	// pac_avg always returns DOUBLE (like DuckDB's avg)
-	function.return_type = LogicalType::DOUBLE;
+template <class State, bool SIGNED>
+static void PacSumFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                   idx_t offset) {
+	auto state_ptrs = FlatVector::GetData<State *>(states);
 
-	// Compute scale_divisor = 10^scale for DECIMAL types
-	// This converts the internal integer representation back to the decimal value
-	uint8_t scale = DecimalType::GetScale(decimal_type);
-	double scale_divisor = std::pow(10.0, static_cast<double>(scale));
+	// Result is LIST<DOUBLE>
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
 
-	// Get mi and seed (same as PacSumBind)
-	double mi = 128.0;
-	if (args.size() >= 3) {
-		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_avg: mi parameter must be a constant");
-		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		mi = mi_val.GetValue<double>();
-		if (mi < 0.0) {
-			throw InvalidInputException("pac_avg: mi must be >= 0");
+	// Reserve space for all lists (64 elements each)
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<double>(child_vec);
+
+	for (idx_t i = 0; i < count; i++) {
+#ifndef PAC_NOBUFFERING
+		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
+#endif
+		auto *s = state_ptrs[i]->GetState();
+
+		// Set up the list entry
+		list_entries[offset + i].offset = i * 64;
+		list_entries[offset + i].length = 64;
+
+		double *dst = &child_data[i * 64];
+		if (s) {
+			s->Flush(input.allocator);
+			s->GetTotalsAsDouble(dst); // write directly to destination
+		} else {
+			memset(dst, 0, 64 * sizeof(double));
 		}
 	}
-	uint64_t seed = std::random_device {}();
-	Value pac_seed_val;
-	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
-	}
-	return make_uniq<PacBindData>(mi, seed, scale_divisor);
 }
 
-// Helper to register both 2-param and 3-param (with optional mi) versions for pac_avg
-static void AddAvgFcn(AggregateFunctionSet &set, const LogicalType &value_type, aggregate_size_t state_size,
-                      aggregate_initialize_t init, aggregate_update_t scatter, aggregate_combine_t combine,
-                      aggregate_finalize_t finalize, aggregate_simple_update_t update,
-                      aggregate_destructor_t destructor = nullptr) {
-	// pac_avg always returns DOUBLE (like DuckDB's avg)
-	set.AddFunction(AggregateFunction("pac_avg", {LogicalType::UBIGINT, value_type}, LogicalType::DOUBLE, state_size,
-	                                  init, scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                                  update, PacSumBind, destructor));
-	set.AddFunction(AggregateFunction("pac_avg", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
-	                                  LogicalType::DOUBLE, state_size, init, scatter, combine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind, destructor));
+// Instantiate counter finalize methods
+static void PacSumFinalizeCountersSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                         idx_t offset) {
+	PacSumFinalizeCounters<ScatterIntState<true>, true>(states, input, result, count, offset);
+}
+static void PacSumFinalizeCountersUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                           idx_t offset) {
+	PacSumFinalizeCounters<ScatterIntState<false>, false>(states, input, result, count, offset);
+}
+static void PacSumFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                         idx_t offset) {
+	PacSumFinalizeCounters<ScatterDoubleState, true>(states, input, result, count, offset);
 }
 
-void RegisterPacAvgFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_avg");
+// Helper to register both 2-param and 3-param versions for pac_sum_counters
+static void AddCountersFcn(AggregateFunctionSet &set, const LogicalType &value_type, aggregate_size_t state_size,
+                           aggregate_initialize_t init, aggregate_update_t scatter, aggregate_combine_t combine,
+                           aggregate_finalize_t finalize, aggregate_simple_update_t update) {
+	auto list_double_type = LogicalType::LIST(LogicalType::DOUBLE);
+	set.AddFunction(AggregateFunction("pac_sum_counters", {LogicalType::UBIGINT, value_type}, list_double_type,
+	                                  state_size, init, scatter, combine, finalize,
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
+	set.AddFunction(AggregateFunction("pac_sum_counters", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
+	                                  list_double_type, state_size, init, scatter, combine, finalize,
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
+}
 
-	// Signed integers (use int state, avg finalize returns DOUBLE)
-	AddAvgFcn(fcn_set, LogicalType::TINYINT, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateTinyInt,
-	          PacSumCombineSigned, PacAvgFinalizeSignedDouble, PacSumUpdateTinyInt);
-	AddAvgFcn(fcn_set, LogicalType::BOOLEAN, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateTinyInt,
-	          PacSumCombineSigned, PacAvgFinalizeSignedDouble, PacSumUpdateTinyInt);
-	AddAvgFcn(fcn_set, LogicalType::SMALLINT, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateSmallInt,
-	          PacSumCombineSigned, PacAvgFinalizeSignedDouble, PacSumUpdateSmallInt);
-	AddAvgFcn(fcn_set, LogicalType::INTEGER, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateInteger,
-	          PacSumCombineSigned, PacAvgFinalizeSignedDouble, PacSumUpdateInteger);
-	AddAvgFcn(fcn_set, LogicalType::BIGINT, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateBigInt,
-	          PacSumCombineSigned, PacAvgFinalizeSignedDouble, PacSumUpdateBigInt);
+void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
+	AggregateFunctionSet counters_set("pac_sum_counters");
+
+	// Signed integers
+	AddCountersFcn(counters_set, LogicalType::TINYINT, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateTinyInt, PacSumCombineSigned, PacSumFinalizeCountersSigned, PacSumUpdateTinyInt);
+	AddCountersFcn(counters_set, LogicalType::BOOLEAN, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateTinyInt, PacSumCombineSigned, PacSumFinalizeCountersSigned, PacSumUpdateTinyInt);
+	AddCountersFcn(counters_set, LogicalType::SMALLINT, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateSmallInt, PacSumCombineSigned, PacSumFinalizeCountersSigned,
+	               PacSumUpdateSmallInt);
+	AddCountersFcn(counters_set, LogicalType::INTEGER, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateInteger, PacSumCombineSigned, PacSumFinalizeCountersSigned, PacSumUpdateInteger);
+	AddCountersFcn(counters_set, LogicalType::BIGINT, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateBigInt, PacSumCombineSigned, PacSumFinalizeCountersSigned, PacSumUpdateBigInt);
 
 	// Unsigned integers
-	AddAvgFcn(fcn_set, LogicalType::UTINYINT, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateUTinyInt,
-	          PacSumCombineUnsigned, PacAvgFinalizeUnsignedDouble, PacSumUpdateUTinyInt);
-	AddAvgFcn(fcn_set, LogicalType::USMALLINT, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateUSmallInt,
-	          PacSumCombineUnsigned, PacAvgFinalizeUnsignedDouble, PacSumUpdateUSmallInt);
-	AddAvgFcn(fcn_set, LogicalType::UINTEGER, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateUInteger,
-	          PacSumCombineUnsigned, PacAvgFinalizeUnsignedDouble, PacSumUpdateUInteger);
-	AddAvgFcn(fcn_set, LogicalType::UBIGINT, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateUBigInt,
-	          PacSumCombineUnsigned, PacAvgFinalizeUnsignedDouble, PacSumUpdateUBigInt);
+	AddCountersFcn(counters_set, LogicalType::UTINYINT, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateUTinyInt, PacSumCombineUnsigned, PacSumFinalizeCountersUnsigned,
+	               PacSumUpdateUTinyInt);
+	AddCountersFcn(counters_set, LogicalType::USMALLINT, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateUSmallInt, PacSumCombineUnsigned, PacSumFinalizeCountersUnsigned,
+	               PacSumUpdateUSmallInt);
+	AddCountersFcn(counters_set, LogicalType::UINTEGER, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateUInteger, PacSumCombineUnsigned, PacSumFinalizeCountersUnsigned,
+	               PacSumUpdateUInteger);
+	AddCountersFcn(counters_set, LogicalType::UBIGINT, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeCountersUnsigned,
+	               PacSumUpdateUBigInt);
 
 	// HUGEINT
-	AddAvgFcn(fcn_set, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateHugeInt,
-	          PacSumCombineSigned, PacAvgFinalizeSignedDouble, PacSumUpdateHugeInt);
+	AddCountersFcn(counters_set, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
+	               PacSumScatterUpdateHugeInt, PacSumCombineSigned, PacSumFinalizeCountersSigned, PacSumUpdateHugeInt);
 	// UHUGEINT (uses double state)
-	AddAvgFcn(fcn_set, LogicalType::UHUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
-	          PacSumScatterUpdateUHugeInt, PacSumCombineDoubleWrapper, PacAvgFinalizeDouble, PacSumUpdateUHugeInt);
+	AddCountersFcn(counters_set, LogicalType::UHUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
+	               PacSumScatterUpdateUHugeInt, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
+	               PacSumUpdateUHugeInt);
 
-	// Floating point (uses double state)
-	AddAvgFcn(fcn_set, LogicalType::FLOAT, PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateFloat,
-	          PacSumCombineDoubleWrapper, PacAvgFinalizeDouble, PacSumUpdateFloat);
-	AddAvgFcn(fcn_set, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateDouble,
-	          PacSumCombineDoubleWrapper, PacAvgFinalizeDouble, PacSumUpdateDouble);
+	// Floating point
+	AddCountersFcn(counters_set, LogicalType::FLOAT, PacSumDoubleStateSize, PacSumDoubleInitialize,
+	               PacSumScatterUpdateFloat, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
+	               PacSumUpdateFloat);
+	AddCountersFcn(counters_set, LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
+	               PacSumScatterUpdateDouble, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
+	               PacSumUpdateDouble);
 
-	// DECIMAL: dynamic dispatch based on decimal width (like DuckDB's avg)
-	// Uses BindDecimalPacAvg to select INT16/INT32/INT64/INT128 implementation at bind time
-	fcn_set.AddFunction(AggregateFunction({LogicalType::UBIGINT, LogicalTypeId::DECIMAL}, LogicalType::DOUBLE, nullptr,
-	                                      nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacAvg));
-	fcn_set.AddFunction(AggregateFunction({LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE},
-	                                      LogicalType::DOUBLE, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacAvg));
-
-	loader.RegisterFunction(fcn_set);
+	loader.RegisterFunction(counters_set);
 }
 
 // ============================================================================
@@ -830,65 +810,39 @@ using ApproxScatterState = PacSumApproxIntStateWrapper<SIGNED>;
 
 // Batch update function: add multiple values to the approximate state
 // First accumulates shifted values per level, then checks cascades, then does SWAR
-inline template <bool SIGNED>
-static void PacSumApproxUpdateBatchInternal(PacSumApproxIntState<SIGNED> &state,
-                                            const uint64_t *key_hashes,
-                                            const int64_t *values,
-                                            idx_t count) {
-	state.exact_count += count;
-
-	// Temporary storage for level assignments and shifted values
-	int8_t levels[count];
-	int64_t shifted_vals[count];
-	int64_t level_sums[PAC_APPROX_NUM_LEVELS] = {};
-	int8_t max_level = state.max_level_used;
-
+template <bool SIGNED>
+static inline
+void PacSumApproxUpdateInternal(PacSumApproxIntState<SIGNED> &state, const uint64_t key_hash, const int64_t value) {
 #ifdef PAC_APPROX_PROFILE
-	g_approx_update_count.fetch_add(count, std::memory_order_relaxed);
+	g_approx_update_count.fetch_add(1, std::memory_order_relaxed);
 #endif
-
-	// First pass: compute levels, shifted values, and accumulate sums per level
-	for (idx_t i = 0; i < count; i++) {
-		int64_t value = values[i];
-		int level = PacSumApproxIntState<SIGNED>::GetLevel(value);
-		levels[i] = static_cast<int8_t>(level);
-		if (level > max_level) {
-			max_level = static_cast<int8_t>(level);
-		}
-		int64_t shifted_val = value >> (level << 3);
-		shifted_vals[i] = shifted_val;
-		level_sums[level] += shifted_val;
+	state.key_hash |= key_hash;
+	int level = PacSumApproxIntState<SIGNED>::GetLevel(value);
+	uint64_t shift = level << 3;
+	int64_t shifted_val = value >> shift ;
+	shifted_val += (1 & state.exact_count & (value >> (shift-1))); // correct loss of carry bit in 50% of a major 1
+	state.exact_count++;
 #ifdef PAC_APPROX_PROFILE
 		g_approx_level_update_count[level].fetch_add(1, std::memory_order_relaxed);
 #endif
+	if (level > state.max_level_used) {
+		state.max_level_used = level;
 	}
-	state.max_level_used = max_level;
-
 	// Check cascades and update exact_totals for each level
 	constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 4095 : 8191;
 	constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -4096 : 0;
 
-	for (int level = 0; level <= max_level; level++) {
-		if (level_sums[level] == 0) {
-			continue;
-		}
-		int32_t new_total = state.exact_total[level] + static_cast<int32_t>(level_sums[level]);
-		if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
+	int32_t new_total = state.exact_total[level] + static_cast<int32_t>(shifted_val);
+	if (new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD) {
 #ifdef PAC_APPROX_PROFILE
 			g_approx_cascade_count[level].fetch_add(1, std::memory_order_relaxed);
 #endif
-			state.Cascade(level);
-			state.exact_total[level] = static_cast<int32_t>(level_sums[level]);
-		} else {
-			state.exact_total[level] = new_total;
-		}
+		state.Cascade(level);
+		state.exact_total[level] = shifted_val;
+	} else {
+		state.exact_total[level] = new_total;
 	}
-
-	// Second pass: do SWAR updates with key_hash
-	for (idx_t i = 0; i < count; i++) {
-		state.key_hash |= key_hashes[i];
-		AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.levels[levels[i]], shifted_vals[i], key_hashes[i]);
-	}
+	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.levels[level], shifted_val, key_hash);
 }
 
 
@@ -904,7 +858,9 @@ inline void PacSumApproxFlushBuffer(ApproxScatterState<SIGNED> &src, ApproxScatt
 	idx_t cnt = src.n_buffered & ApproxScatterState<SIGNED>::BUF_MASK;
 	if (cnt > 0) {
 		auto &dst_inner = *dst.EnsureState(a);
-		PacSumApproxUpdateBatchInternal<SIGNED>(dst_inner, src.hash_buf, src.val_buf, cnt);
+		for(idx_t i=0; i< cnt; i++) {
+			PacSumApproxUpdateInternal<SIGNED>(dst_inner, src.hash_buf[i], src.val_buf[i]);
+		}
 		src.n_buffered &= ~ApproxScatterState<SIGNED>::BUF_MASK;
 	}
 }
@@ -918,9 +874,10 @@ AUTOVECTORIZE inline void PacSumApproxUpdateOne(ApproxScatterState<SIGNED> &agg,
 	if (DUCKDB_UNLIKELY(cnt == ApproxScatterState<SIGNED>::BUF_SIZE)) {
 		// Buffer full - flush all buffered values plus the new one
 		auto &dst = *agg.EnsureState(a);
-		uint64_t all_hashes[3] = {agg.hash_buf[0], agg.hash_buf[1], key_hash};
-		int64_t all_values[3] = {agg.val_buf[0], agg.val_buf[1], value};
-		PacSumApproxUpdateBatchInternal<SIGNED>(dst, all_hashes, all_values, 3);
+		for(idx_t i=0; i< ApproxScatterState<SIGNED>::BUF_SIZE; i++) {
+			PacSumApproxUpdateInternal<SIGNED>(dst, agg.hash_buf[i], agg.val_buf[i]);
+		}
+		PacSumApproxUpdateInternal<SIGNED>(dst, key_hash, value);
 		agg.n_buffered &= ~ApproxScatterState<SIGNED>::BUF_MASK;
 	} else {
 		// Buffer not full - just add to buffer
@@ -1252,6 +1209,9 @@ static void AddAvgApproxFcn(AggregateFunctionSet &set, const LogicalType &value_
 	                                  PacSumBind));
 }
 
+void PacAvgFinalizeSignedDouble(Vector &, AggregateInputData &, Vector &, idx_t, idx_t);
+void PacAvgFinalizeUnsignedDouble(Vector &, AggregateInputData &, Vector &r, idx_t, idx_t);
+
 // Helper to get the right pac_avg_approx AggregateFunction for a given physical type
 static AggregateFunction GetPacAvgApproxAggregate(PhysicalType type) {
 	switch (type) {
@@ -1273,7 +1233,7 @@ static AggregateFunction GetPacAvgApproxAggregate(PhysicalType type) {
 	case PhysicalType::INT128:
 		return AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::DOUBLE,
 		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
-		                         PacSumCombineDoubleWrapper, PacAvgFinalizeDouble,
+		                         PacSumCombineDoubleWrapper, PacAvgFinalizeSignedDouble,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeIntDouble);
 	default:
 		throw InternalException("Unsupported physical type for pac_avg_approx decimal");
@@ -1342,12 +1302,12 @@ void RegisterPacAvgApproxFunctions(ExtensionLoader &loader) {
 	fcn_set.AddFunction(AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT},
 	                                      LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	                                      PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper,
-	                                      PacAvgFinalizeDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                      PacAvgFinalizeSignedDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	                                      PacSumUpdateHugeIntDouble, PacSumBind));
 	fcn_set.AddFunction(AggregateFunction("pac_avg_approx", {LogicalType::UBIGINT, LogicalType::HUGEINT, LogicalType::DOUBLE},
 	                                      LogicalType::DOUBLE, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	                                      PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper,
-	                                      PacAvgFinalizeDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                      PacAvgFinalizeUnsignedDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	                                      PacSumUpdateHugeIntDouble, PacSumBind));
 
 	// DECIMAL: dynamic dispatch based on decimal width
@@ -1360,5 +1320,24 @@ void RegisterPacAvgApproxFunctions(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(fcn_set);
 }
+// Explicit template instantiations for pac_avg (with DIVIDE_BY_COUNT=true)
+// These use the full wrapper type names to match what pac_avg.cpp calls
+template void PacSumFinalize<PacSumDoubleStateWrapper, double, true, true>(Vector &states, AggregateInputData &input,
+                                                                           Vector &result, idx_t count, idx_t offset);
+template void PacSumFinalize<PacSumIntStateWrapper<true>, double, true, true>(Vector &states, AggregateInputData &input,
+                                                                              Vector &result, idx_t count,
+                                                                              idx_t offset);
+template void PacSumFinalize<PacSumIntStateWrapper<false>, double, false, true>(Vector &states,
+                                                                                AggregateInputData &input,
+                                                                                Vector &result, idx_t count,
+                                                                                idx_t offset);
+
+// Explicit template instantiations for PacSumFlushBuffer (used by pac_avg_counters)
+template void PacSumFlushBuffer<true, PacSumIntStateWrapper<true>>(PacSumIntStateWrapper<true> &,
+                                                                   PacSumIntStateWrapper<true> &, ArenaAllocator &);
+template void PacSumFlushBuffer<false, PacSumIntStateWrapper<false>>(PacSumIntStateWrapper<false> &,
+                                                                     PacSumIntStateWrapper<false> &, ArenaAllocator &);
+template void PacSumFlushBuffer<true, PacSumDoubleStateWrapper>(PacSumDoubleStateWrapper &, PacSumDoubleStateWrapper &,
+                                                                ArenaAllocator &);
 
 } // namespace duckdb

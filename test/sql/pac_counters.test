@@ -1,0 +1,222 @@
+# name: test/sql/pac_counters.test
+# description: Test pac_*_counters aggregate functions that return LIST<DOUBLE> for categorical queries
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA enable_verification
+
+# Set deterministic seed for reproducibility
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+# Create simple test data - 10 rows for easy verification
+statement ok
+CREATE TABLE test_data AS
+SELECT i AS rowid, i % 3 AS group_id, i * 10 AS value
+FROM range(10) t(i)
+
+# ============================================================================
+# PAC_COUNT_COUNTERS tests
+# ============================================================================
+
+# Basic test - returns LIST<DOUBLE>
+query I
+SELECT typeof(pac_count_counters(hash(rowid)::UBIGINT)) FROM test_data
+----
+DOUBLE[]
+
+# Returns exactly 64 elements
+query I
+SELECT length(pac_count_counters(hash(rowid)::UBIGINT)) FROM test_data
+----
+64
+
+# Show first 5 counter values
+query IIIII
+SELECT
+    pac_count_counters(hash(rowid)::UBIGINT)[1]::INTEGER,
+    pac_count_counters(hash(rowid)::UBIGINT)[2]::INTEGER,
+    pac_count_counters(hash(rowid)::UBIGINT)[3]::INTEGER,
+    pac_count_counters(hash(rowid)::UBIGINT)[4]::INTEGER,
+    pac_count_counters(hash(rowid)::UBIGINT)[5]::INTEGER
+FROM test_data
+----
+7	9	7	5	5
+
+# Grouped pac_count_counters - show first counter per group
+query II
+SELECT group_id, pac_count_counters(hash(rowid)::UBIGINT)[1]::INTEGER AS counter1
+FROM test_data
+GROUP BY group_id
+ORDER BY group_id
+----
+0	2
+1	3
+2	2
+
+# With column parameter
+query I
+SELECT pac_count_counters(hash(rowid)::UBIGINT, value)[1]::INTEGER FROM test_data
+----
+7
+
+# ============================================================================
+# PAC_SUM_COUNTERS tests
+# ============================================================================
+
+# Basic test - returns LIST<DOUBLE>
+query I
+SELECT typeof(pac_sum_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+DOUBLE[]
+
+# Returns exactly 64 elements
+query I
+SELECT length(pac_sum_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+64
+
+# Show first 5 sum counter values (sums of subsets of 0,10,20,...,90)
+query IIIII
+SELECT
+    pac_sum_counters(hash(rowid)::UBIGINT, value)[1]::INTEGER,
+    pac_sum_counters(hash(rowid)::UBIGINT, value)[2]::INTEGER,
+    pac_sum_counters(hash(rowid)::UBIGINT, value)[3]::INTEGER,
+    pac_sum_counters(hash(rowid)::UBIGINT, value)[4]::INTEGER,
+    pac_sum_counters(hash(rowid)::UBIGINT, value)[5]::INTEGER
+FROM test_data
+----
+220	330	120	280	260
+
+# Grouped pac_sum_counters - show first counter per group
+query II
+SELECT group_id, pac_sum_counters(hash(rowid)::UBIGINT, value)[1]::INTEGER AS sum1
+FROM test_data
+GROUP BY group_id
+ORDER BY group_id
+----
+0	30
+1	120
+2	70
+
+# ============================================================================
+# PAC_AVG_COUNTERS tests
+# ============================================================================
+
+# Basic test - returns LIST<DOUBLE>
+query I
+SELECT typeof(pac_avg_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+DOUBLE[]
+
+# Returns exactly 64 elements
+query I
+SELECT length(pac_avg_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+64
+
+# Show first 5 avg counter values (rounded)
+query IIIII
+SELECT
+    round(pac_avg_counters(hash(rowid)::UBIGINT, value)[1])::INTEGER,
+    round(pac_avg_counters(hash(rowid)::UBIGINT, value)[2])::INTEGER,
+    round(pac_avg_counters(hash(rowid)::UBIGINT, value)[3])::INTEGER,
+    round(pac_avg_counters(hash(rowid)::UBIGINT, value)[4])::INTEGER,
+    round(pac_avg_counters(hash(rowid)::UBIGINT, value)[5])::INTEGER
+FROM test_data
+----
+22	33	12	28	26
+
+# Grouped pac_avg_counters - show first counter per group (rounded)
+query II
+SELECT group_id, round(pac_avg_counters(hash(rowid)::UBIGINT, value)[1])::INTEGER AS avg1
+FROM test_data
+GROUP BY group_id
+ORDER BY group_id
+----
+0	8
+1	40
+2	23
+
+# ============================================================================
+# PAC_MIN_COUNTERS tests
+# ============================================================================
+
+# Basic test - returns LIST<DOUBLE>
+query I
+SELECT typeof(pac_min_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+DOUBLE[]
+
+# Returns exactly 64 elements
+query I
+SELECT length(pac_min_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+64
+
+# Show first 5 min counter values
+query IIIII
+SELECT
+    pac_min_counters(hash(rowid)::UBIGINT, value)[1]::INTEGER,
+    pac_min_counters(hash(rowid)::UBIGINT, value)[2]::INTEGER,
+    pac_min_counters(hash(rowid)::UBIGINT, value)[3]::INTEGER,
+    pac_min_counters(hash(rowid)::UBIGINT, value)[4]::INTEGER,
+    pac_min_counters(hash(rowid)::UBIGINT, value)[5]::INTEGER
+FROM test_data
+----
+0	0	15	0	5
+
+# Grouped pac_min_counters - show first counter per group
+query II
+SELECT group_id, pac_min_counters(hash(rowid)::UBIGINT, value)[1]::INTEGER AS min1
+FROM test_data
+GROUP BY group_id
+ORDER BY group_id
+----
+0	0
+1	5
+2	10
+
+# ============================================================================
+# PAC_MAX_COUNTERS tests
+# ============================================================================
+
+# Basic test - returns LIST<DOUBLE>
+query I
+SELECT typeof(pac_max_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+DOUBLE[]
+
+# Returns exactly 64 elements
+query I
+SELECT length(pac_max_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+64
+
+# ============================================================================
+# Test that counters can be used with pac_gt/pac_lt for categorical queries
+# ============================================================================
+
+# pac_gt with count counters vs scalar - returns a bitmask
+query I
+SELECT pac_gt(3.0, pac_count_counters(hash(rowid)::UBIGINT)) FROM test_data
+----
+292066426880
+
+# pac_lt with sum counters vs scalar
+query I
+SELECT pac_lt(200.0, pac_sum_counters(hash(rowid)::UBIGINT, value)) FROM test_data
+----
+18446744073701146427
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+statement ok
+DROP TABLE test_data

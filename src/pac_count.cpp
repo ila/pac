@@ -173,6 +173,51 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	}
 }
 
+// ============================================================================
+// PAC_COUNT_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
+// ============================================================================
+// This variant is used when the count result will be used in a comparison
+// in an outer categorical query. Instead of picking one counter and adding noise,
+// it returns all 64 counters so the outer query can evaluate the comparison
+// against all subsamples and produce a mask.
+
+void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	auto aggs = FlatVector::GetData<ScatterState *>(states);
+
+	// Result is LIST<DOUBLE>
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	// Reserve space for all lists (64 elements each)
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<double>(child_vec);
+	double buf[64];
+
+	for (idx_t i = 0; i < count; i++) {
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
+		aggs[i]->FlushBuffer(*aggs[i], input.allocator); // flush values into yourself
+#endif
+		PacCountState *s = aggs[i]->GetState();
+
+		// Set up the list entry
+		list_entries[offset + i].offset = i * 64;
+		list_entries[offset + i].length = 64;
+
+		if (s) {
+			s->FlushLevel(); // flush uint8_t level into uint64_t totals
+			s->GetTotalsAsDouble(buf);
+		} else {
+			memset(buf, 0, sizeof(buf));
+		}
+
+		// Copy the 64 counters to the list (memcpy is faster than element-by-element)
+		memcpy(&child_data[i * 64], buf, sizeof(buf));
+	}
+}
+
 void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	AggregateFunctionSet fcn_set("pac_count");
 
@@ -196,6 +241,26 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
 	loader.RegisterFunction(fcn_set);
+}
+
+// ============================================================================
+// PAC_COUNT_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
+// ============================================================================
+void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
+	auto list_double_type = LogicalType::LIST(LogicalType::DOUBLE);
+	AggregateFunctionSet counters_set("pac_count_counters");
+
+	counters_set.AddFunction(
+	    AggregateFunction("pac_count_counters", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
+	                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
+
+	counters_set.AddFunction(AggregateFunction(
+	    "pac_count_counters", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
+	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
+	    FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
+
+	loader.RegisterFunction(counters_set);
 }
 
 } // namespace duckdb
