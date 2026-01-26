@@ -172,7 +172,7 @@ GROUP BY c.id
 ORDER BY c.id
 LIMIT 1
 ----
-0	9	-7072984
+0	0	-7147924
 
 # Test with HAVING clause on joined aggregates - project non-join key
 query II

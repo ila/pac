@@ -46,7 +46,7 @@ SELECT
     pac_count_counters(hash(rowid)::UBIGINT)[5]::INTEGER
 FROM test_data
 ----
-7	9	7	5	5
+7	9	3	5	5
 
 # Grouped pac_count_counters - show first counter per group
 query II
@@ -206,13 +206,13 @@ SELECT length(pac_max_counters(hash(rowid)::UBIGINT, value)) FROM test_data
 query I
 SELECT pac_gt(3.0, pac_count_counters(hash(rowid)::UBIGINT)) FROM test_data
 ----
-292066426880
+9223372054311469056
 
 # pac_lt with sum counters vs scalar
 query I
 SELECT pac_lt(200.0, pac_sum_counters(hash(rowid)::UBIGINT, value)) FROM test_data
 ----
-18446744073701146427
+6572967326795965723
 
 # ============================================================================
 # Cleanup

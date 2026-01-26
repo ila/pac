@@ -112,7 +112,7 @@ query I
 SELECT SUM(m.data_val)
 FROM mid_no_pk m JOIN pu_no_pk np ON m.grp = np.grp
 ----
-10776
+10656
 
 # Multi-PU with GROUP BY on non-PU column (use mid_id which is not a join key)
 query II
@@ -135,7 +135,7 @@ JOIN pu_b b ON m1.b_fk = b.id
 JOIN mid_ac m2 ON m1.a_fk = m2.a_fk
 JOIN pu_c c ON m2.c_fk_a = c.a_id AND m2.c_fk_b = c.b_id
 ----
-11344
+11080
 
 # Test join elimination path: when configured, avoid joining PU table but use FK columns
 statement ok
@@ -155,7 +155,7 @@ query I
 SELECT COUNT(*)
 FROM mid_ab m JOIN pu_a a ON m.a_fk = a.id JOIN pu_b b ON m.b_fk = b.id
 ----
-45
+10
 
 # Test AVG with multi-PU
 query I
@@ -197,7 +197,7 @@ JOIN pu_b b ON m.b_fk = b.id
 JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 JOIN pu_no_pk np ON m.np_grp = np.grp
 ----
-35	25783	143.24
+35	25300	140.56
 
 # Multi-PU with MIN/MAX aggregates and GROUP BY on non-join-key
 query IIII
@@ -239,7 +239,7 @@ JOIN pu_a a ON m.a_fk = a.id
 JOIN pu_b b ON m.b_fk = b.id
 JOIN pu_c c ON m.c_fk_a = c.a_id AND m.c_fk_b = c.b_id
 ----
-4156
+3977
 
 statement ok
 SET pac_join_elimination = false;

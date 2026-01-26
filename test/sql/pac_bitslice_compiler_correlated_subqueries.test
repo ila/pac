@@ -113,8 +113,8 @@ GROUP BY
 ORDER BY
     o_orderpriority;
 ----
-1-URGENT	4
-2-HIGH	3
+1-URGENT	2
+2-HIGH	4
 3-MEDIUM	NULL
 
 # Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries

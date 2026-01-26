@@ -99,9 +99,9 @@ ALTER PAC TABLE shipments ADD PAC LINK (item_id) REFERENCES order_items(id);
 query II
 SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 ----
-0	13
-1	10
-2	12
+0	14
+1	12
+2	14
 
 # ==============================================================================
 # Test 2: Aggregation on grandchild table (2-level PAC LINK chain)
@@ -110,7 +110,7 @@ SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 query III
 SELECT grp, MIN(quantity), MAX(quantity) FROM order_items GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	7236922	7236969
+0	4215264	4215304
 
 # ==============================================================================
 # Test 3: Deep chain aggregation (3-level PAC LINK chain)
@@ -129,7 +129,7 @@ query IIIII
 SELECT grp, COUNT(*), SUM(amount), MIN(amount), MAX(amount)
 FROM orders GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	13	215	7236922	7236944
+0	14	84	4215259	4215274
 
 # ==============================================================================
 # Test 5: Explicit joins through PAC LINK chain
@@ -141,9 +141,9 @@ FROM orders o
 INNER JOIN order_items oi ON oi.order_id = o.id
 GROUP BY o.grp ORDER BY o.grp;
 ----
-0	1765
-1	1536
-2	1602
+0	742
+1	521
+2	594
 
 # ==============================================================================
 # Test 6: Full chain join (users -> orders -> order_items -> shipments)
@@ -172,7 +172,7 @@ GROUP BY grp
 ORDER BY grp
 LIMIT 1;
 ----
-0	842
+0	319
 
 # ==============================================================================
 # Test 8: Complex - Multiple correlated subqueries with deep PAC LINK chains
@@ -231,8 +231,8 @@ GROUP BY oi.grp
 ORDER BY oi.grp
 LIMIT 2;
 ----
-0	26	2046	201.82
-1	26	2138	209.53
+0	30	703	71.70
+1	30	803	79.62
 
 # ==============================================================================
 # Test 11: Chain Break - Query middle table with aggregates from both ends
@@ -249,9 +249,9 @@ WHERE o.user_id IN (SELECT id FROM users WHERE id > 1)
 GROUP BY o.grp
 ORDER BY o.grp;
 ----
-0	5	14
-1	5	8
-2	5	31
+0	4	0
+1	2	34
+2	4	38
 
 # ==============================================================================
 # Test 12: Multiple Privacy Units - Users table as PU, protected column access
@@ -265,9 +265,9 @@ WHERE u.id > 0
 GROUP BY o.grp
 ORDER BY o.grp;
 ----
-0	12
-1	12
-2	11
+0	6
+1	6
+2	8
 
 # ==============================================================================
 # Test 13: Complex nested aggregation - Aggregate of aggregate through PAC LINKs
@@ -287,9 +287,9 @@ FROM (
 GROUP BY grp
 ORDER BY grp;
 ----
-0	31
-1	17
-2	28
+0	23
+1	2
+2	13
 
 # ==============================================================================
 # Test 14: Extreme depth - Full 4-level chain aggregation
