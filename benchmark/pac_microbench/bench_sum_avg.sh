@@ -62,8 +62,8 @@ done
 echo "test,aggregate,variant,rows_m,groups,dtype,wall_sec,agg_sec,wall_times,agg_times" > "$RESULTS_FILE"
 
 # Data views and their sizes
-DATA_VIEWS=(data1 data10) # data100)
-DATA_SIZES_M=(10 100) # 1000)
+DATA_VIEWS=(data1 data10 data100)
+DATA_SIZES_M=(10 100 1000)
 
 # Sequential group columns and their cardinalities
 SEQ_GROUP_COLS=(grp_10 grp_1000 grp_100000 grp_10000000)

@@ -61,8 +61,8 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 //              did not have that level yet), or by summing them. In Finalize() the noised result is computed from the
 //              sum of all allocated levels.
 // APPROX (DEFAULT): only uses 16-bits counters in 25 lazily allocated levels, staggered by 4 bits (112 bits covered)
-//              We choose the highest level, such that the highest set bit in value is 4 positions clear from its max.
-//              This means at least 16, and on average 32, such values can be summed before overflow could happen.
+//              We sum into the highest level, such that the highest set bit in value is 4 positions clear from its max.
+//              This means at least 16, and on average >32, such values can be summed before overflow could happen.
 //              On overflow, all 16 bits are filled, the major 12 are added to the next counter and we reset to 0.
 //              This ensures a max error of 1/4096 (2^12) = 0.025% in the sum totals, which is comfortable for PAC.
 //              Because 25 level pointers is a largish array (200 bytes) that is often quite empty, we to use this space
@@ -70,9 +70,11 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 //
 // 2) floating: PAC_SUM(key_hash, (FLOAT|DOUBLE)) -> DOUBLE
 //              Accumulates directly into double[64] total using AddToTotalsSimple (ARM).
+//
 // 3) hugeint:  PAC_SUM(key_hash, UHUGEINT) -> DOUBLE
 //              DuckDB produces DOUBLE outcomes for unsigned 128-bits integer sums, so we do as well.
 //              This basically uses the DOUBLE methods where the updates perform a cast from hugeint
+// APPROX (DEFAULT): now also uses the double path for unsigned 128-bits integers. It is faster and approximate.
 //
 // for DECIMAL types, we look at binding time which physical type is used and choose a relevant integer type.
 //
@@ -82,10 +84,12 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader);
 //
 // The cascading counter state could be quite large: ~2KB per aggregate result value. In aggregations with very many
 // distinct GROUP BY values (and relatively modest sums, therefore), the bigger counters are often not needed.
-// Therefore, we allocate counters lazily now: only when say 8-bits counters overflow we allocate the 16-bits counters
-// This optimization can reduce the memory footprint by 2-8x, which can help in avoiding OOM.
-//
-// In order to keep the size of the states low, it is more important to delay the state
+// Therefore, we allocate counters lazily: only when values appear that need a particular counter level or when
+// a level overflows, we allocate the space for the counters. This optimization reduces memory footprint, and
+// helps in avoiding OOM, but bu itself was not enough. Because if there are very many unique states and the
+// group-by keys appear far from each other, DuckDB starts with a new hash table, and the first phase of aggregation
+// is in fact just partitioning. The real aggregation happens when the different partitions go to a Combine.
+// In order to keep the initial size of the states low, it is therefore important to delay the state
 // allocation until multiple values have been received (buffering). Processing a buffer
 // rather than individual values reduces cache misses and increases chances for SIMD
 #endif
@@ -192,7 +196,7 @@ struct PacSumIntState {
 	uint64_t key_hash;    // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t exact_count; // total count of values added (for pac_avg)
 
-#if !defined(PAC_EXACTSUM)
+#ifndef PAC_EXACTSUM
 	// ========== APPROXIMATE STATE LAYOUT WITH INLINE STORAGE ==========
 	// Uses 25 levels of 16-bit counters with 4-bit shifts (covers 112 bits & provides >=12-bit accuracy on the totals).
 	int8_t max_level_used;   // highest level that received data (-1 if none)
@@ -204,7 +208,7 @@ struct PacSumIntState {
 	union { // inline allocation optimization uses union to ensure it also works on 32-bits platforms
 		uint64_t *levels[PAC_APPROX_NUM_LEVELS]; // motivation: this is quite an array: 25*8bytes = 200 bytes
 		struct {                                 // try to reuse the back 128 bytes for the first allocated level
-			void *_dummy[9];                     // do this only if the first allocated level < 9
+			void *_dummy[9];                     // do this only if allocated levels < 9
 			uint64_t inline_level[PAC_APPROX_SWAR_ELEMENTS]; // 128 bytes + 9*8 = 200
 		};
 	};
@@ -212,7 +216,7 @@ struct PacSumIntState {
 	// Get the level index for a value based on its highest set bit
 	// For 16-bit counters with 4-bit shift: shifted_val = value >> (level * 4) should fit in ~12 bits
 	static inline int GetLevel(int64_t abs_val) {
-		int level = ((63 - __builtin_clzll(abs_val)) - 8) >> 2;
+		int level = ((63 - (1|__builtin_clzll(abs_val))) - 8) >> 2;
 		return (abs_val < 4096) ? 0 : level;
 	}
 
@@ -271,7 +275,7 @@ struct PacSumIntState {
 		if (k >= PAC_APPROX_NUM_LEVELS - 1 || !levels[k]) {
 			return;
 		}
-		// Level k+1 already allocated by AddToExactTotal
+		// Level k+1 gets allocated by AddToExactTotal
 		int32_t cascade_amount = exact_total[k] >> PAC_APPROX_LEVEL_SHIFT;
 		AddToExactTotal(k + 1, cascade_amount, allocator);
 
@@ -322,6 +326,11 @@ struct PacSumIntState {
 	}
 
 #else
+// SIGNED is compile-time known, so for unsigned the negative cases (value < 0) will be compiled away
+#define ACCUMULATE_BITMARGIN      2 // val must be 2 bits shorter than the accumulator to allow >=4 updates without overflow
+#define UPPERBOUND_BITWIDTH(bits) (1LL << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
+#define LOWERBOUND_BITWIDTH(bits) -(static_cast<int64_t>(SIGNED) << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
+
 	// ========== EXACT STATE LAYOUT (default) ==========
 	// Field ordering optimized for memory layout:
 	// 1. exact_totals (sized to fit level's range - value is always valid after flush)
@@ -502,7 +511,7 @@ struct PacSumIntState {
 			memset(dst, 0, 64 * sizeof(double));
 		}
 	}
-#endif // PAC_EXACTSUM (approx) / PAC_NOCASCADING / default (exact)
+#endif // (if default-approx else exactsum)
 
 	// Interface methods for wrapper compatibility
 	PacSumIntState *GetState() {
@@ -579,7 +588,6 @@ private:
 #ifndef PAC_EXACTSUM
 		s->max_level_used = -1;   // no levels have received data yet
 		s->inline_level_idx = -1; // no inline level yet
-		                          // levels[] pointers are already zeroed by memset
 #else
 		(void)s;
 #endif

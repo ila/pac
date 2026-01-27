@@ -8,39 +8,6 @@
 namespace duckdb {
 
 // ============================================================================
-// Profiling counters for pac_sum_approx (define PAC_APPROX_PROFILE to enable)
-// ============================================================================
-//#define PAC_APPROX_PROFILE 1
-#ifdef PAC_APPROX_PROFILE
-static std::atomic<uint64_t> g_approx_update_count {0};
-static std::atomic<uint64_t> g_approx_cascade_count[PAC_APPROX_NUM_LEVELS] = {};
-static std::atomic<uint64_t> g_approx_level_update_count[PAC_APPROX_NUM_LEVELS] = {};
-
-struct ApproxProfilePrinter {
-	~ApproxProfilePrinter() {
-		uint64_t total_updates = g_approx_update_count.load();
-		if (total_updates == 0)
-			return;
-		fprintf(stderr, "\n=== pac_sum_approx profiling ===\n");
-		fprintf(stderr, "Total updates: %llu\n", total_updates);
-		uint64_t total_cascades = 0;
-		for (int k = 0; k < PAC_APPROX_NUM_LEVELS; k++) {
-			uint64_t level_updates = g_approx_level_update_count[k].load();
-			uint64_t level_cascades = g_approx_cascade_count[k].load();
-			total_cascades += level_cascades;
-			if (level_updates > 0 || level_cascades > 0) {
-				fprintf(stderr, "  Level %2d: %10llu updates, %10llu cascades (%.4f%%)\n", k, level_updates,
-				        level_cascades, level_updates > 0 ? 100.0 * level_cascades / level_updates : 0.0);
-			}
-		}
-		fprintf(stderr, "Total cascades: %llu (%.4f%% of updates)\n", total_cascades,
-		        100.0 * total_cascades / total_updates);
-	}
-};
-static ApproxProfilePrinter g_approx_profile_printer;
-#endif
-
-// ============================================================================
 // State type selection for scatter updates
 // ============================================================================
 #ifdef PAC_NOBUFFERING
@@ -53,10 +20,6 @@ using ScatterIntState = PacSumIntStateWrapper<SIGNED>;
 using ScatterDoubleState = PacSumDoubleStateWrapper;
 #endif
 
-// SIGNED is compile-time known, so for unsigned the negative cases (value < 0) will be compiled away
-#define ACCUMULATE_BITMARGIN      2 // val must be 2 bits shorter than the accumulator to allow >=4 updates without overflow
-#define UPPERBOUND_BITWIDTH(bits) (1LL << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
-#define LOWERBOUND_BITWIDTH(bits) -(static_cast<int64_t>(SIGNED) << ((bits - SIGNED) - ACCUMULATE_BITMARGIN))
 
 // ============================================================================
 // Inner state update functions (work directly on PacSumIntState/PacSumDoubleState)
