@@ -91,7 +91,7 @@ build_variant() {
 
     # Clean and build
     rm -rf build/release
-    CXXFLAGS="$flags" GEN=ninja make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
+    CXX=../llvm-project/build/bin/clang++ CXXFLAGS="$flags" GEN=ninja make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
     # Copy binary
     cp build/release/duckdb "$binary"
