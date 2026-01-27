@@ -216,7 +216,7 @@ struct PacSumIntState {
 	// Get the level index for a value based on its highest set bit
 	// For 16-bit counters with 4-bit shift: shifted_val = value >> (level * 4) should fit in ~12 bits
 	static inline int GetLevel(int64_t abs_val) {
-		int level = ((63 - (1|__builtin_clzll(abs_val))) - 8) >> 2;
+		int level = ((63 - (__builtin_clzll(1 | abs_val))) - 8) >> 2;
 		return (abs_val < 4096) ? 0 : level;
 	}
 
