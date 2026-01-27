@@ -237,6 +237,26 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 			               ", child_idx=" + std::to_string(child_idx) + ")");
 #endif
 
+			// Check for incompatible join types:
+			// - RIGHT_SEMI and RIGHT_ANTI joins only output columns from the RIGHT child
+			// - If our column is on the LEFT side (child_idx=0), we cannot propagate through
+			if ((join.join_type == JoinType::RIGHT_SEMI || join.join_type == JoinType::RIGHT_ANTI) && child_idx == 0) {
+#ifdef DEBUG
+				Printer::Print("PropagatePKThroughProjections: Cannot propagate through RIGHT_SEMI/RIGHT_ANTI join "
+				               "from left child - returning nullptr");
+#endif
+				return nullptr;
+			}
+			// Similarly, SEMI and ANTI joins only output columns from the LEFT child
+			// If our column is on the RIGHT side (child_idx=1), we cannot propagate through
+			if ((join.join_type == JoinType::SEMI || join.join_type == JoinType::ANTI) && child_idx == 1) {
+#ifdef DEBUG
+				Printer::Print("PropagatePKThroughProjections: Cannot propagate through SEMI/ANTI join "
+				               "from right child - returning nullptr");
+#endif
+				return nullptr;
+			}
+
 			// Determine which projection map applies based on which child the table is in
 			vector<idx_t> *proj_map = nullptr;
 			if (child_idx == 0) {

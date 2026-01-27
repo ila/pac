@@ -1417,6 +1417,15 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				// Propagate the hash expression through all projections between table scan and this aggregate
 				hash_input_expr = PropagatePKThroughProjections(*plan, get, std::move(hash_input_expr), target_agg);
 
+				// Skip if propagation failed (e.g., blocked by RIGHT_SEMI/RIGHT_ANTI join)
+				if (!hash_input_expr) {
+#ifdef DEBUG
+					Printer::Print("ModifyPlanWithPU: Skipping PU table " + pu_table_name +
+					               " - propagation failed (likely blocked by semi/anti join)");
+#endif
+					continue;
+				}
+
 				hash_exprs.push_back(std::move(hash_input_expr));
 			} else {
 				// FK-linked table case: find FK columns that reference the PU
@@ -1493,6 +1502,15 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 					// Propagate through projections
 					fk_hash_expr = PropagatePKThroughProjections(*plan, fk_get, std::move(fk_hash_expr), target_agg);
+
+					// Skip if propagation failed (e.g., blocked by RIGHT_SEMI/RIGHT_ANTI join)
+					if (!fk_hash_expr) {
+#ifdef DEBUG
+						Printer::Print("ModifyPlanWithPU: Skipping FK table " + fk_table +
+						               " - propagation failed (likely blocked by semi/anti join)");
+#endif
+						continue;
+					}
 
 					hash_exprs.push_back(std::move(fk_hash_expr));
 					break; // Only process one FK path per PU per aggregate
