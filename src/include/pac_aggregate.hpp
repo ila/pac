@@ -58,8 +58,8 @@ struct PacBindData : public FunctionData {
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
 	explicit PacBindData(double mi_val, uint64_t seed_val = std::random_device {}(), double scale_div = 1.0,
 	                     bool use_det_noise = false)
-	    : mi(mi_val), seed(seed_val), query_hash((seed_val ^ PAC_MAGIC_HASH) + seed_val), scale_divisor(scale_div),
-	      use_deterministic_noise(use_det_noise) {
+	    : mi(mi_val), seed(seed_val), query_hash(mi_val ? (seed_val ^ PAC_MAGIC_HASH) + seed_val : 0),
+	      scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		auto copy = make_uniq<PacBindData>(mi, seed, scale_divisor, use_deterministic_noise);

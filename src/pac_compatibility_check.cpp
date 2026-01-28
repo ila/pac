@@ -1109,6 +1109,9 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		if (has_pac_aggregates) {
 #ifdef DEBUG
 			Printer::Print("PAC compatibility check: Query has PAC aggregates with proper joins - allowing as-is");
+			Printer::Print("=== QUERY PLAN (PAC aggregates with joins) ===");
+			plan->Print();
+			Printer::Print("=== END QUERY PLAN ===");
 #endif
 			// Return empty result to skip PAC compilation
 			result.eligible_for_rewrite = false;

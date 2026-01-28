@@ -161,7 +161,6 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	auto data = FlatVector::GetData<int64_t>(result);
 	auto &result_mask = FlatVector::Validity(result);
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
-	std::mt19937_64 gen(seed);
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 	double buf[64];
 	for (idx_t i = 0; i < count; i++) {
@@ -170,6 +169,9 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 #endif
 		PacCountState *s = aggs[i]->GetState();
 		uint64_t key_hash = s ? s->key_hash : 0;
+		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
+		// This ensures each group gets the same noise regardless of processing order
+		std::mt19937_64 gen(seed ^ key_hash);
 		// Check if we should return NULL based on key_hash
 		if (PacNoiseInNull(key_hash, mi, gen)) {
 			result_mask.SetInvalid(offset + i);

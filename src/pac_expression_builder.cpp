@@ -16,6 +16,43 @@
 
 namespace duckdb {
 
+// Helper function to find a LogicalGet by table_index in the operator tree
+static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator &op, idx_t table_index) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return &get;
+		}
+	}
+	for (auto &child : op.children) {
+		auto result = FindLogicalGetByTableIndex(*child, table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
+// Helper function to resolve a column name from a binding by finding the corresponding LogicalGet
+static string ResolveColumnNameFromBinding(LogicalOperator &root, const ColumnBinding &binding) {
+	auto get = FindLogicalGetByTableIndex(root, binding.table_index);
+	if (!get) {
+		return "[" + std::to_string(binding.table_index) + "." + std::to_string(binding.column_index) + "]";
+	}
+
+	const auto &column_ids = get->GetColumnIds();
+	if (binding.column_index >= column_ids.size()) {
+		return "[" + std::to_string(binding.table_index) + "." + std::to_string(binding.column_index) + "]";
+	}
+
+	auto col_name = get->GetColumnName(column_ids[binding.column_index]);
+	if (col_name.empty()) {
+		return "[" + std::to_string(binding.table_index) + "." + std::to_string(binding.column_index) + "]";
+	}
+
+	return col_name;
+}
+
 // Ensure a column is projected in a LogicalGet and return its projection index
 idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	// try existing projected columns by matching returned names via ColumnIndex primary
@@ -345,6 +382,47 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 
 #ifdef DEBUG
 		Printer::Print("ModifyAggregatesWithPacFunctions: New PAC aggregate expression: " + new_aggr->ToString());
+
+		// Print column names for the PAC aggregate arguments
+		string hash_col_name = "unknown";
+		string value_col_name = "unknown";
+
+		// Extract hash column name from hash_input_expr by resolving bindings
+		ExpressionIterator::EnumerateExpression(hash_input_expr, [&](Expression &expr) {
+			if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+				hash_col_name = ResolveColumnNameFromBinding(*agg, col_ref.binding);
+			}
+		});
+
+		// Extract value column name from the new aggregate's children
+		if (!new_aggr->Cast<BoundAggregateExpression>().children.empty() &&
+		    new_aggr->Cast<BoundAggregateExpression>().children.size() > 1) {
+			auto &value_expr = new_aggr->Cast<BoundAggregateExpression>().children[1];
+			if (value_expr->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto &val_ref = value_expr->Cast<BoundColumnRefExpression>();
+				value_col_name = ResolveColumnNameFromBinding(*agg, val_ref.binding);
+			} else if (value_expr->type == ExpressionType::VALUE_CONSTANT) {
+				value_col_name = "1"; // COUNT(*) case
+			} else {
+				// For complex expressions, try to extract column names from any column refs
+				vector<string> col_names;
+				ExpressionIterator::EnumerateExpression(value_expr, [&](Expression &e) {
+					if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+						auto &cr = e.Cast<BoundColumnRefExpression>();
+						col_names.push_back(ResolveColumnNameFromBinding(*agg, cr.binding));
+					}
+				});
+				if (!col_names.empty()) {
+					value_col_name = "expression(" + StringUtil::Join(col_names, ", ") + ")";
+				} else {
+					value_col_name = value_expr->ToString();
+				}
+			}
+		}
+
+		Printer::Print("ModifyAggregatesWithPacFunctions: Constructing " + pac_function_name + " with hash of " +
+		               hash_col_name + ", value of " + value_col_name);
 #endif
 
 		agg->expressions[i] = std::move(new_aggr);

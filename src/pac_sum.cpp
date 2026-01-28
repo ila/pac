@@ -358,7 +358,6 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
-	std::mt19937_64 gen(seed);
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
 	// scale_divisor is used by pac_avg on DECIMAL to convert internal integer representation back to decimal
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
@@ -370,6 +369,9 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		auto *s = state_ptrs[i]->GetState();
 		// Check if we should return NULL based on key_hash
 		uint64_t key_hash = s ? s->key_hash : 0;
+		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
+		// This ensures each group gets the same noise regardless of processing order
+		std::mt19937_64 gen(seed ^ key_hash);
 		if (PacNoiseInNull(key_hash, mi, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;

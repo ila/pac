@@ -100,6 +100,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 	// Note: pac_sum_approx/pac_avg_approx override this with mean-based logic
 	if (mi == 0.0) {
 		D_ASSERT(!(is_null & 1)); // bit 0 must be valid for mi=0
+		Printer::Print("Counter value (no noise): " + to_string(counters[0]));
 		return 2.0 * counters[0];
 	}
 
