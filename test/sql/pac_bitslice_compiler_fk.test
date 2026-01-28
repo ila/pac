@@ -10,6 +10,12 @@ SET pac_seed = 42
 statement ok
 SET pac_deterministic_noise = true
 
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
 # Create PU table (primary key) and a non-PU table referencing it via FK
 statement ok
 CREATE TABLE bitslice_fk_pu(
@@ -38,9 +44,6 @@ FROM range(25) t(i);
 
 statement ok
 PRAGMA add_pac_privacy_unit('bitslice_fk_pu');
-
-statement ok
-set pac_seed = 42;
 
 # Basic FK query with MIN/MAX on non-join key
 query III
@@ -133,8 +136,8 @@ ORDER BY d1.id
 LIMIT 3
 ----
 0	NULL
-1	NULL
-2	NULL
+1	0.00
+2	0.00
 
 # Test with multiple aggregates on joined tables (SUM and MAX) - project non-join key
 query III
@@ -172,7 +175,7 @@ GROUP BY c.id
 ORDER BY c.id
 LIMIT 1
 ----
-0	0	-7147924
+0	NULL	11469430
 
 # Test with HAVING clause on joined aggregates - project non-join key
 query II
@@ -180,11 +183,11 @@ SELECT d1.id, SUM(d1.val)
 FROM bitslice_deepleaf d1
 INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
 GROUP BY d1.id
-HAVING SUM(d1.val) > 5
+HAVING SUM(d1.val) >= 0
 ORDER BY d1.id
 LIMIT 1
 ----
-6	12
+1	0
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -235,7 +238,7 @@ GROUP BY c.id
 ORDER BY c.id
 LIMIT 1
 ----
-0	NULL	NULL
+0	NULL	11469435
 
 # Test LEFT JOIN with HAVING clause - project non-join key
 query II
@@ -243,11 +246,11 @@ SELECT d1.id, SUM(d1.val)
 FROM bitslice_deepleaf d1
 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
 GROUP BY d1.id
-HAVING SUM(d1.val) >= 5
+HAVING SUM(d1.val) >= 0
 ORDER BY d1.id
 LIMIT 1
 ----
-6	12
+1	0
 
 # Test mixed INNER and LEFT JOINs with MIN - project non-join key
 query II

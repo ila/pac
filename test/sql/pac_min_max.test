@@ -12,10 +12,10 @@ statement ok
 SET pac_deterministic_noise = true
 
 statement ok
-SET threads = 1;
+SET threads = 1
 
 statement ok
-SET pac_mi = 0;
+SET pac_mi = 0
 
 # =============================================================================
 # pac_max tests
