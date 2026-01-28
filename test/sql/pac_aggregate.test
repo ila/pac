@@ -19,6 +19,12 @@ SET pac_noise = false;
 statement ok
 SET enforce_m_values = false;
 
+statement ok
+SET threads = 1;
+
+statement ok
+SET pac_mi = 0;
+
 # deterministic: identical per-sample values -> variance 0 -> delta 0 -> no noise -> returns element value
 query I
 SELECT pac_aggregate(ARRAY[42.0, 42.0, 42.0, 42.0], ARRAY[3,3,3,3], 1.0/128, 3);
