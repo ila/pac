@@ -21,7 +21,7 @@ ax.plot(num_ones, expected, 'o-', color='#e74c3c', linewidth=2, markersize=5,
 
 ax.set_xlabel("Number of 1's in 64-bit hash", fontsize=12)
 ax.set_ylabel('Observed frequency', fontsize=12)
-ax.set_title('Hash Bit Distribution vs Expected Binomial', fontsize=14)
+ax.set_title('Hash Bit Distribution vs Expected Binomial (TPCH SF=30 c_custkey)', fontsize=14)
 ax.legend(loc='upper right', fontsize=10)
 ax.grid(True, alpha=0.3, axis='y')
 
