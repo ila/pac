@@ -6,6 +6,7 @@
 #define PAC_SUM_HPP
 
 // benchmarking defines that disable certain optimizations (some imply the other)
+// #define PAC_SIGNEDSUM 1 // to disable the use of an extra unsigned negative sum for negative values.
 // #define PAC_NOBUFFERING 1 // to disable the buffering optimization.
 // #define PAC_EXACTSUM 1 // to use exact cascading instead of the approximate algorithm (approximate is default)
 // #define PAC_NOCASCADING 1 // to disable multi-level cascading from small into wider types (aggregate in final type)
@@ -15,6 +16,9 @@
 #endif
 #ifdef PAC_NOCASCADING
 #define PAC_EXACTSUM 1
+#endif
+#ifdef PAC_EXACTSUM
+#define PAC_SIGNEDSUM 1
 #endif
 
 // PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w src/include/pac_sum_avg.hpp
@@ -271,20 +275,21 @@ struct PacSumIntState {
 	}
 
 	// Cascade level k to level k+1 (called when level k would overflow)
+	// Counter type: int16_t for signed, uint16_t for unsigned
+	using CounterT = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
+
 	void Cascade(int k, ArenaAllocator &allocator) {
 		if (k >= PAC_APPROX_NUM_LEVELS - 1 || !levels[k]) {
 			return;
 		}
-		// Level k+1 gets allocated by AddToExactTotal
 		int32_t cascade_amount = exact_total[k] >> PAC_APPROX_LEVEL_SHIFT;
 		AddToExactTotal(k + 1, cascade_amount, allocator);
 
-		int16_t *src_i16 = reinterpret_cast<int16_t *__restrict__>(levels[k]);
-		int16_t *dst_i16 = reinterpret_cast<int16_t *__restrict__>(levels[k + 1]);
+		CounterT *src = reinterpret_cast<CounterT *__restrict__>(levels[k]);
+		CounterT *dst = reinterpret_cast<CounterT *__restrict__>(levels[k + 1]);
+
 		for (int j = 0; j < 64; j++) {
-			int16_t val = src_i16[j];
-			int16_t shifted = static_cast<int16_t>(val >> PAC_APPROX_LEVEL_SHIFT);
-			dst_i16[j] += shifted;
+			dst[j] += static_cast<CounterT>(src[j] >> PAC_APPROX_LEVEL_SHIFT);
 		}
 		memset(levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 		exact_total[k] = 0;
@@ -307,11 +312,44 @@ struct PacSumIntState {
 			return;
 		}
 		double scale = static_cast<double>(1ULL << (PAC_APPROX_LEVEL_SHIFT * max_level_used));
-		const int16_t *counters = reinterpret_cast<const int16_t *>(levels[max_level_used]);
+		const CounterT *counters = reinterpret_cast<const CounterT *>(levels[max_level_used]);
 		for (int j = 0; j < 64; j++) {
-			// 16-bit SWAR: 4 counters per uint64_t, so swar_idx = (j % 16) * 4 + (j / 16)
 			int swar_idx = (j % 16) * 4 + (j / 16);
 			dst[j] = static_cast<double>(counters[swar_idx]) * scale;
+		}
+	}
+
+	// Combine another state into this one (used in Combine phase)
+	void CombineFrom(PacSumIntState *src, ArenaAllocator &allocator) {
+		if (!src)
+			return;
+		key_hash |= src->key_hash;
+		exact_count += src->exact_count;
+		for (int k = 0; k <= src->max_level_used; k++) {
+			if (!src->levels[k])
+				continue;
+			if (k > max_level_used) {
+				if (k < 9 || max_level_used >= 9) {
+					levels[k] = src->levels[k];
+					exact_total[k] = src->exact_total[k];
+					max_level_used = k;
+					continue;
+				}
+				EnsureLevelAllocated(allocator, k);
+			}
+			constexpr int32_t THRESHOLD = SIGNED ? 32767 : 65535;
+			int32_t new_total = exact_total[k] + src->exact_total[k];
+			if (new_total > THRESHOLD || (SIGNED && new_total < -32768)) {
+				Cascade(k, allocator);
+				exact_total[k] = src->exact_total[k];
+			} else {
+				exact_total[k] = new_total;
+			}
+			uint64_t *src_level = src->levels[k];
+			uint64_t *dst_level = levels[k];
+			for (int j = 0; j < PAC_APPROX_SWAR_ELEMENTS; j++) {
+				dst_level[j] += src_level[j];
+			}
 		}
 	}
 
@@ -565,6 +603,10 @@ struct PacSumStateWrapper {
 		uint64_t n_buffered; // lower 2 bits: count, upper bits: state pointer
 		State *state;
 	};
+#ifndef PAC_SIGNEDSUM
+	// Have two pos and neg states that store POSITIVE values with UNSIGNED arithmetic alone
+	PacSumIntState<false> *neg_state; // (this is more stable and resilient against mixed-sign value distributions)
+#endif
 
 	State *GetState() const {
 		return reinterpret_cast<State *>(reinterpret_cast<uintptr_t>(state) & ~7ULL);
@@ -579,6 +621,33 @@ struct PacSumStateWrapper {
 			state = s;
 		}
 		return s;
+	}
+
+#ifndef PAC_SIGNEDSUM
+	// neg_state uses unsigned arithmetic (stores absolute values of negatives)
+	PacSumIntState<false> *GetNegState() const {
+		return neg_state;
+	}
+	PacSumIntState<false> *EnsureNegState(ArenaAllocator &a) {
+		if (!neg_state) {
+			neg_state = reinterpret_cast<PacSumIntState<false> *>(a.Allocate(sizeof(PacSumIntState<false>)));
+			memset(neg_state, 0, sizeof(PacSumIntState<false>));
+			neg_state->max_level_used = -1;
+			neg_state->inline_level_idx = -1;
+		}
+		return neg_state;
+	}
+#endif
+
+	// StateSize: for unsigned types in double-sided mode, neg_state is never used
+	static idx_t StateSize() {
+#ifndef PAC_SIGNEDSUM
+		// Only exclude neg_state for unsigned integer types (double doesn't have neg_state issues)
+		if (!std::is_same<State, PacSumDoubleState>::value && std::is_unsigned<ValueT>::value) {
+			return sizeof(PacSumStateWrapper) - sizeof(PacSumIntState<false> *); // exclude neg_state
+		}
+#endif
+		return sizeof(PacSumStateWrapper);
 	}
 
 private:
@@ -617,8 +686,10 @@ using ScatterIntState = PacSumIntStateWrapper<SIGNED>;
 using ScatterDoubleState = PacSumDoubleStateWrapper;
 
 // FlushBuffer - flushes src's buffer into dst's inner state (declared here, defined in pac_sum.cpp)
-template <bool SIGNED, typename WrapperT>
-void PacSumFlushBuffer(WrapperT &src, WrapperT &dst, ArenaAllocator &a);
+template <bool SIGNED>
+void PacSumFlushBuffer(PacSumIntStateWrapper<SIGNED> &src, PacSumIntStateWrapper<SIGNED> &dst, ArenaAllocator &a);
+template <bool SIGNED>
+void PacSumFlushBuffer(PacSumDoubleStateWrapper &src, PacSumDoubleStateWrapper &dst, ArenaAllocator &a);
 #endif
 
 // Size and initialize functions
