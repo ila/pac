@@ -31,7 +31,7 @@ VARIANT_COLORS = {
 PLATFORM_NAMES = {
     'epyc': 'AMD (EPYC 9645)',
     'granite-rapids': 'Intel Xeon (Granite Rapids)',
-    'graviton': 'ARM (Graviton4)',
+    'graviton': 'ARM (AWS Graviton4)',
     'macbook': 'ARM (Apple M2 Pro)'
 }
 

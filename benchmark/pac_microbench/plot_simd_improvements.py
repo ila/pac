@@ -10,7 +10,7 @@ from pathlib import Path
 PLATFORM_NAMES = {
     'epyc': 'AMD (EPYC 9645)',
     'granite-rapids': 'Intel Xeon (Granite Rapids)',
-    'graviton': 'ARM (Graviton4)',
+    'graviton': 'ARM (AWS Graviton4)',
     'macbook': 'ARM (Apple M2 Pro)'
 }
 
@@ -30,62 +30,118 @@ def load_count_data(platform_dir):
     """Load count improvement factor for a platform."""
     count_files = list(platform_dir.glob('count_*.csv'))
     if not count_files:
-        return None
+        return None, 0
     df = pd.read_csv(count_files[0])
 
-    # Filter to 1000M rows, ungrouped (nocascading times out at 10M groups)
-    df = df[(df['rows_m'] == 1000) &
-            (df['test'] == 'ungrouped')]
+    # Filter to 100M rows, ungrouped (count has no dtype column)
+    df = df[(df['rows_m'] == 100) & (df['test'] == 'ungrouped')]
 
-    default_row = df[df['variant'] == 'default']
-    naive_row = df[df['variant'] == 'nocascading']
+    total_default = 0
+    total_naive = 0
+    n_experiments = 0
 
-    if default_row.empty or naive_row.empty:
-        return None
+    # Group by experiment parameters to find matching pairs
+    for test in df['test'].unique():
+        test_df = df[df['test'] == test]
 
-    default_time = default_row['wall_sec'].values[0]
-    naive_time = naive_row['wall_sec'].values[0]
+        # For grouped: compare default vs nocascading
+        naive_variant = 'nocascading'
 
-    # Handle timeouts
-    if default_time < 0 or naive_time < 0:
-        return None
+        # Get unique experiment configs (excluding variant)
+        group_cols = [c for c in ['groups', 'dtype'] if c in test_df.columns]
+        if group_cols:
+            for _, group_df in test_df.groupby(group_cols):
+                default_rows = group_df[group_df['variant'] == 'default']
+                naive_rows = group_df[group_df['variant'] == naive_variant]
 
-    return naive_time / default_time
+                if not default_rows.empty and not naive_rows.empty:
+                    default_time = default_rows['agg_sec'].values[0]
+                    naive_time = naive_rows['agg_sec'].values[0]
+
+                    if default_time > 0 and naive_time > 0:
+                        total_default += default_time
+                        total_naive += naive_time
+                        n_experiments += 1
+        else:
+            default_rows = test_df[test_df['variant'] == 'default']
+            naive_rows = test_df[test_df['variant'] == naive_variant]
+
+            if not default_rows.empty and not naive_rows.empty:
+                default_time = default_rows['agg_sec'].values[0]
+                naive_time = naive_rows['agg_sec'].values[0]
+
+                if default_time > 0 and naive_time > 0:
+                    total_default += default_time
+                    total_naive += naive_time
+                    n_experiments += 1
+
+    if total_default == 0:
+        return None, 0
+
+    return total_naive / total_default, n_experiments
 
 
 def load_max_data(platform_dir):
     """Load max improvement factor for a platform."""
     minmax_files = list(platform_dir.glob('min_max_*.csv'))
     if not minmax_files:
-        return None
+        return None, 0
     df = pd.read_csv(minmax_files[0])
 
-    # Filter to dist_test, max, 1000M rows, random distribution
-    df = df[(df['test'] == 'dist_test') &
-            (df['aggregate'] == 'max') &
-            (df['rows_m'] == 1000) &
-            (df['dtype'] == 'random')]
+    # Filter to 100M rows, max aggregate, ungrouped, int8 only
+    df = df[(df['rows_m'] == 100) & (df['aggregate'] == 'max') & (df['test'].isin(['ungrouped', 'ungrouped_type', 'dist_test']))]
+    if 'dtype' in df.columns:
+        df = df[df['dtype'] == 'int8']
 
-    default_row = df[df['variant'] == 'default']
-    naive_row = df[df['variant'] == 'noboundopt']
+    total_default = 0
+    total_naive = 0
+    n_experiments = 0
 
-    if default_row.empty or naive_row.empty:
-        return None
+    for test in df['test'].unique():
+        test_df = df[df['test'] == test]
 
-    default_time = default_row['wall_sec'].values[0]
-    naive_time = naive_row['wall_sec'].values[0]
+        # For ungrouped: compare default vs nosimd
+        naive_variant = 'nosimd'
 
-    if default_time < 0 or naive_time < 0:
-        return None
+        # Group by experiment configs
+        group_cols = [c for c in ['groups', 'dtype'] if c in test_df.columns]
+        if group_cols:
+            for _, group_df in test_df.groupby(group_cols):
+                default_rows = group_df[group_df['variant'] == 'default']
+                naive_rows = group_df[group_df['variant'] == naive_variant]
 
-    return naive_time / default_time
+                if not default_rows.empty and not naive_rows.empty:
+                    default_time = default_rows['agg_sec'].values[0]
+                    naive_time = naive_rows['agg_sec'].values[0]
+
+                    if default_time > 0 and naive_time > 0:
+                        total_default += default_time
+                        total_naive += naive_time
+                        n_experiments += 1
+        else:
+            default_rows = test_df[test_df['variant'] == 'default']
+            naive_rows = test_df[test_df['variant'] == naive_variant]
+
+            if not default_rows.empty and not naive_rows.empty:
+                default_time = default_rows['agg_sec'].values[0]
+                naive_time = naive_rows['agg_sec'].values[0]
+
+                if default_time > 0 and naive_time > 0:
+                    total_default += default_time
+                    total_naive += naive_time
+                    n_experiments += 1
+
+    if total_default == 0:
+        return None, 0
+
+    return total_naive / total_default, n_experiments
 
 
 def load_sum_data(platform_dir):
     """Load sum improvement factor for a platform."""
     sumavg_files = list(platform_dir.glob('sum_avg_*.csv'))
     if not sumavg_files:
-        return None
+        return None, 0
     df = pd.read_csv(sumavg_files[0])
 
     # Handle different column names
@@ -94,30 +150,53 @@ def load_sum_data(platform_dir):
     else:
         test_col = 'test'
 
-    # Filter to sum, 1000M rows, ungrouped (nosimd only available for ungrouped)
-    df = df[(df['aggregate'] == 'sum') &
-            (df['rows_m'] == 1000) &
-            (df[test_col] == 'ungrouped_domain')]
-
-    # Use dtype='large' if available
-    if 'large' in df['dtype'].values:
-        df = df[df['dtype'] == 'large']
-    elif 'tiny' in df['dtype'].values:
+    # Filter to sum, 100M rows, ungrouped, tiny (int8)
+    df = df[(df['aggregate'] == 'sum') & (df['rows_m'] == 100) & (df[test_col] == 'ungrouped_domain')]
+    if 'dtype' in df.columns:
         df = df[df['dtype'] == 'tiny']
 
-    default_row = df[df['variant'] == 'default']
-    naive_row = df[df['variant'] == 'nosimd']
+    total_default = 0
+    total_naive = 0
+    n_experiments = 0
 
-    if default_row.empty or naive_row.empty:
-        return None
+    for test in df[test_col].unique():
+        test_df = df[df[test_col] == test]
 
-    default_time = default_row['wall_sec'].values[0]
-    naive_time = naive_row['wall_sec'].values[0]
+        # For grouped: compare default vs nocascading
+        naive_variant = 'nocascading'
 
-    if default_time < 0 or naive_time < 0:
-        return None
+        # Group by experiment configs
+        group_cols = [c for c in ['groups', 'dtype'] if c in test_df.columns]
+        if group_cols:
+            for _, group_df in test_df.groupby(group_cols):
+                default_rows = group_df[group_df['variant'] == 'default']
+                naive_rows = group_df[group_df['variant'] == naive_variant]
 
-    return naive_time / default_time
+                if not default_rows.empty and not naive_rows.empty:
+                    default_time = default_rows['agg_sec'].values[0]
+                    naive_time = naive_rows['agg_sec'].values[0]
+
+                    if default_time > 0 and naive_time > 0:
+                        total_default += default_time
+                        total_naive += naive_time
+                        n_experiments += 1
+        else:
+            default_rows = test_df[test_df['variant'] == 'default']
+            naive_rows = test_df[test_df['variant'] == naive_variant]
+
+            if not default_rows.empty and not naive_rows.empty:
+                default_time = default_rows['agg_sec'].values[0]
+                naive_time = naive_rows['agg_sec'].values[0]
+
+                if default_time > 0 and naive_time > 0:
+                    total_default += default_time
+                    total_naive += naive_time
+                    n_experiments += 1
+
+    if total_default == 0:
+        return None, 0
+
+    return total_naive / total_default, n_experiments
 
 
 def main():
@@ -134,11 +213,11 @@ def main():
         if not platform_dir.is_dir():
             continue
 
-        count_factor = load_count_data(platform_dir)
-        max_factor = load_max_data(platform_dir)
-        sum_factor = load_sum_data(platform_dir)
+        count_factor, count_n = load_count_data(platform_dir)
+        max_factor, max_n = load_max_data(platform_dir)
+        sum_factor, sum_n = load_sum_data(platform_dir)
 
-        print(f"{platform}: count={count_factor}, max={max_factor}, sum={sum_factor}")
+        print(f"{platform}: count={count_factor:.2f}x (n={count_n}), max={max_factor:.2f}x (n={max_n}), sum={sum_factor:.2f}x (n={sum_n})" if count_factor and max_factor and sum_factor else f"{platform}: count={count_factor}, max={max_factor}, sum={sum_factor}")
 
         if count_factor is not None or max_factor is not None or sum_factor is not None:
             platforms_with_data.append(platform)
@@ -177,7 +256,7 @@ def main():
     # Labels
     ax.set_xlabel('Architecture', fontsize=12)
     ax.set_ylabel('Improvement factor', fontsize=12)
-    ax.set_title('SIMD improvements (over all experiments at 10M tuples)', fontsize=14)
+    ax.set_title('SIMD improvements (100M tuples, ungrouped, aggregate cost)', fontsize=14)
     ax.set_xticks(x)
     ax.set_xticklabels([PLATFORM_NAMES[p] for p in platforms_with_data], fontsize=11)
     ax.legend(loc='upper left', fontsize=10)
