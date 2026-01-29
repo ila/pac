@@ -135,7 +135,7 @@ dist_test,max,noboundopt,100,1,monotonic_dec,1.929,1.584,1.929 1.992 2.004,1.584
 dist_test,max,nobuffering,100,1,monotonic_dec,0.537,0.188,0.553 0.537 0.541,0.195 0.189 0.188
 dist_test,max,nosimd,100,1,monotonic_dec,0.559,0.194,0.588 0.559 0.581,0.202 0.194 0.202
 dist_test,max,standard,1000,1,random,2.106,0.338,2.112 2.106 2.197,0.338 0.338 0.352
-dist_test,max,default,1000,1,random,619.458,616.692,619.458,616.692
+dist_test,max,default,1000,1,random,5.443,2.016,5.476 5.478 5.443,2.020 2.022 2.016
 dist_test,max,noboundopt,1000,1,random,18.674,15.893,18.674 210.313,15.893 207.473
 dist_test,max,nobuffering,1000,1,random,4.553,1.815,4.860 4.580 4.553,1.961 1.822 1.815
 dist_test,max,nosimd,1000,1,random,4.998,1.935,5.259 5.217 4.998,2.030 2.027 1.935

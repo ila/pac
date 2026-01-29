@@ -261,8 +261,20 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 			if (!s->levels[k]) {
 				continue;
 			}
-			// Ensure dst level is allocated
-			d->EnsureLevelAllocated(allocator, k);
+			if (k > d->max_level_used) {
+				// dst doesn't have this level - can we just take src's pointer?
+				// Only safe if k < 9 or dst already spilled inline storage (max_level_used >= 9)
+				// because levels[9..24] overlap with inline_level in the union
+				if (k < 9 || d->max_level_used >= 9) {
+					d->levels[k] = s->levels[k];
+					d->exact_total[k] = s->exact_total[k];
+					d->max_level_used = k;
+					continue;
+				}
+				// Must allocate properly to handle inline storage spill
+				d->EnsureLevelAllocated(allocator, k);
+				// Fall through to add src's counters to the newly allocated (zeroed) level
+			}
 
 			// 16-bit counters: threshold must match counter width
 			constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 32767 : 65535;

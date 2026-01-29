@@ -1,0 +1,39 @@
+get the following instances on EC2:
+- i8gd.4xlarge 16xGraviton4 2.7GHz, 32GB RAm, 950GB SSD
+- c8i.4xlarge 16xGranite Rapids 3.9GHz,32GB RAM, EBS
+- c8a.4xlarge 16xEPYC 9R45 4.5GHz, 32GB RAM, EBS
+
+i8g has an SSD but this is not available intel and amd 
+for c8a and c8i configure an io2 diskl of 90GB  
+
+chose Ubuntu 24 as the OS (ssh ubuntu@public-ip -i yourkey.pem into it)
+
+inside the boxes:
+
+# only for graviton i8gd instance -- install a filesystem on its ssd
+sudo parted /dev/nvme0n1 -- mklabel gpt
+sudo parted /dev/nvme0n1 -- mkpart primary ext4 0% 200GB
+sudo mkfs.ext4 /dev/nvme0n1p1
+sudo mkdir -p /mnt/instance-store
+sudo mount /dev/nvme0n1p1 /mnt/instance-store
+cd /mnt/instance-store/
+chmod 777 .
+
+sudo apt update
+sudo apt install -y clang cmake ninja-build python3
+export CC=clang
+export CXX=clang++
+git clone --depth 1 https://github.com/llvm/llvm-project.git
+cd llvm-project
+cmake -S llvm -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_ENABLE_PROJECTS="clang;lld" \
+    -DLLVM_TARGETS_TO_BUILD="X86" or "AArch64"
+ninja -C build clang lld
+cd ..
+git clone --recurse-submodules https://github.com/ila/pac.git
+cd pac/benchmark/pac_microbench
+./build_variants.sh
+./create_test_db.sh 
+nohup ./run_all.sh&
+# the results will be in csv files in the results/dir

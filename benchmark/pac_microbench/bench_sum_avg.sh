@@ -151,7 +151,7 @@ for idx in "${!DATA_VIEWS[@]}"; do
             else
                 echo "    $variant: wall=${wall}s agg=${agg}s"
             fi
-            echo "grouped_seq,sum,$variant,$rows_m,$num_groups,large,$wall,$agg,$wall_times,$agg_times" >> "$RESULTS_FILE"
+            echo "grouped_seq,sum,$variant,$rows_m,$num_groups,tiny,$wall,$agg,$wall_times,$agg_times" >> "$RESULTS_FILE"
         done
     done
     echo ""
@@ -194,7 +194,7 @@ for idx in "${!DATA_VIEWS[@]}"; do
             else
                 echo "    $variant: wall=${wall}s agg=${agg}s"
             fi
-            echo "grouped_scat,sum,$variant,$rows_m,$num_groups,large,$wall,$agg,$wall_times,$agg_times" >> "$RESULTS_FILE"
+            echo "grouped_scat,sum,$variant,$rows_m,$num_groups,tiny,$wall,$agg,$wall_times,$agg_times" >> "$RESULTS_FILE"
         done
     done
     echo ""
