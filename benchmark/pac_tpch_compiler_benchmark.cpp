@@ -363,6 +363,10 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
 
     // Set seed once for deterministic noise generation
     int seed = 42;
+	// Reset seed for deterministic noise
+	con.Query("SET pac_seed = " + std::to_string(seed));
+	// Disable optimizers
+	con.Query("SET disabled_optimizers='compressed_materialization,column_lifetime'");
 
     // Statistics tracking
     int total_queries = 0;
@@ -418,9 +422,6 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
         	// ===== PHASE 2: Run automatically compiled query (timed) =====
             std::cout << "[" << Timestamp() << "] Running timed PAC automatic query..." << std::endl;
 
-            // Reset seed for deterministic noise
-            con.Query("SET pac_seed = " + std::to_string(seed));
-
             double automatic_time_ms = 0;
             unique_ptr<MaterializedQueryResult> automatic_result;
             bool automatic_success = false;
@@ -452,9 +453,6 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
             // ===== PHASE 3: Run manually compiled query (with PAC functions) =====
 
             std::cout << "[" << Timestamp() << "] Running timed PAC manual query..." << std::endl;
-
-            // Reset seed for deterministic noise
-            con.Query("SET pac_seed = " + std::to_string(seed));
 
             double manual_time_ms = 0;
             unique_ptr<MaterializedQueryResult> manual_result;

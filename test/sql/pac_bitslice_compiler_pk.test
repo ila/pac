@@ -8,6 +8,12 @@ statement ok
 SET pac_seed = 42
 
 statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+statement ok
 SET pac_deterministic_noise = true
 
 # Create two tables with 25 rows each and 5 groups (grp = i % 5)
@@ -48,14 +54,14 @@ pRAGMA add_pac_privacy_unit('bitslice_pk_single');
 query I
 SELECT SUM(val) FROM bitslice_pk_single
 ----
-102
+116
 
 # JOIN aggregation (no GROUP BY)
 query I
 SELECT SUM(a.val)
 FROM bitslice_pk_single a JOIN bitslice_pk_many b ON a.grp = b.grp
 ----
-513
+580
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -68,7 +74,7 @@ GROUP BY b.pk1
 ORDER BY b.pk1
 LIMIT 1
 ----
-0	20
+0	10
 
 # Test LEFT JOIN with aggregate on right table (composite PK)
 query III
@@ -79,9 +85,9 @@ GROUP BY b.val
 ORDER BY b.val
 LIMIT 3
 ----
-3	114	24
-4	25	24
-8	76	16
+3	114	18
+4	54	6
+8	76	12
 
 # Test RIGHT JOIN with composite PK table on right, aggregating with condition
 query III
@@ -93,7 +99,7 @@ ORDER BY b.pk1
 LIMIT 2
 ----
 0	2	10
-1	1	23
+1	4	24
 
 # Cleanup
 statement ok

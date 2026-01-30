@@ -14,6 +14,12 @@ SET pac_seed = 42
 statement ok
 SET pac_deterministic_noise = true
 
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
 # Create test data with 4000 rows
 statement ok
 CREATE TABLE test_data AS
@@ -168,7 +174,7 @@ SELECT 1 AS rowid, 42.0 AS value
 query I
 SELECT pac_avg(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_single
 ----
-false
+1
 
 statement ok
 DROP TABLE test_single
