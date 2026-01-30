@@ -17,7 +17,7 @@
 #ifdef PAC_NOCASCADING
 #define PAC_EXACTSUM 1
 #endif
-#ifdef PAC_EXACTSUM
+#if defined(PAC_EXACTSUM) || defined(PAC_NOBUFFERING)
 #define PAC_SIGNEDSUM 1
 #endif
 
@@ -329,7 +329,10 @@ struct PacSumIntState {
 			if (!src->levels[k])
 				continue;
 			if (k > max_level_used) {
-				if (k < 9 || max_level_used >= 9) {
+				// Can only steal src's pointer if it's arena-allocated (not inline storage).
+				// Inline storage is part of src's struct and becomes invalid when src is freed.
+				bool src_uses_inline = (k == src->inline_level_idx);
+				if (!src_uses_inline && (k < 9 || max_level_used >= 9)) {
 					levels[k] = src->levels[k];
 					exact_total[k] = src->exact_total[k];
 					max_level_used = k;

@@ -6,7 +6,8 @@
 #   default       - default cascading/banking/buffering (all optimizations on, approx sum)
 #   nobuffering   - disable input buffering (lazy allocation)
 #   noboundopt    - disable bound optimization (only affects min/max)
-#   exactsum      - disable approximate sum optimization, use exact cascading (only affects sum/avg)
+#   signedsum     - disable handling negative values in signed sums using separate (negated) counters
+#   exactsum      - disable approximate sum optimization, use exact cascading (implies signedsum)
 #   nocascading   - disable cascading (count, sum/avg -- implies exactsum)
 #   nosimd        - nocascading with simd-unfriendly update kernels and auto-vectorization disabled
 
@@ -28,6 +29,7 @@ CONFIGS=(
     "nobuffering:-DPAC_NOBUFFERING"
     "nocascading:-DPAC_NOCASCADING"
     "nosimd:-DPAC_NOCASCADING -DPAC_NOSIMD -fno-vectorize -fno-slp-vectorize"
+    "signedsum:-DPAC_SIGNEDSUM"
     "exactsum:-DPAC_EXACTSUM"
 )
 

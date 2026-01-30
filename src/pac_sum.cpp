@@ -222,8 +222,8 @@ inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_has
 // PacSumUpdate for integer states - supports double-sided mode
 template <bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, ArenaAllocator &allocator,
-                         uint64_t query_hash, PacSumIntStateWrapper<SIGNED> *) {
-	auto &state = *reinterpret_cast<PacSumIntStateWrapper<SIGNED> *>(state_p);
+                         uint64_t query_hash, ScatterIntState<SIGNED> *) {
+	auto &state = *reinterpret_cast<ScatterIntState<SIGNED> *>(state_p);
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -270,8 +270,8 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 // PacSumUpdate for double state - no double-sided mode
 template <bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, ArenaAllocator &allocator,
-                         uint64_t query_hash, PacSumDoubleStateWrapper *) {
-	auto &state = *reinterpret_cast<PacSumDoubleStateWrapper *>(state_p);
+                         uint64_t query_hash, ScatterDoubleState *) {
+	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
