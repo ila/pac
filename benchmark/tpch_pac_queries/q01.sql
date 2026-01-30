@@ -39,3 +39,8 @@ GROUP BY
 ORDER BY
     l_returnflag,
     l_linestatus;
+
+
+SELECT l_returnflag, l_linestatus, pac_sum(hash(orders.o_orderkey), l_quantity) AS sum_qty from lineitem
+                                                                                           join orders ON lineitem.l_orderkey = orders.o_orderkey
+                                                                                           group by all;
