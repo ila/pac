@@ -99,9 +99,9 @@ ALTER PAC TABLE shipments ADD PAC LINK (item_id) REFERENCES order_items(id);
 query II
 SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 ----
-0	14
-1	12
-2	14
+0	8
+1	9
+2	7
 
 # ==============================================================================
 # Test 2: Aggregation on grandchild table (2-level PAC LINK chain)
@@ -110,7 +110,7 @@ SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 query III
 SELECT grp, MIN(quantity), MAX(quantity) FROM order_items GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	4215264	4215304
+0	11432798	11432838
 
 # ==============================================================================
 # Test 3: Deep chain aggregation (3-level PAC LINK chain)
@@ -119,7 +119,7 @@ SELECT grp, MIN(quantity), MAX(quantity) FROM order_items GROUP BY grp ORDER BY 
 query II
 SELECT grp, SUM(weight) FROM shipments GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	NULL
+0	7800
 
 # ==============================================================================
 # Test 4: Multiple aggregates in single query
@@ -129,7 +129,7 @@ query IIIII
 SELECT grp, COUNT(*), SUM(amount), MIN(amount), MAX(amount)
 FROM orders GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	14	84	4215259	4215274
+0	8	26	11432798	11432813
 
 # ==============================================================================
 # Test 5: Explicit joins through PAC LINK chain
@@ -141,9 +141,9 @@ FROM orders o
 INNER JOIN order_items oi ON oi.order_id = o.id
 GROUP BY o.grp ORDER BY o.grp;
 ----
-0	742
-1	521
-2	594
+0	214
+1	448
+2	368
 
 # ==============================================================================
 # Test 6: Full chain join (users -> orders -> order_items -> shipments)
@@ -159,7 +159,7 @@ GROUP BY u.id
 ORDER BY u.id
 LIMIT 1;
 ----
-0	NULL	NULL
+0	84	7800
 
 # ==============================================================================
 # Test 7: Subquery with PAC LINK chain
@@ -172,7 +172,7 @@ GROUP BY grp
 ORDER BY grp
 LIMIT 1;
 ----
-0	319
+0	160
 
 # ==============================================================================
 # Test 8: Complex - Multiple correlated subqueries with deep PAC LINK chains
@@ -189,8 +189,8 @@ HAVING SUM(o.amount) > 5
 ORDER BY o.grp, o.id
 LIMIT 2;
 ----
-0	12	NULL
-0	18	NULL
+0	6	124
+0	30	220
 
 # ==============================================================================
 # Test 9: Extreme - Aggregation on deepest table in chain (shipments)
@@ -210,7 +210,7 @@ GROUP BY s.grp
 ORDER BY s.grp
 LIMIT 1;
 ----
-0	NULL
+0	84
 
 # ==============================================================================
 # Test 10: Mixed - Some tables with PAC LINK present, some missing
@@ -231,8 +231,8 @@ GROUP BY oi.grp
 ORDER BY oi.grp
 LIMIT 2;
 ----
-0	30	703	71.70
-1	30	803	79.62
+0	16	452	45.00
+1	16	453	45.06
 
 # ==============================================================================
 # Test 11: Chain Break - Query middle table with aggregates from both ends

@@ -136,8 +136,8 @@ ORDER BY d1.id
 LIMIT 3
 ----
 0	NULL
-1	0.00
-2	0.00
+1	2.00
+2	4.00
 
 # Test with multiple aggregates on joined tables (SUM and MAX) - project non-join key
 query III
@@ -187,7 +187,7 @@ HAVING SUM(d1.val) >= 0
 ORDER BY d1.id
 LIMIT 1
 ----
-1	0
+1	2
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -250,7 +250,7 @@ HAVING SUM(d1.val) >= 0
 ORDER BY d1.id
 LIMIT 1
 ----
-1	0
+1	2
 
 # Test mixed INNER and LEFT JOINs with MIN - project non-join key
 query II

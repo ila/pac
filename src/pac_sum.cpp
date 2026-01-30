@@ -28,6 +28,7 @@ template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one INTEGER to the 64 (sub)total
 PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typename PacSumIntState<SIGNED>::T64 value,
                         ArenaAllocator &allocator) {
+	state.exact_count++;
 	state.key_hash |= key_hash;
 #ifndef PAC_EXACTSUM
 	// APPROX ALGORITHM: route by bit position, shift value
@@ -70,6 +71,7 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 template <bool SIGNED>
 AUTOVECTORIZE inline void // main worker function for probabilistically adding one DOUBLE to the 64 sum total
 PacSumUpdateOneInternal(PacSumDoubleState &state, uint64_t key_hash, double value, ArenaAllocator &) {
+	state.exact_count++;
 	state.key_hash |= key_hash;
 	AddToTotalsSimple(state.probabilistic_total, value, key_hash);
 }
@@ -78,6 +80,7 @@ PacSumUpdateOneInternal(PacSumDoubleState &state, uint64_t key_hash, double valu
 template <bool SIGNED>
 AUTOVECTORIZE inline void PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, hugeint_t value,
                                                   ArenaAllocator &allocator) {
+	state.exact_count++;
 	state.key_hash |= key_hash;
 #ifndef PAC_NOCASCADING
 	PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total128, idx_t(64));
@@ -114,96 +117,57 @@ AUTOVECTORIZE inline void PacSumUpdateOne(ScatterIntState<SIGNED> &state, uint64
 }
 #else // Buffering enabled
 
+// Unified value routing: handles both double-sided (PAC_SIGNEDSUM undefined) and single-sided modes
+// In double-sided mode: routes negative values to neg_state, positive to pos_state (both unsigned)
+// In single-sided mode: just calls PacSumUpdateOneInternal directly
+template <bool SIGNED, typename WrapperT, typename ValueT>
+inline void PacSumRouteValue(WrapperT &wrapper, typename WrapperT::State *state, uint64_t hash, ValueT value,
+                             ArenaAllocator &a) {
 #ifndef PAC_SIGNEDSUM
-// Macro for double-sided routing: route value to unsigned pos or unsigned neg state based on sign
-// WRAPPER: state wrapper with EnsureNegState method
-// POS_STATE: inner state (already cast to unsigned)
-// HASH, VAL: hash and value to route
-// ALLOC: ArenaAllocator
-#define PAC_ROUTE_VALUE(WRAPPER, POS_STATE, HASH, VAL, ALLOC)                                                          \
-	do {                                                                                                               \
-		if (SIGNED && (VAL) < 0) {                                                                                     \
-			PacSumUpdateOneInternal<false>(*(WRAPPER).EnsureNegState(ALLOC), HASH, static_cast<uint64_t>(-(VAL)),      \
-			                               ALLOC);                                                                     \
-		} else {                                                                                                       \
-			PacSumUpdateOneInternal<false>(POS_STATE, HASH, static_cast<uint64_t>(VAL), ALLOC);                        \
-		}                                                                                                              \
-	} while (0)
-#endif
-
-//  FlushBuffer - flushes src's buffer into dst's inner state
-// To flush into self, pass same wrapper for both src and dst
-// Double wrapper version - no double-sided mode
-template <bool SIGNED>
-inline void PacSumFlushBuffer(PacSumDoubleStateWrapper &src, PacSumDoubleStateWrapper &dst, ArenaAllocator &a) {
-	uint64_t cnt = src.n_buffered & PacSumDoubleStateWrapper::BUF_MASK;
-	if (cnt > 0) {
-		auto &dst_inner = *dst.EnsureState(a);
-		for (uint64_t i = 0; i < cnt; i++) {
-			PacSumUpdateOneInternal<SIGNED>(dst_inner, src.hash_buf[i], src.val_buf[i], a);
-		}
-		src.n_buffered &= ~PacSumDoubleStateWrapper::BUF_MASK;
+	auto &state_u = *reinterpret_cast<PacSumIntState<false> *>(state);
+	if (SIGNED && value < 0) {
+		PacSumUpdateOneInternal<false>(*wrapper.EnsureNegState(a), hash, static_cast<uint64_t>(-value), a);
+	} else {
+		PacSumUpdateOneInternal<false>(state_u, hash, static_cast<uint64_t>(value), a);
 	}
+#else
+	PacSumUpdateOneInternal<SIGNED>(*state, hash, value, a);
+#endif
 }
 
-// Integer wrapper version - supports double-sided mode
+// Double wrapper overload - no double-sided mode needed for floating point
 template <bool SIGNED>
-inline void PacSumFlushBuffer(PacSumIntStateWrapper<SIGNED> &src, PacSumIntStateWrapper<SIGNED> &dst,
-                              ArenaAllocator &a) {
-	uint64_t cnt = src.n_buffered & PacSumIntStateWrapper<SIGNED>::BUF_MASK;
+inline void PacSumRouteValue(PacSumDoubleStateWrapper &, PacSumDoubleState *state, uint64_t hash, double value,
+                             ArenaAllocator &a) {
+	PacSumUpdateOneInternal<SIGNED>(*state, hash, value, a);
+}
+
+// FlushBuffer - flushes src's buffer into dst's inner state
+// To flush into self, pass same wrapper for both src and dst
+// Works for both int and double wrappers via overloaded PacSumRouteValue
+template <bool SIGNED, typename WrapperT>
+inline void PacSumFlushBuffer(WrapperT &src, WrapperT &dst, ArenaAllocator &a) {
+	uint64_t cnt = src.n_buffered & WrapperT::BUF_MASK;
 	if (cnt > 0) {
 		auto *dst_state = dst.EnsureState(a);
 		for (uint64_t i = 0; i < cnt; i++) {
-#ifndef PAC_SIGNEDSUM
-			auto &dst_u = *reinterpret_cast<PacSumIntState<false> *>(dst_state);
-			PAC_ROUTE_VALUE(dst, dst_u, src.hash_buf[i], src.val_buf[i], a);
-#else
-			PacSumUpdateOneInternal<SIGNED>(*dst_state, src.hash_buf[i], src.val_buf[i], a);
-#endif
+			PacSumRouteValue<SIGNED>(dst, dst_state, src.hash_buf[i], src.val_buf[i], a);
 		}
-		src.n_buffered &= ~PacSumIntStateWrapper<SIGNED>::BUF_MASK;
+		src.n_buffered &= ~WrapperT::BUF_MASK;
 	}
 }
 
-// Buffering update - double wrapper version (no double-sided mode)
-template <bool SIGNED>
-AUTOVECTORIZE inline void PacSumUpdateOne(PacSumDoubleStateWrapper &agg, uint64_t key_hash, double value,
-                                          ArenaAllocator &a) {
-	uint64_t cnt = agg.n_buffered & PacSumDoubleStateWrapper::BUF_MASK;
-	if (DUCKDB_UNLIKELY(cnt == PacSumDoubleStateWrapper::BUF_SIZE)) {
-		auto &dst = *agg.EnsureState(a);
-		for (int i = 0; i < PacSumDoubleStateWrapper::BUF_SIZE; i++) {
-			PacSumUpdateOneInternal<SIGNED>(dst, agg.hash_buf[i], agg.val_buf[i], a);
-		}
-		PacSumUpdateOneInternal<SIGNED>(dst, key_hash, value, a);
-		agg.n_buffered &= ~PacSumDoubleStateWrapper::BUF_MASK;
-	} else {
-		agg.val_buf[cnt] = value;
-		agg.hash_buf[cnt] = key_hash;
-		agg.n_buffered++;
-	}
-}
-
-// Buffering update - integer wrapper version (supports double-sided mode)
-template <bool SIGNED>
-AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_hash,
-                                          typename PacSumIntStateWrapper<SIGNED>::Value value, ArenaAllocator &a) {
-	uint64_t cnt = agg.n_buffered & PacSumIntStateWrapper<SIGNED>::BUF_MASK;
-	if (DUCKDB_UNLIKELY(cnt == PacSumIntStateWrapper<SIGNED>::BUF_SIZE)) {
+// Buffering update - unified for both int and double wrappers via overloaded PacSumRouteValue
+template <bool SIGNED, typename WrapperT, typename ValueT>
+AUTOVECTORIZE inline void PacSumUpdateOne(WrapperT &agg, uint64_t key_hash, ValueT value, ArenaAllocator &a) {
+	uint64_t cnt = agg.n_buffered & WrapperT::BUF_MASK;
+	if (DUCKDB_UNLIKELY(cnt == WrapperT::BUF_SIZE)) {
 		auto *dst_state = agg.EnsureState(a);
-#ifndef PAC_SIGNEDSUM
-		auto &dst_u = *reinterpret_cast<PacSumIntState<false> *>(dst_state);
-		for (int i = 0; i < PacSumIntStateWrapper<SIGNED>::BUF_SIZE; i++) {
-			PAC_ROUTE_VALUE(agg, dst_u, agg.hash_buf[i], agg.val_buf[i], a);
+		for (int i = 0; i < WrapperT::BUF_SIZE; i++) {
+			PacSumRouteValue<SIGNED>(agg, dst_state, agg.hash_buf[i], agg.val_buf[i], a);
 		}
-		PAC_ROUTE_VALUE(agg, dst_u, key_hash, value, a);
-#else
-		for (int i = 0; i < PacSumIntStateWrapper<SIGNED>::BUF_SIZE; i++) {
-			PacSumUpdateOneInternal<SIGNED>(*dst_state, agg.hash_buf[i], agg.val_buf[i], a);
-		}
-		PacSumUpdateOneInternal<SIGNED>(*dst_state, key_hash, value, a);
-#endif
-		agg.n_buffered &= ~PacSumIntStateWrapper<SIGNED>::BUF_MASK;
+		PacSumRouteValue<SIGNED>(agg, dst_state, key_hash, value, a);
+		agg.n_buffered &= ~WrapperT::BUF_MASK;
 	} else {
 		agg.val_buf[cnt] = value;
 		agg.hash_buf[cnt] = key_hash;
@@ -214,7 +178,8 @@ AUTOVECTORIZE inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, ui
 // Hugeint doesn't benefit from buffering, just update directly
 template <bool SIGNED>
 inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_hash, hugeint_t value, ArenaAllocator &a) {
-	PacSumUpdateOneInternal<SIGNED>(*agg.EnsureState(a), key_hash, value, a);
+	auto &state = *agg.EnsureState(a);
+	PacSumUpdateOneInternal<SIGNED>(state, key_hash, value, a);
 }
 
 #endif // PAC_NOBUFFERING
@@ -231,21 +196,17 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
 
 	auto *inner_state = state.EnsureState(allocator);
-#ifndef PAC_SIGNEDSUM
-	auto &inner_u = *reinterpret_cast<PacSumIntState<false> *>(inner_state);
-#endif
 
 	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
-		state.exact_count += count;
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
 			auto val = ConvertValue<VALUE_TYPE>::convert(values[v_idx]);
 			auto hash = hashes[h_idx] ^ query_hash;
-#ifndef PAC_SIGNEDSUM
-			PAC_ROUTE_VALUE(state, inner_u, hash, val, allocator);
+#ifndef PAC_NOBUFFERING
+			PacSumRouteValue<SIGNED>(state, inner_state, hash, val, allocator);
 #else
-			PacSumUpdateOneInternal<SIGNED>(*inner_state, hash, val, allocator);
+			PacSumUpdateOne<SIGNED>(*inner_state, hash, val, allocator);
 #endif
 		}
 	} else {
@@ -255,13 +216,12 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			state.exact_count++;
 			auto val = ConvertValue<VALUE_TYPE>::convert(values[v_idx]);
 			auto hash = hashes[h_idx] ^ query_hash;
-#ifndef PAC_SIGNEDSUM
-			PAC_ROUTE_VALUE(state, inner_u, hash, val, allocator);
+#ifndef PAC_NOBUFFERING
+			PacSumRouteValue<SIGNED>(state, inner_state, hash, val, allocator);
 #else
-			PacSumUpdateOneInternal<SIGNED>(*inner_state, hash, val, allocator);
+			PacSumUpdateOne<SIGNED>(*inner_state, hash, val, allocator);
 #endif
 		}
 	}
@@ -277,11 +237,9 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 	inputs[1].ToUnifiedFormat(count, value_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
-
 	auto &inner = *state.EnsureState(allocator);
 
 	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
-		state.exact_count += count;
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
@@ -295,7 +253,6 @@ static void PacSumUpdate(Vector inputs[], data_ptr_t state_p, idx_t count, Arena
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			state.exact_count++;
 			PacSumUpdateOneInternal<SIGNED>(inner, hashes[h_idx] ^ query_hash,
 			                                ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
@@ -328,7 +285,6 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue; // ignore NULLs
 		}
-		state->exact_count++;
 		PacSumUpdateOne<SIGNED>(*state, hashes[h_idx] ^ query_hash, ConvertValue<VALUE_TYPE>::convert(values[v_idx]),
 		                        allocator);
 	}
@@ -357,35 +313,46 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
 		// Flush src's buffer into dst's inner state (avoids allocating src inner)
-		PacSumFlushBuffer<SIGNED>(*src_wrapper[i], *dst_wrapper[i], allocator);
+		PacSumFlushBuffer<SIGNED, ScatterIntState<SIGNED>>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
+		// unwrap: s and d are the real states (unwrapping is a no-op when not buffering)
 		auto *s = src_wrapper[i]->GetState();
-		auto *d_wrapper = dst_wrapper[i];
-		// Merge exact_count from wrapper
-#ifndef PAC_NOBUFFERING
-		d_wrapper->exact_count += src_wrapper[i]->exact_count;
-#endif
 		if (!s) {
 			continue; // src has no state allocated, nothing to combine
 		}
-		auto *d = d_wrapper->EnsureState(allocator);
+		auto *d = dst_wrapper[i]->EnsureState(allocator);
 #ifndef PAC_EXACTSUM
-#ifndef PAC_SIGNEDSUM
+#ifdef PAC_SIGNEDSUM
+		d->CombineFrom(s, allocator); // add approx totals froms into d
+#else
 		// Double-sided mode: cast to unsigned for correct thresholds
 		reinterpret_cast<PacSumIntState<false> *>(d)->CombineFrom(reinterpret_cast<PacSumIntState<false> *>(s),
 		                                                          allocator);
-#else
-		d->CombineFrom(s, allocator);
+		if (SIGNED) { // take care of the negated counter (if present)
+			auto *s_neg = src_wrapper[i]->GetNegState();
+			if (s_neg) {
+				auto *d_neg = dst_wrapper[i]->GetNegState();
+#ifndef PAC_NOBUFFERING
+				if (!d_neg) {                          // if we buffer, states are arena-allocated and we can steal them
+					dst_wrapper[i]->neg_state = s_neg; // dst has no neg_state yet - steal src's pointer
+				} else
 #endif
-#elif defined(PAC_NOCASCADING)
+					d_neg->CombineFrom(s_neg, allocator);
+			}
+		}
+#endif
+#else
+		// note that for the APPROX (!EXACTSUM) case, key_hash and exact_count are updated in CombineFrom()
+		d->exact_count += s->exact_count;
 		d->key_hash |= s->key_hash;
+#ifdef PAC_NOCASCADING
+		// nocascading: direct aggregation into hugeint
 		for (int j = 0; j < 64; j++) {
 			d->probabilistic_total128[j] += s->probabilistic_total128[j];
 		}
 #else
 		// EXACT COMBINE: Handle exact_totals - if sum would overflow, flush dst (passing src's value
 		// so it becomes the new exact_total after flush). Otherwise just add.
-		d->key_hash |= s->key_hash;
 		if (CHECK_BOUNDS_8(static_cast<int64_t>(s->exact_total8) + d->exact_total8)) {
 			d->Flush8(allocator, s->exact_total8, true);
 		} else {
@@ -413,23 +380,6 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		CombineLevel(s->probabilistic_total64, d->probabilistic_total64, 64);
 		CombineLevel(s->probabilistic_total128, d->probabilistic_total128, 64);
 #endif
-#ifdef PAC_EXACTSUM
-		d->exact_count += s->exact_count;
-#endif
-#ifndef PAC_SIGNEDSUM
-		// Double-sided approx mode: combine unsigned negative states
-		if (SIGNED) {
-			auto *s_neg = src_wrapper[i]->GetNegState();
-			if (s_neg) {
-				auto *d_neg = d_wrapper->GetNegState();
-#ifndef PAC_NOBUFFERING
-				if (!d_neg) {                     // if we buffer, states are arena-allocated and we can steal them
-					d_wrapper->neg_state = s_neg; // dst has no neg_state yet - just take src's pointer
-				} else
-#endif
-					d_neg->CombineFrom(s_neg, allocator);
-			}
-		}
 #endif
 	}
 }
@@ -441,14 +391,10 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
 		// Flush src's buffer into dst's inner state (avoids allocating src inner)
-		PacSumFlushBuffer<true>(*src_wrapper[i], *dst_wrapper[i], allocator);
+		PacSumFlushBuffer<true, ScatterDoubleState>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
 		auto *s = src_wrapper[i]->GetState();
 		auto *d_wrapper = dst_wrapper[i];
-		// Merge exact_count from wrapper
-#ifndef PAC_NOBUFFERING
-		d_wrapper->exact_count += src_wrapper[i]->exact_count;
-#endif
 		if (!s) {
 			continue; // src has no state allocated
 		}
@@ -474,41 +420,36 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
-		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
+		PacSumFlushBuffer<SIGNED, State>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 #endif
 		double buf[64] = {0};
-		uint64_t key_hash = 0;
-
 		auto *pos = state_ptrs[i]->GetState();
-		if (pos) {
-#ifndef PAC_SIGNEDSUM
-			// Double-sided mode: use SFINAE helpers (cast to unsigned for int states only)
-			FlushPosState<State>(pos, input.allocator);
-			GetPosStateTotals<State>(pos, buf);
-#else
-			pos->Flush(input.allocator);
-			pos->GetTotalsAsDouble(buf);
-#endif
-			key_hash |= pos->key_hash;
+		if (!pos) {
+			result_mask.SetInvalid(offset + i); // return NULL (no values seen)
+			continue;
 		}
+		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
+		// This ensures each group gets the same noise regardless of processing order
+		uint64_t key_hash = pos->key_hash;
+		std::mt19937_64 gen(seed ^ key_hash);
+		if (PacNoiseInNull(key_hash, mi, gen)) {
+			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
+			continue;
+		}
+#ifndef PAC_SIGNEDSUM
+		// Double-sided mode: use SFINAE helpers (cast to unsigned for int states only)
+		FlushPosState<State>(pos, input.allocator);
+		GetPosStateTotals<State>(pos, buf);
+#else
+		pos->Flush(input.allocator);
+		pos->GetTotalsAsDouble(buf);
+#endif
 #ifndef PAC_SIGNEDSUM
 		SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, key_hash, input.allocator);
 #endif
-		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
-		// This ensures each group gets the same noise regardless of processing order
-		std::mt19937_64 gen(seed ^ key_hash);
-		if (PacNoiseInNull(key_hash, mi, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
-		}
 		if (DIVIDE_BY_COUNT) {
 			// Total count = wrapper's count + inner state's count
-			uint64_t total_count = state_ptrs[i]->exact_count;
-#ifndef PAC_NOBUFFERING
-			if (pos) {
-				total_count += pos->exact_count;
-			}
-#endif
+			uint64_t total_count = pos->exact_count;
 			double divisor = static_cast<double>(total_count) * scale_divisor;
 			for (int j = 0; j < 64; j++) {
 				buf[j] /= divisor;
@@ -605,23 +546,36 @@ void PacSumCombineDoubleWrapper(Vector &src, Vector &dst, AggregateInputData &ag
 	PacSumCombineDouble(src, dst, count, aggr.allocator);
 }
 
-// instantiate Finalize methods for pac_sum
+// instantiate Finalize methods for pac_sum (DIVIDE_BY_COUNT=false)
 void PacSumFinalizeSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacSumFinalize<ScatterIntState<true>, hugeint_t, true>(states, input, result, count, offset);
+	PacSumFinalize<ScatterIntState<true>, hugeint_t, true, false>(states, input, result, count, offset);
 }
 void PacSumFinalizeUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacSumFinalize<ScatterIntState<false>, hugeint_t, false>(states, input, result, count, offset);
+	PacSumFinalize<ScatterIntState<false>, hugeint_t, false, false>(states, input, result, count, offset);
 }
 void PacSumFinalizeDoubleWrapper(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacSumFinalize<ScatterDoubleState, double, true>(states, input, result, count, offset);
+	PacSumFinalize<ScatterDoubleState, double, true, false>(states, input, result, count, offset);
 }
 void PacSumFinalizeDoubleToHugeint(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                    idx_t offset) {
-	PacSumFinalize<ScatterDoubleState, hugeint_t, true>(states, input, result, count, offset);
+	PacSumFinalize<ScatterDoubleState, hugeint_t, true, false>(states, input, result, count, offset);
 }
 
-unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
-PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args) {
+// pac_avg finalize wrappers (DIVIDE_BY_COUNT=true) - used by both pac_avg registration and GetPacSumAvgAggregate
+void PacAvgFinalizeDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	PacSumFinalize<ScatterDoubleState, double, true, true>(states, input, result, count, offset);
+}
+void PacAvgFinalizeSignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	PacSumFinalize<ScatterIntState<true>, double, true, true>(states, input, result, count, offset);
+}
+void PacAvgFinalizeUnsignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                  idx_t offset) {
+	PacSumFinalize<ScatterIntState<false>, double, false, true>(states, input, result, count, offset);
+}
+
+// Internal bind helper with scale_divisor parameter (used by BindDecimalPacSumAvg)
+static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vector<unique_ptr<Expression>> &args,
+                                                        double scale_divisor) {
 	// Check if pac_mi is explicitly set by the user - if so, use it and don't allow override
 	double mi = 128.0;
 	bool mi_from_setting = false;
@@ -634,12 +588,12 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 	// Only allow override from function argument if pac_mi was not explicitly set
 	if (!mi_from_setting && args.size() >= 3) {
 		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_sum: mi parameter must be a constant");
+			throw InvalidInputException("pac_sum/pac_avg: mi parameter must be a constant");
 		}
 		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
 		mi = mi_val.GetValue<double>();
 		if (mi < 0.0) {
-			throw InvalidInputException("pac_sum: mi must be >= 0");
+			throw InvalidInputException("pac_sum/pac_avg: mi must be >= 0");
 		}
 	}
 	// Read pac_seed setting (optional) to produce deterministic RNG seed for tests
@@ -648,7 +602,12 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
-	return make_uniq<PacBindData>(mi, seed);
+	return make_uniq<PacBindData>(mi, seed, scale_divisor);
+}
+
+unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
+PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args) {
+	return PacBindWithScaleDivisor(ctx, args, 1.0); // scale_divisor=1.0 for sum
 }
 
 idx_t PacSumIntStateSize(const AggregateFunction &) {
@@ -657,15 +616,12 @@ idx_t PacSumIntStateSize(const AggregateFunction &) {
 
 void PacSumIntInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(ScatterIntState<true>));
-#ifndef PAC_EXACTSUM
-	// For approx mode, set max_level_used to -1 (no levels have received data yet)
-	// This applies when PAC_NOBUFFERING is set (state is directly PacSumIntState)
-	// When buffering is enabled, wrapper's EnsureState handles this for the inner state
-#ifdef PAC_NOBUFFERING
-	auto &state = *reinterpret_cast<ScatterIntState<true> *>(state_p);
-	state.max_level_used = -1;
-	state.inline_level_idx = -1;
-#endif
+#if !defined(PAC_EXACTSUM) && defined(PAC_NOBUFFERING)
+	// In APPROX mode without buffering, the raw state needs max_level_used=-1 and inline_level_idx=-1
+	// to indicate no levels are allocated yet (memset sets them to 0, which is incorrect)
+	auto *state = reinterpret_cast<PacSumIntState<true> *>(state_p);
+	state->max_level_used = -1;
+	state->inline_level_idx = -1;
 #endif
 }
 
@@ -689,53 +645,75 @@ static void AddFcn(AggregateFunctionSet &set, const LogicalType &value_type, con
 	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind, destructor));
 }
 
-// Helper to get the right pac_sum AggregateFunction for a given physical type (used by BindDecimalPacSum)
-// Note: bind is set to nullptr - the caller (BindDecimalPacSum) handles binding
-static AggregateFunction GetPacSumAggregate(PhysicalType type) {
+// Unified helper to get the right AggregateFunction for a given physical type
+// IS_AVG=false: pac_sum (returns HUGEINT, uses PacSumFinalize* wrappers)
+// IS_AVG=true:  pac_avg (returns DOUBLE, uses PacAvgFinalize* wrappers)
+template <bool IS_AVG>
+static AggregateFunction GetPacSumAvgAggregate(PhysicalType type) {
+	const char *name = IS_AVG ? "pac_avg" : "pac_sum";
+	auto result_type = IS_AVG ? LogicalType::DOUBLE : LogicalType::HUGEINT;
+	auto finalize_signed = IS_AVG ? PacAvgFinalizeSignedDouble : PacSumFinalizeSigned;
+	auto finalize_double = IS_AVG ? PacAvgFinalizeDouble : PacSumFinalizeDoubleWrapper;
+
 	switch (type) {
 	case PhysicalType::INT16:
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::HUGEINT,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateSmallInt,
-		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		                         PacSumUpdateSmallInt);
+		return AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::SMALLINT}, result_type, PacSumIntStateSize,
+		                         PacSumIntInitialize, PacSumScatterUpdateSmallInt, PacSumCombineSigned, finalize_signed,
+		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateSmallInt);
 	case PhysicalType::INT32:
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::HUGEINT,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateInteger,
-		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		                         PacSumUpdateInteger);
+		return AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::INTEGER}, result_type, PacSumIntStateSize,
+		                         PacSumIntInitialize, PacSumScatterUpdateInteger, PacSumCombineSigned, finalize_signed,
+		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateInteger);
 	case PhysicalType::INT64:
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::HUGEINT,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateBigInt,
-		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		                         PacSumUpdateBigInt);
+		return AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::BIGINT}, result_type, PacSumIntStateSize,
+		                         PacSumIntInitialize, PacSumScatterUpdateBigInt, PacSumCombineSigned, finalize_signed,
+		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateBigInt);
 	case PhysicalType::INT128:
 #ifndef PAC_EXACTSUM
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
-		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
-		                         PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
+		// In approx mode, HUGEINT uses double state
+		// For pac_sum: use PacSumFinalizeDoubleToHugeint (returns HUGEINT)
+		// For pac_avg: use finalize_double (returns DOUBLE)
+		return AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::HUGEINT}, result_type, PacSumDoubleStateSize,
+		                         PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper,
+		                         IS_AVG ? finalize_double : PacSumFinalizeDoubleToHugeint,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeIntDouble);
 #else
-		return AggregateFunction("pac_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateHugeInt,
-		                         PacSumCombineSigned, PacSumFinalizeSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		                         PacSumUpdateHugeInt);
+		return AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::HUGEINT}, result_type, PacSumIntStateSize,
+		                         PacSumIntInitialize, PacSumScatterUpdateHugeInt, PacSumCombineSigned, finalize_signed,
+		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeInt);
 #endif
 	default:
-		throw InternalException("Unsupported physical type for pac_sum decimal");
+		throw InternalException("Unsupported physical type for %s decimal", name);
 	}
 }
 
 // Dynamic dispatch for DECIMAL: selects the right integer implementation based on decimal width
-static unique_ptr<FunctionData> BindDecimalPacSum(ClientContext &ctx, AggregateFunction &function,
-                                                  vector<unique_ptr<Expression>> &args) {
+// IS_AVG=false: pac_sum (returns DECIMAL)
+// IS_AVG=true:  pac_avg (returns DOUBLE, computes scale_divisor)
+template <bool IS_AVG>
+unique_ptr<FunctionData> BindDecimalPacSumAvg(ClientContext &ctx, AggregateFunction &function,
+                                              vector<unique_ptr<Expression>> &args) {
 	auto decimal_type = args[1]->return_type; // value is arg 1 (arg 0 is hash)
-	function = GetPacSumAggregate(decimal_type.InternalType());
-	function.name = "pac_sum";
+	function = GetPacSumAvgAggregate<IS_AVG>(decimal_type.InternalType());
+	function.name = IS_AVG ? "pac_avg" : "pac_sum";
 	function.arguments[1] = decimal_type;
-	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
-	// Get mi and seed
-	return PacSumBind(ctx, function, args);
+
+	double scale_divisor = 1.0;
+	if (IS_AVG) {
+		function.return_type = LogicalType::DOUBLE;
+		uint8_t scale = DecimalType::GetScale(decimal_type);
+		scale_divisor = std::pow(10.0, static_cast<double>(scale));
+	} else {
+		function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
+	}
+	return PacBindWithScaleDivisor(ctx, args, scale_divisor);
 }
+
+// Explicit template instantiations
+template unique_ptr<FunctionData> BindDecimalPacSumAvg<false>(ClientContext &, AggregateFunction &,
+                                                              vector<unique_ptr<Expression>> &);
+template unique_ptr<FunctionData> BindDecimalPacSumAvg<true>(ClientContext &, AggregateFunction &,
+                                                             vector<unique_ptr<Expression>> &);
 
 void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	AggregateFunctionSet fcn_set("pac_sum");
@@ -762,8 +740,8 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	AddFcn(fcn_set, LogicalType::UBIGINT, LogicalType::HUGEINT, PacSumIntStateSize, PacSumIntInitialize,
 	       PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeUnsigned, PacSumUpdateUBigInt);
 
-	// HUGEINT: uses double state with finalize converting back to hugeint in approx mode (default),
 #ifndef PAC_EXACTSUM
+	// HUGEINT: uses double state with finalize converting back to hugeint in approx mode (default),
 	AddFcn(fcn_set, LogicalType::HUGEINT, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	       PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacSumFinalizeDoubleToHugeint,
 	       PacSumUpdateHugeIntDouble);
@@ -783,13 +761,13 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	       PacSumScatterUpdateDouble, PacSumCombineDoubleWrapper, PacSumFinalizeDoubleWrapper, PacSumUpdateDouble);
 
 	// DECIMAL: dynamic dispatch based on decimal width (like DuckDB's sum)
-	// Uses BindDecimalPacSum to select INT16/INT32/INT64/INT128 implementation at bind time
-	fcn_set.AddFunction(AggregateFunction({LogicalType::UBIGINT, LogicalTypeId::DECIMAL}, LogicalTypeId::DECIMAL,
-	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSum));
-	fcn_set.AddFunction(AggregateFunction({LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE},
-	                                      LogicalTypeId::DECIMAL, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSum));
+	// Uses BindDecimalPacSumAvg<false> to select INT16/INT32/INT64/INT128 implementation at bind time
+	fcn_set.AddFunction(AggregateFunction(
+	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL}, LogicalTypeId::DECIMAL, nullptr, nullptr, nullptr, nullptr,
+	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSumAvg<false>));
+	fcn_set.AddFunction(AggregateFunction(
+	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE}, LogicalTypeId::DECIMAL, nullptr, nullptr,
+	    nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSumAvg<false>));
 
 	loader.RegisterFunction(fcn_set);
 }
@@ -802,9 +780,10 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 // it returns all 64 counters so the outer query can evaluate the comparison
 // against all subsamples and produce a mask.
 
-template <class State, bool SIGNED>
-static void PacSumFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                   idx_t offset) {
+// Unified FinalizeCounters template for pac_sum_counters and pac_avg_counters
+// DIVIDE_BY_COUNT=false for pac_sum_counters, true for pac_avg_counters
+template <class State, bool SIGNED, bool DIVIDE_BY_COUNT>
+void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<State *>(states);
 
 	// Result is LIST<DOUBLE>
@@ -818,9 +797,12 @@ static void PacSumFinalizeCounters(Vector &states, AggregateInputData &input, Ve
 
 	auto child_data = FlatVector::GetData<double>(child_vec);
 
+	// scale_divisor for DECIMAL support (used by pac_avg)
+	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
+
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
-		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
+		PacSumFlushBuffer<SIGNED, State>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 #endif
 		auto *s = state_ptrs[i]->GetState();
 
@@ -841,24 +823,32 @@ static void PacSumFinalizeCounters(Vector &states, AggregateInputData &input, Ve
 			s->Flush(input.allocator);
 			s->GetTotalsAsDouble(dst);
 #endif
+			// For pac_avg_counters: divide each counter by count
+			if (DIVIDE_BY_COUNT) {
+				uint64_t total_count = s->exact_count;
+				double divisor = static_cast<double>(total_count) * scale_divisor;
+				for (int j = 0; j < 64; j++) {
+					dst[j] /= divisor;
+				}
+			}
 		} else {
 			memset(dst, 0, 64 * sizeof(double));
 		}
 	}
 }
 
-// Instantiate counter finalize methods
+// Instantiate counter finalize methods for pac_sum_counters (DIVIDE_BY_COUNT=false)
 static void PacSumFinalizeCountersSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                          idx_t offset) {
-	PacSumFinalizeCounters<ScatterIntState<true>, true>(states, input, result, count, offset);
+	PacSumAvgFinalizeCounters<ScatterIntState<true>, true, false>(states, input, result, count, offset);
 }
 static void PacSumFinalizeCountersUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                            idx_t offset) {
-	PacSumFinalizeCounters<ScatterIntState<false>, false>(states, input, result, count, offset);
+	PacSumAvgFinalizeCounters<ScatterIntState<false>, false, false>(states, input, result, count, offset);
 }
 static void PacSumFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                          idx_t offset) {
-	PacSumFinalizeCounters<ScatterDoubleState, true>(states, input, result, count, offset);
+	PacSumAvgFinalizeCounters<ScatterDoubleState, true, false>(states, input, result, count, offset);
 }
 
 // Helper to register both 2-param and 3-param versions for pac_sum_counters
@@ -904,8 +894,8 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	               PacSumScatterUpdateUBigInt, PacSumCombineUnsigned, PacSumFinalizeCountersUnsigned,
 	               PacSumUpdateUBigInt);
 
-	// HUGEINT - uses double state in approx mode (same as UHUGEINT)
 #ifndef PAC_EXACTSUM
+	// HUGEINT - uses double state in approx mode (same as UHUGEINT)
 	AddCountersFcn(counters_set, LogicalType::HUGEINT, PacSumDoubleStateSize, PacSumDoubleInitialize,
 	               PacSumScatterUpdateHugeIntDouble, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
 	               PacSumUpdateHugeIntDouble);
@@ -951,10 +941,20 @@ template void PacSumFinalize<PacSumIntStateWrapper<false>, double, false, true>(
                                                                                 idx_t offset);
 
 // Explicit template instantiations for PacSumFlushBuffer (used by pac_avg_counters)
-template void PacSumFlushBuffer<true>(PacSumIntStateWrapper<true> &, PacSumIntStateWrapper<true> &, ArenaAllocator &);
-template void PacSumFlushBuffer<false>(PacSumIntStateWrapper<false> &, PacSumIntStateWrapper<false> &,
-                                       ArenaAllocator &);
-template void PacSumFlushBuffer<true>(PacSumDoubleStateWrapper &, PacSumDoubleStateWrapper &, ArenaAllocator &);
+template void PacSumFlushBuffer<true, PacSumIntStateWrapper<true>>(PacSumIntStateWrapper<true> &,
+                                                                   PacSumIntStateWrapper<true> &, ArenaAllocator &);
+template void PacSumFlushBuffer<false, PacSumIntStateWrapper<false>>(PacSumIntStateWrapper<false> &,
+                                                                     PacSumIntStateWrapper<false> &, ArenaAllocator &);
+template void PacSumFlushBuffer<true, PacSumDoubleStateWrapper>(PacSumDoubleStateWrapper &, PacSumDoubleStateWrapper &,
+                                                                ArenaAllocator &);
 #endif
+
+// Explicit instantiations for PacSumAvgFinalizeCounters (used by pac_avg_counters)
+template void PacSumAvgFinalizeCounters<ScatterIntState<true>, true, true>(Vector &, AggregateInputData &, Vector &,
+                                                                           idx_t, idx_t);
+template void PacSumAvgFinalizeCounters<ScatterIntState<false>, false, true>(Vector &, AggregateInputData &, Vector &,
+                                                                             idx_t, idx_t);
+template void PacSumAvgFinalizeCounters<ScatterDoubleState, true, true>(Vector &, AggregateInputData &, Vector &, idx_t,
+                                                                        idx_t);
 
 } // namespace duckdb

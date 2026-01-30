@@ -1,12 +1,10 @@
-get the following instances on EC2:
+
+for the microbenchmarks, get the following instances on EC2:
 - i8gd.4xlarge 16xGraviton4 2.7GHz, 32GB RAm, 950GB SSD
-- c8i.4xlarge 16xGranite Rapids 3.9GHz,32GB RAM, EBS
-- c8a.4xlarge 16xEPYC 9R45 4.5GHz, 32GB RAM, EBS
+- c8i.4xlarge 16xGranite Rapids 3.9GHz,32GB RAM, EBS: choose 90GB io2
+- c8a.4xlarge 16xEPYC 9R45 4.5GHz, 32GB RAM, EBS: choose 90GB io2
 
-i8g has an SSD but this is not available intel and amd 
-for c8a and c8i configure an io2 diskl of 90GB  
-
-chose Ubuntu 24 as the OS (ssh ubuntu@public-ip -i yourkey.pem into it)
+choose Ubuntu 24 as the OS (ssh ubuntu@public-ip -i yourkey.pem into it)
 
 inside the boxes:
 
@@ -37,3 +35,21 @@ cd pac/benchmark/pac_microbench
 ./create_test_db.sh 
 nohup ./run_all.sh&
 # the results will be in csv files in the results/dir
+
+# experiments will cost +-6 hourse, so rental cost per machine is around $3
+
+# scripts on the result files (need to edit the filenames inside these):
+benchmark/pac_microbench/plot_simd_improvements.py
+benchmark/pac_microbench/plot_count_optimizations.py	
+benchmark/pac_microbench/plot_minmax_optimizations.py	
+benchmark/pac_microbench/plot_sum_optimizations.py
+
+# stability of PAC_SUM() on various distributions 
+# after running build_variants.sh (see above) on any 
+# platform you would have duckdb_default and duckdb_exactsum
+benchmark/pac_microbench/approx_sum_stability.sql
+
+# uniform randomness of murmur hash
+benchmark/pac_microbench/bionmial.sq 
+# generates output for:
+benchmark/pac_microbench/plot_hash_distribution.py	

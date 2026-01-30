@@ -48,14 +48,14 @@ pRAGMA add_pac_privacy_unit('bitslice_pk_single');
 query I
 SELECT SUM(val) FROM bitslice_pk_single
 ----
-86
+102
 
 # JOIN aggregation (no GROUP BY)
 query I
 SELECT SUM(a.val)
 FROM bitslice_pk_single a JOIN bitslice_pk_many b ON a.grp = b.grp
 ----
-431
+513
 
 # ========== LEFT JOIN TEST CASES ==========
 
@@ -79,9 +79,9 @@ GROUP BY b.val
 ORDER BY b.val
 LIMIT 3
 ----
-3	84	18
-4	132	6
-8	56	12
+3	114	24
+4	25	24
+8	76	16
 
 # Test RIGHT JOIN with composite PK table on right, aggregating with condition
 query III
@@ -92,8 +92,8 @@ GROUP BY b.pk1
 ORDER BY b.pk1
 LIMIT 2
 ----
-0	4	10
-1	0	12
+0	2	10
+1	1	23
 
 # Cleanup
 statement ok

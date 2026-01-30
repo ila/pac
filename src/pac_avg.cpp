@@ -1,183 +1,20 @@
 #include "include/pac_sum.hpp"
 #include "include/pac_avg.hpp"
-#include "duckdb/common/types/decimal.hpp"
-#include <cmath>
 
 namespace duckdb {
 
-// instantiate Finalize methods for pac_avg (with DIVIDE_BY_COUNT=true)
-void PacAvgFinalizeDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacSumFinalize<ScatterDoubleState, double, true, true>(states, input, result, count, offset);
+// Instantiate counter finalize methods for pac_avg (using shared PacSumAvgFinalizeCounters with DIVIDE_BY_COUNT=true)
+static void PacAvgFinalizeCountersSignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                               idx_t offset) {
+	PacSumAvgFinalizeCounters<ScatterIntState<true>, true, true>(states, input, result, count, offset);
 }
-void PacAvgFinalizeSignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
-	PacSumFinalize<ScatterIntState<true>, double, true, true>(states, input, result, count, offset);
+static void PacAvgFinalizeCountersUnsignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                                 idx_t offset) {
+	PacSumAvgFinalizeCounters<ScatterIntState<false>, false, true>(states, input, result, count, offset);
 }
-void PacAvgFinalizeUnsignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                  idx_t offset) {
-	PacSumFinalize<ScatterIntState<false>, double, false, true>(states, input, result, count, offset);
-}
-
-// ============================================================================
-// PAC_AVG_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
-// ============================================================================
-// This variant is used when the avg result will be used in a comparison
-// in an outer categorical query. Instead of picking one counter and adding noise,
-// it returns all 64 counters so the outer query can evaluate the comparison
-// against all subsamples and produce a mask.
-
-template <class State, bool SIGNED>
-static void PacAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                   idx_t offset) {
-	auto state_ptrs = FlatVector::GetData<State *>(states);
-
-	// Result is LIST<DOUBLE>
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child_vec = ListVector::GetEntry(result);
-
-	// Reserve space for all lists (64 elements each)
-	idx_t total_elements = count * 64;
-	ListVector::Reserve(result, total_elements);
-	ListVector::SetListSize(result, total_elements);
-
-	auto child_data = FlatVector::GetData<double>(child_vec);
-	double buf[64];
-
-	// scale_divisor is used by pac_avg on DECIMAL to convert internal integer representation back to decimal
-	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
-
-	for (idx_t i = 0; i < count; i++) {
-#ifndef PAC_NOBUFFERING
-		PacSumFlushBuffer<SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator);
-#endif
-		auto *s = state_ptrs[i]->GetState();
-
-		// Set up the list entry
-		list_entries[offset + i].offset = i * 64;
-		list_entries[offset + i].length = 64;
-
-		if (s) {
-#ifndef PAC_SIGNEDSUM
-			// Double-sided mode: use helpers from pac_sum.hpp
-			FlushPosState<State>(s, input.allocator);
-			GetPosStateTotals<State>(s, buf);
-			uint64_t dummy_key_hash = 0;
-			SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, dummy_key_hash, input.allocator);
-#else
-			s->Flush(input.allocator);
-			s->GetTotalsAsDouble(buf);
-#endif
-		} else {
-			memset(buf, 0, sizeof(buf));
-		}
-
-		// Divide by count for average
-		uint64_t total_count = state_ptrs[i]->exact_count;
-#ifndef PAC_NOBUFFERING
-		if (s) {
-			total_count += s->exact_count;
-		}
-#endif
-		double divisor = static_cast<double>(total_count) * scale_divisor;
-
-		// Copy the 64 counters to the list, divided by count
-		for (idx_t j = 0; j < 64; j++) {
-			child_data[i * 64 + j] = buf[j] / divisor;
-		}
-	}
-}
-
-// Instantiate counter finalize methods for pac_avg
-void PacAvgFinalizeCountersSignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                        idx_t offset) {
-	PacAvgFinalizeCounters<ScatterIntState<true>, true>(states, input, result, count, offset);
-}
-void PacAvgFinalizeCountersUnsignedDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                          idx_t offset) {
-	PacAvgFinalizeCounters<ScatterIntState<false>, false>(states, input, result, count, offset);
-}
-void PacAvgFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                  idx_t offset) {
-	PacAvgFinalizeCounters<ScatterDoubleState, true>(states, input, result, count, offset);
-}
-
-// Helper to get the right pac_avg AggregateFunction for a given physical type (used by BindDecimalPacAvg)
-// Note: bind is set to nullptr - the caller (BindDecimalPacAvg) handles binding
-static AggregateFunction GetPacAvgAggregate(PhysicalType type) {
-	switch (type) {
-	case PhysicalType::INT16:
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::SMALLINT}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateSmallInt,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateSmallInt);
-	case PhysicalType::INT32:
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateInteger,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateInteger);
-	case PhysicalType::INT64:
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::BIGINT}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateBigInt,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateBigInt);
-	case PhysicalType::INT128:
-#ifndef PAC_EXACTSUM
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::DOUBLE,
-		                         PacSumDoubleStateSize, PacSumDoubleInitialize, PacSumScatterUpdateHugeIntDouble,
-		                         PacSumCombineDoubleWrapper, PacAvgFinalizeDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeIntDouble);
-#else
-		return AggregateFunction("pac_avg", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::DOUBLE,
-		                         PacSumIntStateSize, PacSumIntInitialize, PacSumScatterUpdateHugeInt,
-		                         PacSumCombineSigned, PacAvgFinalizeSignedDouble,
-		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacSumUpdateHugeInt);
-#endif
-	default:
-		throw InternalException("Unsupported physical type for pac_avg decimal");
-	}
-}
-
-// Dynamic dispatch for DECIMAL: selects the right integer implementation based on decimal width
-static unique_ptr<FunctionData> BindDecimalPacAvg(ClientContext &ctx, AggregateFunction &function,
-                                                  vector<unique_ptr<Expression>> &args) {
-	auto decimal_type = args[1]->return_type; // value is arg 1 (arg 0 is hash)
-	function = GetPacAvgAggregate(decimal_type.InternalType());
-	function.name = "pac_avg";
-	function.arguments[1] = decimal_type;
-	// pac_avg always returns DOUBLE (like DuckDB's avg)
-	function.return_type = LogicalType::DOUBLE;
-
-	// Compute scale_divisor = 10^scale for DECIMAL types
-	// This converts the internal integer representation back to the decimal value
-	uint8_t scale = DecimalType::GetScale(decimal_type);
-	double scale_divisor = std::pow(10.0, static_cast<double>(scale));
-
-	// Get mi and seed (same as PacSumBind)
-	// Check if pac_mi is explicitly set by the user - if so, use it and don't allow override
-	double mi = 128.0;
-	bool mi_from_setting = false;
-	Value pac_mi_val;
-	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
-		mi = pac_mi_val.GetValue<double>();
-		mi_from_setting = true;
-	}
-
-	// Only allow override from function argument if pac_mi was not explicitly set
-	if (!mi_from_setting && args.size() >= 3) {
-		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_avg: mi parameter must be a constant");
-		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		mi = mi_val.GetValue<double>();
-		if (mi < 0.0) {
-			throw InvalidInputException("pac_avg: mi must be >= 0");
-		}
-	}
-	uint64_t seed = std::random_device {}();
-	Value pac_seed_val;
-	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
-	}
-	return make_uniq<PacBindData>(mi, seed, scale_divisor);
+static void PacAvgFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                         idx_t offset) {
+	PacSumAvgFinalizeCounters<ScatterDoubleState, true, true>(states, input, result, count, offset);
 }
 
 // Helper to register both 2-param and 3-param (with optional mi) versions for pac_avg
@@ -239,13 +76,13 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	          PacSumCombineDoubleWrapper, PacAvgFinalizeDouble, PacSumUpdateDouble);
 
 	// DECIMAL: dynamic dispatch based on decimal width (like DuckDB's avg)
-	// Uses BindDecimalPacAvg to select INT16/INT32/INT64/INT128 implementation at bind time
-	fcn_set.AddFunction(AggregateFunction({LogicalType::UBIGINT, LogicalTypeId::DECIMAL}, LogicalType::DOUBLE, nullptr,
-	                                      nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacAvg));
-	fcn_set.AddFunction(AggregateFunction({LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE},
-	                                      LogicalType::DOUBLE, nullptr, nullptr, nullptr, nullptr, nullptr,
-	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacAvg));
+	// Uses BindDecimalPacSumAvg<true> to select INT16/INT32/INT64/INT128 implementation at bind time
+	fcn_set.AddFunction(AggregateFunction(
+	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL}, LogicalType::DOUBLE, nullptr, nullptr, nullptr, nullptr,
+	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSumAvg<true>));
+	fcn_set.AddFunction(AggregateFunction(
+	    {LogicalType::UBIGINT, LogicalTypeId::DECIMAL, LogicalType::DOUBLE}, LogicalType::DOUBLE, nullptr, nullptr,
+	    nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, BindDecimalPacSumAvg<true>));
 
 	loader.RegisterFunction(fcn_set);
 }
