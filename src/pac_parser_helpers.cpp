@@ -75,37 +75,6 @@ static string FormatColumnList(const vector<string> &columns) {
 	return result;
 }
 
-/**
- * ValidateColumnsExist: Validates that all columns exist in a table, throws exception if not
- *
- * @param table - The table catalog entry to search
- * @param column_names - List of column names to validate
- * @param table_name - Name of the table (for error messages)
- * @param context_msg - Optional context for error message
- *
- * Throws CatalogException with detailed error message if any columns are missing.
- */
-static void ValidateColumnsExist(const TableCatalogEntry &table, const vector<string> &column_names,
-                                 const string &table_name, const string &context_msg = "") {
-	auto missing = FindMissingColumns(table, column_names);
-	if (!missing.empty()) {
-		string error_msg;
-		if (missing.size() == 1) {
-			error_msg = "Column " + FormatColumnList(missing) + " does not exist in ";
-		} else {
-			error_msg = "Columns " + FormatColumnList(missing) + " do not exist in ";
-		}
-
-		if (context_msg.empty()) {
-			error_msg += "table '" + table_name + "'";
-		} else {
-			error_msg += context_msg;
-		}
-
-		throw CatalogException(error_msg);
-	}
-}
-
 // ============================================================================
 // Table name extraction
 // ============================================================================
@@ -397,11 +366,11 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 #ifdef DEBUG
 		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: Found existing metadata for " << metadata.table_name
 		          << ", links=" << existing->links.size() << ", protected=" << existing->protected_columns.size()
-		          << std::endl;
+		          << "\n";
 #endif
 	} else {
 #ifdef DEBUG
-		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: No existing metadata for " << metadata.table_name << std::endl;
+		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: No existing metadata for " << metadata.table_name << "\n";
 #endif
 	}
 
@@ -584,8 +553,9 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 				} else {
 					string cols_list;
 					for (size_t i = 0; i < normalized_drop_cols.size(); i++) {
-						if (i > 0)
+						if (i > 0) {
 							cols_list += ", ";
+						}
 						cols_list += "'" + normalized_drop_cols[i] + "'";
 					}
 					throw ParserException("No PAC LINK found on columns (" + cols_list + ")");

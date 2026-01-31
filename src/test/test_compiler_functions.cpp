@@ -705,32 +705,38 @@ int RunCompilerFunctionTests() {
 			find_get(*plan);
 
 			if (!get_t1) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 1: could not find LogicalGet for t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: could not find LogicalGet for t1"
+				          << "\n";
 				return 1;
 			}
 
 			// Get bindings from the scan node
 			auto bindings = get_t1->GetColumnBindings();
 			if (bindings.size() < 2) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 1: expected at least 2 bindings from t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: expected at least 2 bindings from t1"
+				          << "\n";
 				return 1;
 			}
 
 			// Check that both columns belong to t1
 			if (!ColumnBelongsToTable(*plan, "t1", bindings[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 0 should belong to t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 0 should belong to t1"
+				          << "\n";
 				return 1;
 			}
 			if (!ColumnBelongsToTable(*plan, "t1", bindings[1])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 1 should belong to t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 1 should belong to t1"
+				          << "\n";
 				return 1;
 			}
 			// Check that they don't belong to t2
 			if (ColumnBelongsToTable(*plan, "t2", bindings[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 0 should not belong to t2" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 1: column 0 should not belong to t2"
+				          << "\n";
 				return 1;
 			}
-			std::cerr << "PASS: ColumnBelongsToTable test 1 (simple scan)" << std::endl;
+			std::cerr << "PASS: ColumnBelongsToTable test 1 (simple scan)"
+			          << "\n";
 		}
 
 		// Test 2: Join - check columns from different tables
@@ -765,7 +771,8 @@ int RunCompilerFunctionTests() {
 			find_gets(*plan);
 
 			if (!get_t1 || !get_t2) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 2: could not find both LogicalGet nodes" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: could not find both LogicalGet nodes"
+				          << "\n";
 				return 1;
 			}
 
@@ -773,30 +780,36 @@ int RunCompilerFunctionTests() {
 			auto bindings_t2 = get_t2->GetColumnBindings();
 
 			if (bindings_t1.empty() || bindings_t2.empty()) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 2: no bindings found" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: no bindings found"
+				          << "\n";
 				return 1;
 			}
 
 			// Check t1 columns belong to t1 and not t2
 			if (!ColumnBelongsToTable(*plan, "t1", bindings_t1[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 2: t1 column should belong to t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t1 column should belong to t1"
+				          << "\n";
 				return 1;
 			}
 			if (ColumnBelongsToTable(*plan, "t2", bindings_t1[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 2: t1 column should not belong to t2" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t1 column should not belong to t2"
+				          << "\n";
 				return 1;
 			}
 
 			// Check t2 columns belong to t2 and not t1
 			if (!ColumnBelongsToTable(*plan, "t2", bindings_t2[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 2: t2 column should belong to t2" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t2 column should belong to t2"
+				          << "\n";
 				return 1;
 			}
 			if (ColumnBelongsToTable(*plan, "t1", bindings_t2[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 2: t2 column should not belong to t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 2: t2 column should not belong to t1"
+				          << "\n";
 				return 1;
 			}
-			std::cerr << "PASS: ColumnBelongsToTable test 2 (join)" << std::endl;
+			std::cerr << "PASS: ColumnBelongsToTable test 2 (join)"
+			          << "\n";
 		}
 
 		// Test 3: Three-way join
@@ -835,7 +848,7 @@ int RunCompilerFunctionTests() {
 
 			if (!get_t1 || !get_t2 || !get_t3) {
 				std::cerr << "FAIL: ColumnBelongsToTable test 3: could not find all three LogicalGet nodes"
-				          << std::endl;
+				          << "\n";
 				return 1;
 			}
 
@@ -845,25 +858,30 @@ int RunCompilerFunctionTests() {
 
 			// Verify each table's columns are correctly attributed
 			if (!ColumnBelongsToTable(*plan, "t1", bindings_t1[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 3: t1 column should belong to t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t1 column should belong to t1"
+				          << "\n";
 				return 1;
 			}
 			if (!ColumnBelongsToTable(*plan, "t2", bindings_t2[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 3: t2 column should belong to t2" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t2 column should belong to t2"
+				          << "\n";
 				return 1;
 			}
 			if (!ColumnBelongsToTable(*plan, "t3", bindings_t3[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 3: t3 column should belong to t3" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t3 column should belong to t3"
+				          << "\n";
 				return 1;
 			}
 
 			// Cross-check: t1 column shouldn't belong to t2 or t3
 			if (ColumnBelongsToTable(*plan, "t2", bindings_t1[0]) ||
 			    ColumnBelongsToTable(*plan, "t3", bindings_t1[0])) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 3: t1 column wrongly attributed" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 3: t1 column wrongly attributed"
+				          << "\n";
 				return 1;
 			}
-			std::cerr << "PASS: ColumnBelongsToTable test 3 (three-way join)" << std::endl;
+			std::cerr << "PASS: ColumnBelongsToTable test 3 (three-way join)"
+			          << "\n";
 		}
 
 		// Test 4: Non-existent table
@@ -892,23 +910,26 @@ int RunCompilerFunctionTests() {
 			find_get(*plan);
 
 			if (!get_t1) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 4: could not find LogicalGet for t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 4: could not find LogicalGet for t1"
+				          << "\n";
 				return 1;
 			}
 
 			auto bindings = get_t1->GetColumnBindings();
 			if (bindings.empty()) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 4: no bindings found" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 4: no bindings found"
+				          << "\n";
 				return 1;
 			}
 
 			// Check that the column doesn't belong to a non-existent table
 			if (ColumnBelongsToTable(*plan, "nonexistent_table", bindings[0])) {
 				std::cerr << "FAIL: ColumnBelongsToTable test 4: column should not belong to nonexistent table"
-				          << std::endl;
+				          << "\n";
 				return 1;
 			}
-			std::cerr << "PASS: ColumnBelongsToTable test 4 (non-existent table)" << std::endl;
+			std::cerr << "PASS: ColumnBelongsToTable test 4 (non-existent table)"
+			          << "\n";
 		}
 
 		// Test 5: Subquery with multiple tables
@@ -944,7 +965,7 @@ int RunCompilerFunctionTests() {
 
 			if (!get_t1 || !get_t2) {
 				std::cerr << "FAIL: ColumnBelongsToTable test 5: could not find both LogicalGet nodes in subquery"
-				          << std::endl;
+				          << "\n";
 				return 1;
 			}
 
@@ -952,23 +973,25 @@ int RunCompilerFunctionTests() {
 			auto bindings_t2 = get_t2->GetColumnBindings();
 
 			if (bindings_t1.empty() || bindings_t2.empty()) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 5: no bindings found" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 5: no bindings found"
+				          << "\n";
 				return 1;
 			}
 
 			// Verify columns are correctly attributed even in subquery
 			if (!ColumnBelongsToTable(*plan, "t1", bindings_t1[0])) {
 				std::cerr << "FAIL: ColumnBelongsToTable test 5: t1 column should belong to t1 in subquery"
-				          << std::endl;
+				          << "\n";
 				return 1;
 			}
 			if (!ColumnBelongsToTable(*plan, "t2", bindings_t2[0])) {
 				std::cerr << "FAIL: ColumnBelongsToTable test 5: t2 column should belong to t2 in subquery"
-				          << std::endl;
+				          << "\n";
 				return 1;
 			}
 			con.Rollback();
-			std::cerr << "PASS: ColumnBelongsToTable test 5 (subquery)" << std::endl;
+			std::cerr << "PASS: ColumnBelongsToTable test 5 (subquery)"
+			          << "\n";
 		}
 	}
 
@@ -993,7 +1016,8 @@ int RunCompilerFunctionTests() {
 		unique_ptr<LogicalOperator> plan;
 		ReplanWithoutOptimizers(*con.context, query, plan);
 		if (!plan) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 6: replan returned null plan" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: replan returned null plan"
+			          << "\n";
 			return 1;
 		}
 
@@ -1012,19 +1036,22 @@ int RunCompilerFunctionTests() {
 		find_agg(*plan);
 
 		if (!agg_node) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 6: could not find aggregate node" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: could not find aggregate node"
+			          << "\n";
 			return 1;
 		}
 
 		// Check the GROUP BY expression
 		if (agg_node->groups.empty()) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 6: no group expressions found" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: no group expressions found"
+			          << "\n";
 			return 1;
 		}
 
 		auto &group_expr = agg_node->groups[0];
 		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 6: group expression is not a column ref" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: group expression is not a column ref"
+			          << "\n";
 			return 1;
 		}
 
@@ -1053,7 +1080,8 @@ int RunCompilerFunctionTests() {
 		find_gets(*plan);
 
 		if (!get_t1 || !get_t2) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 6: could not find both LogicalGet nodes" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 6: could not find both LogicalGet nodes"
+			          << "\n";
 			return 1;
 		}
 
@@ -1065,12 +1093,13 @@ int RunCompilerFunctionTests() {
 		// The column should belong to at least one of the tables (t1 or t2)
 		if (!belongs_to_t1 && !belongs_to_t2) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 6: GROUP BY column should belong to either t1 or t2"
-			          << std::endl;
+			          << "\n";
 			return 1;
 		}
 
 		con.Rollback();
-		std::cerr << "PASS: ColumnBelongsToTable test 6 (three-way join with GROUP BY)" << std::endl;
+		std::cerr << "PASS: ColumnBelongsToTable test 6 (three-way join with GROUP BY)"
+		          << "\n";
 	}
 
 	// Test 7: Simple grouped aggregation - validate column-to-table bindings
@@ -1089,7 +1118,8 @@ int RunCompilerFunctionTests() {
 		unique_ptr<LogicalOperator> plan;
 		ReplanWithoutOptimizers(*con.context, query, plan);
 		if (!plan) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: replan returned null plan" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: replan returned null plan"
+			          << "\n";
 			return 1;
 		}
 
@@ -1111,7 +1141,8 @@ int RunCompilerFunctionTests() {
 		find_get(*plan);
 
 		if (!get_t1) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: could not find LogicalGet for t1" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: could not find LogicalGet for t1"
+			          << "\n";
 			return 1;
 		}
 
@@ -1130,19 +1161,22 @@ int RunCompilerFunctionTests() {
 		find_agg(*plan);
 
 		if (!agg_node) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: could not find aggregate node" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: could not find aggregate node"
+			          << "\n";
 			return 1;
 		}
 
 		// Verify GROUP BY expression (column 'a')
 		if (agg_node->groups.empty()) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: no group expressions found" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: no group expressions found"
+			          << "\n";
 			return 1;
 		}
 
 		auto &group_expr = agg_node->groups[0];
 		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: group expression is not a column ref" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: group expression is not a column ref"
+			          << "\n";
 			return 1;
 		}
 
@@ -1150,13 +1184,15 @@ int RunCompilerFunctionTests() {
 
 		// Verify that the GROUP BY column 'a' belongs to t1
 		if (!ColumnBelongsToTable(*plan, "t1", group_col_ref.binding)) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: GROUP BY column 'a' should belong to t1" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: GROUP BY column 'a' should belong to t1"
+			          << "\n";
 			return 1;
 		}
 
 		// Verify the aggregate expression (SUM(b))
 		if (agg_node->expressions.empty()) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: no aggregate expressions found" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: no aggregate expressions found"
+			          << "\n";
 			return 1;
 		}
 
@@ -1168,7 +1204,7 @@ int RunCompilerFunctionTests() {
 				    // Verify that column 'b' belongs to t1
 				    if (!ColumnBelongsToTable(*plan, "t1", col_ref.binding)) {
 					    std::cerr << "FAIL: ColumnBelongsToTable test 7: SUM(b) column 'b' should belong to t1"
-					              << std::endl;
+					              << "\n";
 					    found_b_column = false;
 				    } else {
 					    found_b_column = true;
@@ -1177,7 +1213,8 @@ int RunCompilerFunctionTests() {
 		}
 
 		if (!found_b_column) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 7: could not find or verify column 'b' in SUM" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 7: could not find or verify column 'b' in SUM"
+			          << "\n";
 			return 1;
 		}
 
@@ -1185,12 +1222,14 @@ int RunCompilerFunctionTests() {
 		auto bindings_t1 = get_t1->GetColumnBindings();
 		for (const auto &binding : bindings_t1) {
 			if (!ColumnBelongsToTable(*plan, "t1", binding)) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 7: binding from t1 should belong to t1" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 7: binding from t1 should belong to t1"
+				          << "\n";
 				return 1;
 			}
 			// Verify it doesn't belong to a non-existent table
 			if (ColumnBelongsToTable(*plan, "t2", binding)) {
-				std::cerr << "FAIL: ColumnBelongsToTable test 7: t1 binding should not belong to t2" << std::endl;
+				std::cerr << "FAIL: ColumnBelongsToTable test 7: t1 binding should not belong to t2"
+				          << "\n";
 				return 1;
 			}
 		}
@@ -1198,7 +1237,7 @@ int RunCompilerFunctionTests() {
 		con.Rollback();
 		std::cerr
 		    << "PASS: ColumnBelongsToTable test 7 (simple grouped aggregation SELECT a, SUM(b) FROM t1 GROUP BY a)"
-		    << std::endl;
+		    << "\n";
 	}
 
 	// Test 8: Join with projection of NON-join key should be allowed
@@ -1219,7 +1258,8 @@ int RunCompilerFunctionTests() {
 		unique_ptr<LogicalOperator> plan;
 		ReplanWithoutOptimizers(*con.context, query, plan);
 		if (!plan) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 8: replan returned null plan" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 8: replan returned null plan"
+			          << "\n";
 			return 1;
 		}
 
@@ -1238,19 +1278,22 @@ int RunCompilerFunctionTests() {
 		find_agg(*plan);
 
 		if (!agg_node) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 8: could not find aggregate node" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 8: could not find aggregate node"
+			          << "\n";
 			return 1;
 		}
 
 		// Verify GROUP BY expression references non_pu_table.y (NON-join key)
 		if (agg_node->groups.empty()) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 8: no group expressions found" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 8: no group expressions found"
+			          << "\n";
 			return 1;
 		}
 
 		auto &group_expr = agg_node->groups[0];
 		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 8: group expression is not a column ref" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 8: group expression is not a column ref"
+			          << "\n";
 			return 1;
 		}
 
@@ -1259,14 +1302,14 @@ int RunCompilerFunctionTests() {
 		// The GROUP BY column should belong to non_pu_table
 		if (!ColumnBelongsToTable(*plan, "non_pu_table", col_ref.binding)) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 8: GROUP BY column should belong to non_pu_table"
-			          << std::endl;
+			          << "\n";
 			return 1;
 		}
 
 		// Should NOT belong to pu_table
 		if (ColumnBelongsToTable(*plan, "pu_table", col_ref.binding)) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 8: GROUP BY column should not belong to pu_table"
-			          << std::endl;
+			          << "\n";
 			return 1;
 		}
 
@@ -1274,7 +1317,7 @@ int RunCompilerFunctionTests() {
 
 		con.Rollback();
 		std::cerr << "PASS: ColumnBelongsToTable test 8 (join with projection of non-join key from non-PU table)"
-		          << std::endl;
+		          << "\n";
 	}
 
 	// Test 9: Join key equivalence - projecting join key from non-PU table should be detected as exposing PU
@@ -1296,7 +1339,8 @@ int RunCompilerFunctionTests() {
 		unique_ptr<LogicalOperator> plan;
 		ReplanWithoutOptimizers(*con.context, query, plan);
 		if (!plan) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 9: replan returned null plan" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: replan returned null plan"
+			          << "\n";
 			return 1;
 		}
 
@@ -1315,19 +1359,22 @@ int RunCompilerFunctionTests() {
 		find_agg(*plan);
 
 		if (!agg_node) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 9: could not find aggregate node" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: could not find aggregate node"
+			          << "\n";
 			return 1;
 		}
 
 		// Verify GROUP BY expression references non_pu_table.x (JOIN KEY)
 		if (agg_node->groups.empty()) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 9: no group expressions found" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: no group expressions found"
+			          << "\n";
 			return 1;
 		}
 
 		auto &group_expr = agg_node->groups[0];
 		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
-			std::cerr << "FAIL: ColumnBelongsToTable test 9: group expression is not a column ref" << std::endl;
+			std::cerr << "FAIL: ColumnBelongsToTable test 9: group expression is not a column ref"
+			          << "\n";
 			return 1;
 		}
 
@@ -1336,7 +1383,7 @@ int RunCompilerFunctionTests() {
 		// The GROUP BY column physically comes from non_pu_table
 		if (!ColumnBelongsToTable(*plan, "non_pu_table", col_ref.binding)) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 9: GROUP BY column should belong to non_pu_table"
-			          << std::endl;
+			          << "\n";
 			return 1;
 		}
 
@@ -1345,13 +1392,13 @@ int RunCompilerFunctionTests() {
 		if (!ColumnBelongsToTable(*plan, "pu_table", col_ref.binding)) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 9: JOIN KEY column should ALSO belong to pu_table "
 			             "(due to join key equivalence)"
-			          << std::endl;
+			          << "\n";
 			return 1;
 		}
 
 		con.Rollback();
 		std::cerr << "PASS: ColumnBelongsToTable test 9 (join key equivalence - t2.x detected as belonging to PU table)"
-		          << std::endl;
+		          << "\n";
 	}
 
 	std::cout << "All ReplaceNode tests passed\n";

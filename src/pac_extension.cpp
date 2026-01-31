@@ -104,7 +104,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			}
 
 #ifdef DEBUG
-			std::cerr << "[PAC DEBUG] LoadInternal: Checking for metadata at: " << metadata_path << std::endl;
+			std::cerr << "[PAC DEBUG] LoadInternal: Checking for metadata at: " << metadata_path << "\n";
 #endif
 
 			// Try to load the metadata file if it exists
@@ -113,28 +113,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 				test_file.close();
 				PACMetadataManager::Get().LoadFromFile(metadata_path);
 #ifdef DEBUG
-				std::cerr << "[PAC DEBUG] LoadInternal: Successfully loaded metadata from " << metadata_path
-				          << std::endl;
+				std::cerr << "[PAC DEBUG] LoadInternal: Successfully loaded metadata from " << metadata_path << "\n";
 				std::cerr << "[PAC DEBUG] LoadInternal: Loaded " << PACMetadataManager::Get().GetAllTableNames().size()
-				          << " tables" << std::endl;
+				          << " tables"
+				          << "\n";
 #endif
 			} else {
 #ifdef DEBUG
-				std::cerr << "[PAC DEBUG] LoadInternal: Metadata file not found at " << metadata_path << std::endl;
+				std::cerr << "[PAC DEBUG] LoadInternal: Metadata file not found at " << metadata_path << "\n";
 #endif
 			}
 		} else {
 #ifdef DEBUG
-			std::cerr << "[PAC DEBUG] LoadInternal: No database paths available (in-memory DB?)" << std::endl;
+			std::cerr << "[PAC DEBUG] LoadInternal: No database paths available (in-memory DB?)"
+			          << "\n";
 #endif
 		}
 	} catch (const std::exception &e) {
 #ifdef DEBUG
-		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata: " << e.what() << std::endl;
+		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata: " << e.what() << "\n";
 #endif
 	} catch (...) {
 #ifdef DEBUG
-		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (unknown exception)" << std::endl;
+		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (unknown exception)"
+		          << "\n";
 #endif
 	}
 

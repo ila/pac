@@ -217,10 +217,10 @@ struct PacSumIntState {
 
 	union LevelStorage { // inline allocation optimization uses union to ensure it also works on 32-bits platforms
 		uint64_t *levels[PAC_APPROX_NUM_LEVELS]; // motivation: this is quite an array: 25*8bytes = 200 bytes
-		struct {                                 // try to reuse the back 128 bytes for the first allocated level
+		struct InlineStorage {                   // try to reuse the back 128 bytes for the first allocated level
 			void *_dummy[9];                     // do this only if allocated levels < 9
 			uint64_t inline_level[PAC_APPROX_SWAR_ELEMENTS]; // 128 bytes + 9*8 = 200
-		};
+		} inline_storage;
 	} u;
 
 	// Get the level index for a value based on its highest set bit
@@ -235,16 +235,16 @@ struct PacSumIntState {
 		if (k >= 9 && inline_level_idx >= 0) {
 			uint64_t *ext = // Need level >= 9 and have inline level? Copy it out first
 			    reinterpret_cast<uint64_t *>(allocator.Allocate(PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t)));
-			memcpy(ext, u.inline_level, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			memcpy(ext, u.inline_storage.inline_level, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 			u.levels[inline_level_idx] = ext;
 			inline_level_idx = -1;
-			// Clear u.inline_level area so u.levels[9..24] read as nullptr
-			memset(u.inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			// Clear u.inline_storage.inline_level area so u.levels[9..24] read as nullptr
+			memset(u.inline_storage.inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 		}
 		// ok, now  allocate
 		if (k < 9 && inline_level_idx < 0) { // Use inline if k < 9 and not yet used
-			u.levels[k] = u.inline_level;
-			memset(u.inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
+			u.levels[k] = u.inline_storage.inline_level;
+			memset(u.inline_storage.inline_level, 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
 			inline_level_idx = static_cast<int8_t>(k);
 		} else {
 			u.levels[k] = reinterpret_cast<uint64_t *>(allocator.Allocate(PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t)));
@@ -393,7 +393,7 @@ struct PacSumIntState {
 	T8 exact_total8;   // sum of values at level 8 since last flush (fits in T8 after flush)
 	T16 exact_total16; // sum of values at level 16 since last flush (fits in T16 after flush)
 	T32 exact_total32; // sum of values at level 32 since last flush (fits in T32 after flush)
-	T64 exact_total64; // sum of values at level 64 since last flush
+	T64 exact_total64; // sum of values at level 64 since last flush (fits in T64 after flush)
 
 	// All levels lazily allocated via arena allocator (nullptr if not allocated)
 	uint64_t *probabilistic_total8;    // 8 x uint64_t (64 bytes) when allocated, each holds 8 packed T8

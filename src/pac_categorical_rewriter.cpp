@@ -281,13 +281,6 @@ bool IsComparisonWithPacAggregate(Expression *expr, CategoricalPatternInfo &info
 	return IsComparisonWithPacAggregateWithPlan(expr, info, nullptr);
 }
 
-// Helper to check if we're inside an aggregate operator
-static bool IsInsideAggregate(LogicalOperator *op, LogicalOperator *root) {
-	// Simple check: if the operator itself is an aggregate, we're "inside" it
-	// For more complex cases, we'd need to track the path from root
-	return op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY;
-}
-
 // Helper to check if a filter's child is an aggregate that produces the given binding
 // This detects HAVING clauses where the comparison references the immediate child aggregate
 static bool IsHavingClausePattern(LogicalOperator *filter_op, const ColumnBinding &binding,
@@ -535,7 +528,7 @@ static void ReplacePacAggregatesWithCounters(LogicalOperator *op, ClientContext 
 					// Get the argument types from the existing children
 					vector<LogicalType> arg_types;
 					for (auto &child : bound_agg.children) {
-						arg_types.push_back(child->return_type);
+					arg_types.push_back(child->return_type);
 					}
 
 					// Find the best matching function
@@ -551,7 +544,6 @@ static void ReplacePacAggregatesWithCounters(LogicalOperator *op, ClientContext 
 						// Fall back to just changing the name and return type
 						bound_agg.function.name = counters_name;
 						bound_agg.function.return_type = LogicalType::LIST(LogicalType::DOUBLE);
-						bound_agg.return_type = LogicalType::LIST(LogicalType::DOUBLE);
 						agg_expr->return_type = LogicalType::LIST(LogicalType::DOUBLE);
 					} else {
 						// Get the bound function

@@ -167,9 +167,9 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 		// Don't save to file for in-memory databases
 		if (!metadata_path.empty()) {
 #ifdef DEBUG
-			std::cerr << "[PAC DEBUG] PACDDLBindFunction: Saving metadata to: " << metadata_path << std::endl;
+			std::cerr << "[PAC DEBUG] PACDDLBindFunction: Saving metadata to: " << metadata_path << "\n";
 			std::cerr << "[PAC DEBUG] PACDDLBindFunction: table_name=" << table_name
-			          << ", sql_to_execute.empty()=" << sql_to_execute.empty() << std::endl;
+			          << ", sql_to_execute.empty()=" << sql_to_execute.empty() << "\n";
 #endif
 			PACMetadataManager::Get().SaveToFile(metadata_path);
 		}

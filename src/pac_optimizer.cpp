@@ -54,7 +54,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	}
 
 #ifdef DEBUG
-	std::cerr << "[PAC DEBUG] DROP TABLE detected for table with PAC metadata: " << table_name << std::endl;
+	std::cerr << "[PAC DEBUG] DROP TABLE detected for table with PAC metadata: " << table_name << "\n";
 #endif
 
 	// Check if any other tables have PAC LINKs pointing to this table
@@ -101,7 +101,8 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 
 #ifdef DEBUG
 		std::cerr << "[PAC DEBUG] Removed PAC LINKs from table '" << other_table << "' that referenced dropped table '"
-		          << table_name << "'" << std::endl;
+		          << table_name << "'"
+		          << "\n";
 #endif
 	}
 
@@ -109,7 +110,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	metadata_mgr.RemoveTable(table_name);
 
 #ifdef DEBUG
-	std::cerr << "[PAC DEBUG] Removed PAC metadata for dropped table: " << table_name << std::endl;
+	std::cerr << "[PAC DEBUG] Removed PAC metadata for dropped table: " << table_name << "\n";
 #endif
 
 	// Save updated metadata to file
@@ -117,7 +118,8 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	if (!metadata_path.empty()) {
 		metadata_mgr.SaveToFile(metadata_path);
 #ifdef DEBUG
-		std::cerr << "[PAC DEBUG] Saved updated PAC metadata after DROP TABLE" << std::endl;
+		std::cerr << "[PAC DEBUG] Saved updated PAC metadata after DROP TABLE"
+		          << "\n";
 #endif
 	}
 }

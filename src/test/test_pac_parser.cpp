@@ -12,8 +12,8 @@ namespace duckdb {
 #define TEST_ASSERT(condition, message)                                                                                \
 	do {                                                                                                               \
 		if (!(condition)) {                                                                                            \
-			std::cerr << "FAILED: " << message << std::endl;                                                           \
-			std::cerr << "  at " << __FILE__ << ":" << __LINE__ << std::endl;                                          \
+			std::cerr << "FAILED: " << message << "\n";                                                                \
+			std::cerr << "  at " << __FILE__ << ":" << __LINE__ << "\n";                                               \
 			throw std::runtime_error(message);                                                                         \
 		}                                                                                                              \
 	} while (0)
@@ -515,39 +515,56 @@ void TestPACParser::TestDropTableCleanup() {
 }
 
 void TestPACParser::RunAllTests() {
-	std::cout << "Running TestJSONSerialization..." << std::endl;
+	std::cout << "Running TestJSONSerialization..."
+	          << "\n";
 	TestJSONSerialization();
-	std::cout << "PASSED: TestJSONSerialization" << std::endl;
+	std::cout << "PASSED: TestJSONSerialization"
+	          << "\n";
 
-	std::cout << "Running TestMetadataManager..." << std::endl;
+	std::cout << "Running TestMetadataManager..."
+	          << "\n";
 	TestMetadataManager();
-	std::cout << "PASSED: TestMetadataManager" << std::endl;
+	std::cout << "PASSED: TestMetadataManager"
+	          << "\n";
 
-	std::cout << "Running TestFilePersistence..." << std::endl;
+	std::cout << "Running TestFilePersistence..."
+	          << "\n";
 	TestFilePersistence();
-	std::cout << "PASSED: TestFilePersistence" << std::endl;
+	std::cout << "PASSED: TestFilePersistence"
+	          << "\n";
 
-	std::cout << "Running TestCreatePACTableParsing..." << std::endl;
+	std::cout << "Running TestCreatePACTableParsing..."
+	          << "\n";
 	TestCreatePACTableParsing();
-	std::cout << "PASSED: TestCreatePACTableParsing" << std::endl;
+	std::cout << "PASSED: TestCreatePACTableParsing"
+	          << "\n";
 
-	std::cout << "Running TestAlterTablePACParsing..." << std::endl;
+	std::cout << "Running TestAlterTablePACParsing..."
+	          << "\n";
 	TestAlterTablePACParsing();
-	std::cout << "PASSED: TestAlterTablePACParsing" << std::endl;
+	std::cout << "PASSED: TestAlterTablePACParsing"
+	          << "\n";
 
-	std::cout << "Running TestRegexPatterns..." << std::endl;
+	std::cout << "Running TestRegexPatterns..."
+	          << "\n";
 	TestRegexPatterns();
-	std::cout << "PASSED: TestRegexPatterns" << std::endl;
+	std::cout << "PASSED: TestRegexPatterns"
+	          << "\n";
 
-	std::cout << "Running TestDropPACConstraints..." << std::endl;
+	std::cout << "Running TestDropPACConstraints..."
+	          << "\n";
 	TestDropPACConstraints();
-	std::cout << "PASSED: TestDropPACConstraints" << std::endl;
+	std::cout << "PASSED: TestDropPACConstraints"
+	          << "\n";
 
-	std::cout << "Running TestDropTableCleanup..." << std::endl;
+	std::cout << "Running TestDropTableCleanup..."
+	          << "\n";
 	TestDropTableCleanup();
-	std::cout << "PASSED: TestDropTableCleanup" << std::endl;
+	std::cout << "PASSED: TestDropTableCleanup"
+	          << "\n";
 
-	std::cout << "\nAll tests passed!" << std::endl;
+	std::cout << "\nAll tests passed!"
+	          << "\n";
 }
 
 } // namespace duckdb

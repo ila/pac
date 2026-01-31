@@ -51,7 +51,7 @@ int RunPlanTraversalTests() {
 
 		// Test 2: FindPrivacyUnitGetNode - table not found should throw
 		try {
-			auto *get_node = FindPrivacyUnitGetNode(plan, "nonexistent_table");
+			(void)FindPrivacyUnitGetNode(plan, "nonexistent_table");
 			std::cerr << "FAIL: Should have thrown exception for nonexistent table\n";
 			failures++;
 		} catch (InternalException &) {
@@ -83,7 +83,7 @@ int RunPlanTraversalTests() {
 		auto plan2 = opt2.Optimize(std::move(planner2.plan));
 
 		try {
-			auto *agg = FindTopAggregate(plan2);
+			(void)FindTopAggregate(plan2);
 			std::cerr << "FAIL: Should have thrown exception when no aggregate exists\n";
 			failures++;
 		} catch (InternalException &) {

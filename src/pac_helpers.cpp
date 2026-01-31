@@ -756,8 +756,7 @@ static LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBindi
 
 			// Get left and right child bindings
 			auto left_count = op->children[0] ? op->children[0]->GetColumnBindings().size() : 0;
-			auto right_count =
-			    op->children.size() > 1 && op->children[1] ? op->children[1]->GetColumnBindings().size() : 0;
+			// Note: right_count could be used for validation but isn't needed for this logic
 
 			// Check if column comes from left child
 			if (current_column_index < left_count && op->children[0]) {
