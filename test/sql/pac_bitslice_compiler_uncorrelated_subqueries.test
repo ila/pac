@@ -176,8 +176,8 @@ ORDER BY
     cust_nation,
     l_year;
 ----
-FRANCE	GERMANY	1996	5400.0000
-GERMANY	FRANCE	1995	7200.0000
+FRANCE	GERMANY	1996	5387.0592
+GERMANY	FRANCE	1995	7182.7456
 
 # Test 2: TPC-H Q13-style query
 # Tests: Subquery with LEFT JOIN, COUNT with optional match, GROUP BY on outer query, nested aggregates
@@ -313,10 +313,10 @@ ORDER BY
     nation,
     o_year DESC;
 ----
-FRANCE	1996	-300.0000
-FRANCE	1995	-140.0000
+FRANCE	1996	-299.8272
+FRANCE	1995	-139.9808
 GERMANY	1996	0.0000
-GERMANY	1995	-420.0000
+GERMANY	1995	NULL
 
 # Test 5: TPC-H Q15-style query with CTE and subquery computing max from CTE
 # Tests: CTE with aggregate, subquery that computes max() from CTE (no base tables in subquery's scope)
@@ -352,7 +352,7 @@ WHERE
 ORDER BY
     s_suppkey;
 ----
-3	Supplier#003	5700.0000	NULL
+3	Supplier#003	5688.5248	NULL
 
 # Clean up
 statement ok

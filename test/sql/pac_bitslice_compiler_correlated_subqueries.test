@@ -232,7 +232,7 @@ WHERE
     )
     AND l_discount > 0.04;
 ----
-2100.00
+2099.52
 
 # Test correlated subquery where outer and inner both need separate joins to PU
 # This is a CORRELATED subquery (references outer table via l_partkey), unlike the IN clause which is uncorrelated

@@ -732,9 +732,9 @@ GetPosStateTotals(typename State::State *pos, double *buf) {
 	pos->GetTotalsAsDouble(buf);
 }
 
-// For signed int states: subtract neg_state totals from buf
+// For signed int states: subtract neg_state totals from buf, return neg count
 template <class State, bool SIGNED>
-inline typename std::enable_if<SIGNED && !std::is_same<typename State::State, PacSumDoubleState>::value>::type
+inline typename std::enable_if<SIGNED && !std::is_same<typename State::State, PacSumDoubleState>::value, uint64_t>::type
 SubtractNegStateTotals(State *wrapper, double *buf, uint64_t &key_hash, ArenaAllocator &allocator) {
 	if (auto *neg = wrapper->GetNegState()) {
 		double neg_buf[64] = {0};
@@ -744,13 +744,15 @@ SubtractNegStateTotals(State *wrapper, double *buf, uint64_t &key_hash, ArenaAll
 		for (int j = 0; j < 64; j++) {
 			buf[j] -= neg_buf[j];
 		}
+		return neg->exact_count;
 	}
+	return 0;
 }
-// For unsigned int states or double states: no-op
+// For unsigned int states or double states: no-op, return 0
 template <class State, bool SIGNED>
-inline typename std::enable_if<!SIGNED || std::is_same<typename State::State, PacSumDoubleState>::value>::type
+inline typename std::enable_if<!SIGNED || std::is_same<typename State::State, PacSumDoubleState>::value, uint64_t>::type
 SubtractNegStateTotals(State *, double *, uint64_t &, ArenaAllocator &) {
-	// No neg_state for unsigned types or double states
+	return 0; // No neg_state for unsigned types or double states
 }
 #endif
 

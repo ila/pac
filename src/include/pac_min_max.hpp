@@ -12,9 +12,6 @@
 #ifdef PAC_NOSIMD
 #define PAC_NOCASCADING 1
 #endif
-#ifdef PAC_NOCASCADING
-#define PAC_EXACTSUM 1
-#endif
 
 // PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w src/include/pac_min_max.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)

@@ -125,7 +125,7 @@ SELECT grp, MIN(quantity), MAX(quantity) FROM order_items GROUP BY grp ORDER BY 
 query II
 SELECT grp, SUM(weight) FROM shipments GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	7800
+0	NULL
 
 # ==============================================================================
 # Test 4: Multiple aggregates in single query
@@ -165,7 +165,7 @@ GROUP BY u.id
 ORDER BY u.id
 LIMIT 1;
 ----
-0	84	7800
+0	NULL	NULL
 
 # ==============================================================================
 # Test 7: Subquery with PAC LINK chain
@@ -216,7 +216,7 @@ GROUP BY s.grp
 ORDER BY s.grp
 LIMIT 1;
 ----
-0	84
+0	NULL
 
 # ==============================================================================
 # Test 10: Mixed - Some tables with PAC LINK present, some missing

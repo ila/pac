@@ -263,8 +263,9 @@ WHERE
 ORDER BY
     p_partkey;
 ----
-1	forest green
+2	forest blue
 3	ocean red
+4	forest yellow
 
 # ============================================================================
 # Test 3: Greater than or equal comparison
@@ -325,7 +326,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-1
+3
 
 # ============================================================================
 # Test 5: Equal comparison (rare but should work)
@@ -474,7 +475,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-3
+6
 
 # ============================================================================
 # Test 10: Categorical with COUNT aggregate
@@ -502,7 +503,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-0
+1
 
 # ============================================================================
 # Test 11: Categorical with AVG aggregate
@@ -528,7 +529,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-1
+2
 
 # ============================================================================
 # Test 12: Correlated categorical subquery with multiple tables
