@@ -528,7 +528,7 @@ static void ReplacePacAggregatesWithCounters(LogicalOperator *op, ClientContext 
 					// Get the argument types from the existing children
 					vector<LogicalType> arg_types;
 					for (auto &child : bound_agg.children) {
-					arg_types.push_back(child->return_type);
+						arg_types.push_back(child->return_type);
 					}
 
 					// Find the best matching function
