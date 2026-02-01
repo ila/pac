@@ -143,11 +143,22 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	}
 
 	// Run the PAC compatibility checks only if the plan is a projection, order by, or aggregate (i.e., a SELECT query)
-	if (!plan ||
-	    (plan->type != LogicalOperatorType::LOGICAL_PROJECTION && plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
-	     plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
-	     plan->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
-	     plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE)) {
+	// For EXPLAIN/EXPLAIN_ANALYZE, look at the child operator to decide whether to rewrite
+	if (!plan) {
+		return;
+	}
+
+	// Check if this is an EXPLAIN node - if so, we'll process its child
+	LogicalOperator *check_plan = plan.get();
+	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty()) {
+		check_plan = plan->children[0].get();
+	}
+
+	if (check_plan->type != LogicalOperatorType::LOGICAL_PROJECTION &&
+	    check_plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
+	    check_plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
+	    check_plan->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
+	    check_plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		return;
 	}
 	// Load configured PAC tables once
@@ -157,9 +168,13 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// convert unordered_set returned by ReadPacTablesFile to a vector for the compatibility check
 	vector<string> pac_table_list = PacTablesSetToVector(pac_tables);
 
+	// For EXPLAIN queries, we need to operate on the child plan
+	bool is_explain = (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty());
+	unique_ptr<LogicalOperator> &target_plan = is_explain ? plan->children[0] : plan;
+
 	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
 	// to PACRewriteQueryCheck. It now returns a PACCompatibilityResult with fk_paths and PKs.
-	PACCompatibilityResult check = PACRewriteQueryCheck(plan, input.context, pac_table_list, pac_info);
+	PACCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_table_list, pac_info);
 	// If no FK paths were found and no configured PAC tables were scanned, nothing to do.
 	// However, if the plan directly scans configured PAC tables (privacy units) we should still
 	// proceed with compilation even when no FK paths (or PKs) were discovered.
@@ -226,7 +241,7 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		// set replan flag for duration of compilation
 		ReplanGuard scoped2(pac_info);
 		// Call the compiler once with all privacy units
-		CompilePacBitsliceQuery(check, input, plan, privacy_units, normalized, query_hash);
+		CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
 	}
 }
 

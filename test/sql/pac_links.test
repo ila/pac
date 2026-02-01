@@ -171,8 +171,14 @@ LIMIT 1;
 # Test 7: Subquery with PAC LINK chain
 # ==============================================================================
 
-# Debug: Capture the plan to diagnose CI differences
-# (On AMD Ubuntu CI, this test gets 420 instead of 360 - checking if plan differs)
+# CI Debug: On AMD Ubuntu, this test gets 420 (exact) instead of 360 (PAC).
+# 420 = exact sum, 360 = PAC-transformed sum with noise.
+# If result is 420, PAC rewriter is not triggering (check PAC metadata setup).
+
+# Verify EXPLAIN shows pac_sum in the optimized logical plan
+statement ok
+SET explain_output='optimized_only';
+
 query II
 EXPLAIN SELECT grp, SUM(quantity) FROM order_items
 WHERE order_id IN (SELECT id FROM orders WHERE amount > 10)
@@ -180,7 +186,10 @@ GROUP BY grp
 ORDER BY grp
 LIMIT 1;
 ----
-physical_plan	<REGEX>:.*PERFECT_HASH_GROUP_BY.*Aggregates.*sum.*
+logical_opt	<REGEX>:.*pac_sum.*
+
+statement ok
+SET explain_output='physical_only';
 
 query II
 SELECT grp, SUM(quantity) FROM order_items
