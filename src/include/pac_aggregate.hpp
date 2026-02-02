@@ -15,6 +15,25 @@
 
 #define PAC_MAGIC_HASH 2983746509182734091ULL
 
+// Cross-platform popcount for 64-bit integers
+// MSVC doesn't have __builtin_popcountll, so we need to handle it differently
+#if defined(_MSC_VER)
+#include <intrin.h>
+static inline int pac_popcount64(uint64_t x) {
+#if defined(_M_X64) || defined(_M_AMD64)
+	return static_cast<int>(__popcnt64(x));
+#else
+	// Fallback for 32-bit MSVC: split into two 32-bit popcounts
+	return static_cast<int>(__popcnt(static_cast<uint32_t>(x)) + __popcnt(static_cast<uint32_t>(x >> 32)));
+#endif
+}
+#else
+// GCC/Clang have __builtin_popcountll
+static inline int pac_popcount64(uint64_t x) {
+	return __builtin_popcountll(x);
+}
+#endif
+
 namespace duckdb {
 
 // Header for PAC aggregate helpers and public declarations used across pac_* files.
@@ -42,7 +61,7 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, std::m
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
 // Uses rnd&63 as threshold, returns true if bitcount > threshold
 static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
-	return __builtin_popcountll(key_hash) > (rnd & 63);
+	return pac_popcount64(key_hash) > static_cast<int>(rnd & 63);
 }
 
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash.
