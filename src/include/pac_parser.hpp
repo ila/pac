@@ -5,13 +5,6 @@
 #ifndef PAC_PARSER_HPP
 #define PAC_PARSER_HPP
 
-// IMPORTANT: <regex> must be included BEFORE duckdb.hpp on Windows MSVC
-// because DuckDB defines its own std namespace that conflicts with <regex>
-#include <regex>
-#include <string>
-#include <vector>
-#include <unordered_map>
-
 #include "duckdb.hpp"
 #include "duckdb/parser/parser_extension.hpp"
 #include "duckdb/main/client_context.hpp"
