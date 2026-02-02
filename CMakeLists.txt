@@ -42,7 +42,8 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
-# Test runners
+# Test runners and benchmarks - only build for native platforms, not WASM
+if(NOT EMSCRIPTEN)
 # Build a single unified test executable that invokes all tests via src/test/test_runner.cpp
 add_executable(pac_test_runner
     src/test/test_runner.cpp
@@ -59,3 +60,4 @@ target_link_libraries(pac_tpch_benchmark ${EXTENSION_NAME})
 # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
 add_executable(pac_tpch_compiler_benchmark benchmark/pac_tpch_compiler_benchmark.cpp)
 target_link_libraries(pac_tpch_compiler_benchmark ${EXTENSION_NAME})
+endif()
