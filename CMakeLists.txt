@@ -42,8 +42,9 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
-# Test runners and benchmarks - only build for native platforms, not WASM
-if(NOT EMSCRIPTEN)
+# Test runners and benchmarks - only build for native platforms, not WASM or Windows
+# (Windows lacks unistd.h and other POSIX features used by the benchmark code)
+if(NOT EMSCRIPTEN AND NOT WIN32)
 # Build a single unified test executable that invokes all tests via src/test/test_runner.cpp
 add_executable(pac_test_runner
     src/test/test_runner.cpp
