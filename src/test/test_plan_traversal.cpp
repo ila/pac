@@ -7,7 +7,7 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/planner.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "../include/pac_plan_traversal.hpp"
+#include "query_processing/pac_plan_traversal.hpp"
 #include "include/test_plan_traversal.hpp"
 
 namespace duckdb {

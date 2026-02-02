@@ -1,6 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "core/pac_extension.hpp"
+#include "pac_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
