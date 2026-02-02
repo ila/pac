@@ -55,6 +55,8 @@ SELECT COUNT(*) FROM transactions;
 ----
 NULL
 
+# Note: transactions table has PROTECTED columns, so PAC compilation returns NULL for empty table
+
 # Test 4: CREATE PAC TABLE with multiple PAC clauses
 statement ok
 CREATE PAC TABLE employees (
@@ -71,6 +73,8 @@ query I
 SELECT COUNT(*) FROM employees;
 ----
 NULL
+
+# Note: employees table has PROTECTED columns, so PAC compilation returns NULL for empty table
 
 # Test 5: Regular CREATE TABLE (no PAC keywords) should still work
 statement ok
@@ -133,6 +137,8 @@ query I
 SELECT COUNT(*) FROM customers;
 ----
 NULL
+
+# Note: customers table has PROTECTED columns, so PAC compilation returns NULL for empty table
 
 # Test 11: Multiple PAC LINKs in one table
 statement ok

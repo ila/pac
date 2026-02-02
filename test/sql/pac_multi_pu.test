@@ -225,7 +225,7 @@ GROUP BY m.mid_id
 ORDER BY m.mid_id
 LIMIT 1
 ----
-0	NULL	NULL	NULL
+0	11469430	11469430	NULL
 
 # Test with multiple aggregates on same column but different PU combinations
 query III

@@ -219,7 +219,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacMinCountersFunctions(loader);
 	RegisterPacMaxCountersFunctions(loader);
 
-	// Register PAC categorical functions (pac_gt, pac_lt, pac_select, pac_mask_and, etc.)
+	// Register PAC categorical functions (pac_select, pac_filter, pac_mask_and, etc.)
 	RegisterPacCategoricalFunctions(loader);
 
 	// Register PAC parser extension

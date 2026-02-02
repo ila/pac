@@ -15,11 +15,11 @@
 // Rewriting:
 // - Replaces pac_* aggregates with pac_*_counters variants (return LIST<DOUBLE>)
 // - Wraps comparisons with pac_gt/pac_lt/etc. functions (return UBIGINT mask)
-// - Adds pac_select at the outermost filter to make final probabilistic decision
+// - Adds pac_filter at the outermost filter to make final probabilistic decision
 //
 // Example transformation for TPC-H Q20:
 //   BEFORE: ps_availqty > (SELECT 0.5 * pac_sum(hash, l_quantity) FROM ...)
-//   AFTER:  pac_select(pac_gt(ps_availqty, (SELECT 0.5 * pac_sum_counters(hash, l_quantity) FROM ...)))
+//   AFTER:  pac_filter(pac_gt(ps_availqty, (SELECT 0.5 * pac_sum_counters(hash, l_quantity) FROM ...)))
 //
 // Created by ila on 1/23/26.
 //
@@ -36,21 +36,29 @@ namespace duckdb {
 
 // Information about a detected categorical pattern
 struct CategoricalPatternInfo {
-	// The comparison expression that needs rewriting
+	// The comparison expression that needs rewriting (may be nullptr for general boolean expressions)
 	Expression *comparison_expr;
-	// The parent operator containing the comparison (usually a Filter)
+	// The parent operator containing the expression (usually a Filter)
 	LogicalOperator *parent_op;
 	// Index of the expression in the parent's expressions list
 	idx_t expr_index;
-	// The subquery expression containing the PAC aggregate
+	// The subquery expression containing the PAC aggregate (column ref to PAC result)
 	Expression *subquery_expr;
-	// Which side of the comparison has the subquery (0 = left, 1 = right)
+	// Which side of the comparison has the subquery (0 = left, 1 = right) - only for comparison patterns
 	idx_t subquery_side;
 	// The aggregate function name (e.g., "pac_sum", "pac_count")
 	string aggregate_name;
+	// The column binding that references the PAC aggregate result
+	ColumnBinding pac_binding;
+	// Whether we have a valid pac_binding
+	bool has_pac_binding;
+	// The original return type of the PAC aggregate expression (before conversion to LIST<DOUBLE>)
+	// Used by double-lambda rewrite to cast list elements back to the expected type
+	LogicalType original_return_type;
 
 	CategoricalPatternInfo()
-	    : comparison_expr(nullptr), parent_op(nullptr), expr_index(0), subquery_expr(nullptr), subquery_side(0) {
+	    : comparison_expr(nullptr), parent_op(nullptr), expr_index(0), subquery_expr(nullptr), subquery_side(0),
+	      has_pac_binding(false), original_return_type(LogicalType::DOUBLE) {
 	}
 };
 
@@ -73,10 +81,6 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 // Convert a PAC aggregate name to its counters variant
 // e.g., "pac_sum" -> "pac_sum_counters", "pac_count" -> "pac_count_counters"
 string GetCountersVariant(const string &aggregate_name);
-
-// Get the appropriate comparison function for a given comparison type
-// e.g., ExpressionType::COMPARE_GREATERTHAN -> "pac_gt"
-string GetPacComparisonFunction(ExpressionType comparison_type);
 
 } // namespace duckdb
 

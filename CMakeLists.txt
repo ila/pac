@@ -56,9 +56,11 @@ target_link_libraries(pac_test_runner ${EXTENSION_NAME})
 
 # TPCH + PAC benchmark runner
 add_executable(pac_tpch_benchmark benchmark/pac_tpch_benchmark.cpp)
+set_target_properties(pac_tpch_benchmark PROPERTIES EXCLUDE_FROM_ALL TRUE)
 target_link_libraries(pac_tpch_benchmark ${EXTENSION_NAME})
 
 # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
 add_executable(pac_tpch_compiler_benchmark benchmark/pac_tpch_compiler_benchmark.cpp)
+set_target_properties(pac_tpch_compiler_benchmark PROPERTIES EXCLUDE_FROM_ALL TRUE)
 target_link_libraries(pac_tpch_compiler_benchmark ${EXTENSION_NAME})
 endif()

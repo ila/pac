@@ -772,6 +772,8 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 
 // Unified FinalizeCounters template for pac_sum_counters and pac_avg_counters
 // DIVIDE_BY_COUNT=false for pac_sum_counters, true for pac_avg_counters
+// Returns LIST<DOUBLE> with exactly 64 elements.
+// Position j is NULL if key_hash bit j is 0, otherwise value * 2 (to compensate for 50% sampling).
 template <class State, bool SIGNED, bool DIVIDE_BY_COUNT>
 void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<State *>(states);
@@ -786,6 +788,7 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<double>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
 
 	// scale_divisor for DECIMAL support (used by pac_avg)
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
@@ -800,29 +803,43 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
-		double *dst = &child_data[i * 64];
+		double buf[64] = {0};
+		uint64_t key_hash = 0;
 		if (s) {
+			key_hash = s->key_hash;
 			uint64_t exact_count = s->exact_count;
 #ifndef PAC_SIGNEDSUM
 			// Double-sided mode: use SFINAE helpers
 			FlushPosState<State>(s, input.allocator);
-			GetPosStateTotals<State>(s, dst);
+			GetPosStateTotals<State>(s, buf);
 			// For signed int states, subtract neg_state counters element-wise
 			uint64_t dummy_key_hash = 0;
-			exact_count += SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], dst, dummy_key_hash, input.allocator);
+			exact_count += SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, dummy_key_hash, input.allocator);
 #else
 			s->Flush(input.allocator);
-			s->GetTotalsAsDouble(dst);
+			s->GetTotalsAsDouble(buf);
 #endif
 			// For pac_avg_counters: divide each counter by count
 			if (DIVIDE_BY_COUNT) {
 				double divisor = static_cast<double>(exact_count) * scale_divisor;
 				for (int j = 0; j < 64; j++) {
-					dst[j] /= divisor;
+					buf[j] /= divisor;
 				}
 			}
-		} else {
-			memset(dst, 0, 64 * sizeof(double));
+		}
+
+		// Copy counters to list: NULL where key_hash bit is 0, value (scaled) otherwise
+		// For pac_sum_counters: multiply by 2 to compensate for 50% sampling
+		// For pac_avg_counters: no scaling needed (both sum and count are halved, ratio unchanged)
+		idx_t base = i * 64;
+		for (int j = 0; j < 64; j++) {
+			if ((key_hash >> j) & 1ULL) {
+				// DIVIDE_BY_COUNT=true means pac_avg_counters, no scaling needed
+				// DIVIDE_BY_COUNT=false means pac_sum_counters, scale by 2
+				child_data[base + j] = DIVIDE_BY_COUNT ? buf[j] : buf[j] * 2.0;
+			} else {
+				child_validity.SetInvalid(base + j); // NULL for positions not sampled
+			}
 		}
 	}
 }
