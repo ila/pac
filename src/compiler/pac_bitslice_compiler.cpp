@@ -1377,7 +1377,8 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 						// Build hash expression
 						auto base_hash_expr = BuildXorHashFromPKs(input, node_get, fk_cols);
-						auto hash_input_expr = PropagatePKThroughProjections(*plan, node_get, std::move(base_hash_expr), target_agg);
+						auto hash_input_expr =
+						    PropagatePKThroughProjections(*plan, node_get, std::move(base_hash_expr), target_agg);
 
 						// Modify this aggregate with PAC functions
 						ModifyAggregatesWithPacFunctions(input, target_agg, hash_input_expr);
