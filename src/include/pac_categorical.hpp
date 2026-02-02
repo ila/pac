@@ -10,7 +10,7 @@
 //
 // Solution: The inner PAC aggregate returns ALL 64 counter values. The comparison is evaluated
 // against all 64 values, producing a 64-bit mask where bit i = 1 if subsample i satisfies the
-// condition. The final selection happens at the outermost categorical boundary using pac_select().
+// condition. The final selection happens at the outermost categorical boundary using pac_filter().
 //
 // Key Functions:
 // - pac_counters(hash, value) -> LIST[DOUBLE] : Returns all 64 counter values (no noise/selection yet)
@@ -18,7 +18,9 @@
 // - pac_lt(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value < counters[i]
 // - pac_gte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value >= counters[i]
 // - pac_lte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value <= counters[i]
-// - pac_select(mask, mi) -> BOOLEAN : Probabilistically select based on popcount(mask)/64
+// - pac_select(list<bool>) -> UBIGINT : Convert boolean list to bitmask
+// - pac_filter(mask) -> BOOLEAN : Probabilistically filter based on popcount(mask)/64
+// - pac_filter(list<bool>) -> BOOLEAN : Convert to mask, then filter
 //
 // Mask operations:
 // - AND: mask1 & mask2 (both conditions true)
@@ -57,14 +59,23 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader);
 // pac_eq(value, counters) -> mask where bit i = 1 if value == counters[i] (approx equality for floats)
 
 // ============================================================================
-// PAC_SELECT: Final selection based on mask
+// PAC_SELECT: Convert list<bool> to bitmask
 // ============================================================================
-// pac_select(mask) -> BOOLEAN
+// pac_select(list<bool>) -> UBIGINT
+// Converts a list of booleans to a 64-bit mask (true=1, false/NULL=0)
+
+// ============================================================================
+// PAC_FILTER: Final probabilistic selection based on mask
+// ============================================================================
+// pac_filter(mask) -> BOOLEAN
 // Returns true with probability proportional to popcount(mask)/64
 // This should be called at the outermost categorical query boundary
 
-// pac_select(mask, mi) -> BOOLEAN
-// Same as above but with explicit mi parameter (mi=0 means deterministic: returns bit 0)
+// pac_filter(mask, mi) -> BOOLEAN
+// Same as above but with explicit mi parameter (mi=0 means deterministic: majority voting)
+
+// pac_filter(list<bool>) -> BOOLEAN
+// Convenience: converts list to mask, then applies filter logic
 
 // ============================================================================
 // Helper: Check if a mask has any bits set (for NULL handling)

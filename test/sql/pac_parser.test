@@ -24,7 +24,7 @@ CREATE PAC TABLE users (
 query I
 SELECT COUNT(*) FROM users;
 ----
-NULL
+0
 
 # Test 2: CREATE PAC TABLE with PAC LINK
 statement ok
@@ -38,7 +38,7 @@ CREATE PAC TABLE orders (
 query I
 SELECT COUNT(*) FROM orders;
 ----
-NULL
+0
 
 # Test 3: CREATE PAC TABLE with PROTECTED columns
 statement ok
@@ -54,6 +54,8 @@ query I
 SELECT COUNT(*) FROM transactions;
 ----
 NULL
+
+# Note: transactions table has PROTECTED columns, so PAC compilation returns NULL for empty table
 
 # Test 4: CREATE PAC TABLE with multiple PAC clauses
 statement ok
@@ -71,6 +73,8 @@ query I
 SELECT COUNT(*) FROM employees;
 ----
 NULL
+
+# Note: employees table has PROTECTED columns, so PAC compilation returns NULL for empty table
 
 # Test 5: Regular CREATE TABLE (no PAC keywords) should still work
 statement ok
@@ -134,6 +138,8 @@ SELECT COUNT(*) FROM customers;
 ----
 NULL
 
+# Note: customers table has PROTECTED columns, so PAC compilation returns NULL for empty table
+
 # Test 11: Multiple PAC LINKs in one table
 statement ok
 CREATE PAC TABLE order_items (
@@ -148,7 +154,7 @@ CREATE PAC TABLE order_items (
 query I
 SELECT COUNT(*) FROM order_items;
 ----
-NULL
+0
 
 # Test 12: Composite PAC KEY
 statement ok

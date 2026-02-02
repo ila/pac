@@ -222,6 +222,7 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<double>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -236,13 +237,26 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 
 		double *dst = &child_data[i * 64];
 		if (s && s->initialized) {
-			// Write directly to destination and divide by 2 in same loop
-			// (min/max adds value to both deterministic and probabilistic counters)
+			uint64_t key_hash = s->key_hash;
+			// For each counter position, check if it was ever updated
 			for (idx_t j = 0; j < 64; j++) {
-				dst[j] = ToDouble(s->extremes[j]) * 0.5;
+				idx_t child_idx = i * 64 + j;
+				if ((key_hash >> j) & 1) {
+					// Counter was updated - return the value (no scaling for min/max)
+					dst[j] = ToDouble(s->extremes[j]);
+				} else {
+					// Counter was never updated - return NULL
+					// Assert that unset counters have their initialization value
+					D_ASSERT(s->extremes[j] ==
+					         (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
+					child_validity.SetInvalid(child_idx);
+				}
 			}
 		} else {
-			memset(dst, 0, 64 * sizeof(double));
+			// No state - all counters are NULL
+			for (idx_t j = 0; j < 64; j++) {
+				child_validity.SetInvalid(i * 64 + j);
+			}
 		}
 	}
 }

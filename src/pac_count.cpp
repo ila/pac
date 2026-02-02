@@ -193,6 +193,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 // it returns all 64 counters so the outer query can evaluate the comparison
 // against all subsamples and produce a mask.
 
+// Returns LIST<DOUBLE> with exactly 64 elements.
+// Position j is NULL if key_hash bit j is 0, otherwise value * 2 (to compensate for 50% sampling).
 void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 
@@ -206,6 +208,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<double>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
 	double buf[64];
 
 	for (idx_t i = 0; i < count; i++) {
@@ -218,6 +221,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
+		uint64_t key_hash = s ? s->key_hash : 0;
 		if (s) {
 			s->FlushLevel(); // flush uint8_t level into uint64_t totals
 			s->GetTotalsAsDouble(buf);
@@ -225,8 +229,15 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 			memset(buf, 0, sizeof(buf));
 		}
 
-		// Copy the 64 counters to the list (memcpy is faster than element-by-element)
-		memcpy(&child_data[i * 64], buf, sizeof(buf));
+		// Copy counters to list: NULL where key_hash bit is 0, value * 2 otherwise
+		idx_t base = i * 64;
+		for (int j = 0; j < 64; j++) {
+			if ((key_hash >> j) & 1ULL) {
+				child_data[base + j] = buf[j] * 2.0; // multiply by 2 to compensate for 50% sampling
+			} else {
+				child_validity.SetInvalid(base + j); // NULL for positions not sampled
+			}
+		}
 	}
 }
 

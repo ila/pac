@@ -385,6 +385,10 @@ struct PacMinMaxStateWrapper {
 		uint64_t cnt = n_buffered & BUF_MASK;
 		if (cnt > 0) {
 			State &dst = *dst_wrapper.EnsureState(a);
+			// OR the buffered hash values into key_hash
+			for (uint64_t i = 0; i < cnt; i++) {
+				dst.key_hash |= hash_buf[i];
+			}
 			FlushBufferInternal(dst, val_buf, hash_buf, cnt);
 			n_buffered &= ~BUF_MASK;
 		}

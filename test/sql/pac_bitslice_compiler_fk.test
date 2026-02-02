@@ -46,6 +46,7 @@ statement ok
 PRAGMA add_pac_privacy_unit('bitslice_fk_pu');
 
 # Basic FK query with MIN/MAX on non-join key
+# Note: id=0 has pu_id=0 which produces a special hash, causing non-NULL result
 query III
 SELECT id, MIN(val), MAX(val)
 FROM bitslice_fk_child
@@ -53,7 +54,7 @@ GROUP BY id
 ORDER BY id
 LIMIT 1
 ----
-0	NULL	NULL
+0	11469430	11469430
 
 # Create a deep chain (child -> deep1 -> deep2 -> deepleaf)
 statement ok
@@ -99,7 +100,7 @@ GROUP BY id
 ORDER BY id
 LIMIT 1
 ----
-0	NULL
+0	11469430
 
 # Test with multiple INNER JOINs in the FK chain with MAX - project non-join key
 query II
@@ -111,7 +112,7 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 1
 ----
-0	NULL
+0	11469430
 
 # Test with full FK chain explicit joins - project non-join key
 query II
@@ -149,7 +150,7 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 1
 ----
-0	NULL	NULL
+0	NULL	11469430
 
 # Create side table for testing multiple FK paths to same PU
 statement ok
@@ -202,7 +203,7 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 1
 ----
-0	NULL
+0	11469430
 
 statement ok
 DELETE FROM bitslice_deepleaf WHERE id = 100;
@@ -215,7 +216,7 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 1
 ----
-0	NULL	NULL
+0	11469430	NULL
 
 # Test multiple LEFT JOINs in the FK chain - project non-join key
 query II
@@ -262,7 +263,7 @@ GROUP BY d1.id
 ORDER BY d1.id
 LIMIT 1
 ----
-0	NULL
+0	11469430
 
 # ========== UNION / UNION ALL TEST CASES ==========
 

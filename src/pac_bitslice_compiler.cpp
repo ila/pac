@@ -1536,11 +1536,15 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
                              const string &query, const string &query_hash) {
 
 #ifdef DEBUG
-	Printer::Print("=== PAC COMPILATION START ===");
+	Printer::Print("=== PAC BITSLICE COMPILATION ===");
+	Printer::Print("Query hash: " + query_hash);
+	Printer::Print("Query: " + query.substr(0, 100) + (query.length() > 100 ? "..." : ""));
 	Printer::Print("Privacy units: " + std::to_string(privacy_units.size()));
 	for (auto &pu : privacy_units) {
 		Printer::Print("  " + pu);
 	}
+	Printer::Print("Scanned PU tables: " + std::to_string(check.scanned_pu_tables.size()));
+	Printer::Print("Scanned non-PU tables: " + std::to_string(check.scanned_non_pu_tables.size()));
 #endif
 
 	// Generate filename with all PU names concatenated
@@ -1625,7 +1629,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// ============================================================================
 	// After the standard PAC transformation, check if this is a categorical query
 	// (outer query compares against inner PAC aggregate without its own aggregate).
-	// If so, rewrite to use _counters variants and pac_select for probabilistic filtering.
+	// If so, rewrite to use _counters variants and pac_filter for probabilistic filtering.
 	vector<CategoricalPatternInfo> categorical_patterns;
 	if (IsCategoricalQuery(plan, categorical_patterns)) {
 #ifdef DEBUG
