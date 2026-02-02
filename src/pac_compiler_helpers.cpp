@@ -264,9 +264,15 @@ void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> 
 
 	// Convert target PUs set to vector
 	target_pus_out.assign(unique_target_pus.begin(), unique_target_pus.end());
+	// Sort for deterministic behavior across platforms (unordered_set iteration order is not guaranteed)
+	std::sort(target_pus_out.begin(), target_pus_out.end());
+
+	// Convert all_tables_in_paths to a sorted vector for deterministic iteration
+	vector<string> sorted_tables_in_paths(all_tables_in_paths.begin(), all_tables_in_paths.end());
+	std::sort(sorted_tables_in_paths.begin(), sorted_tables_in_paths.end());
 
 	// For each table in all paths, check whether a GET is already present
-	for (auto &table_in_path : all_tables_in_paths) {
+	for (auto &table_in_path : sorted_tables_in_paths) {
 		bool found_get = false;
 		for (auto &t : check.scanned_pu_tables) {
 			if (t == table_in_path) {

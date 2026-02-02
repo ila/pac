@@ -112,13 +112,13 @@ ALTER PAC TABLE reviews ADD PROTECTED (rating);
 
 # Test 9: Save and load PAC metadata
 statement ok
-PRAGMA save_pac_metadata('/tmp/pac_metadata_test.json');
+PRAGMA save_pac_metadata('__TEST_DIR__/pac_metadata_test.json');
 
 statement ok
 PRAGMA clear_pac_metadata;
 
 statement ok
-PRAGMA load_pac_metadata ('/tmp/pac_metadata_test.json');
+PRAGMA load_pac_metadata ('__TEST_DIR__/pac_metadata_test.json');
 
 # Test 10: CREATE PAC TABLE with IF NOT EXISTS
 statement ok
@@ -333,13 +333,13 @@ ALTER PAC TABLE accumulate_test ADD PROTECTED (col3);
 
 # Test 31: Verify metadata persistence and reload
 statement ok
-PRAGMA save_pac_metadata('/tmp/pac_edge_case_test.json');
+PRAGMA save_pac_metadata('__TEST_DIR__/pac_edge_case_test.json');
 
 statement ok
 PRAGMA clear_pac_metadata;
 
 statement ok
-PRAGMA load_pac_metadata('/tmp/pac_edge_case_test.json');
+PRAGMA load_pac_metadata('__TEST_DIR__/pac_edge_case_test.json');
 
 # Cleanup edge case tests
 statement ok
@@ -550,13 +550,13 @@ DROP TABLE cleanup_test;
 # The link from cleanup_link_test should be automatically removed
 # Verify by saving and reloading metadata
 statement ok
-PRAGMA save_pac_metadata('/tmp/pac_drop_test.json');
+PRAGMA save_pac_metadata('__TEST_DIR__/pac_drop_test.json');
 
 statement ok
 PRAGMA clear_pac_metadata;
 
 statement ok
-PRAGMA load_pac_metadata('/tmp/pac_drop_test.json');
+PRAGMA load_pac_metadata('__TEST_DIR__/pac_drop_test.json');
 
 # cleanup_link_test should still exist but without the link to cleanup_test
 # We can't directly verify this in SQL, but the metadata should be cleaned up
