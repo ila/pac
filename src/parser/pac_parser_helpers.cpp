@@ -1,0 +1,605 @@
+//
+// PAC Parser Helpers
+//
+// This file implements SQL parsing and clause extraction for PAC statements.
+// It handles parsing of CREATE PAC TABLE and ALTER PAC TABLE statements,
+// extracting PAC-specific clauses (PAC KEY, PAC LINK, PROTECTED), and
+// stripping these clauses to produce valid SQL for DuckDB's standard parser.
+//
+// Created by refactoring pac_parser.cpp on 1/22/26.
+//
+
+// IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
+// because DuckDB defines its own std namespace that conflicts with <regex>
+#include <regex>
+
+#include "parser/pac_parser.hpp"
+#include "parser/pac_parser_helpers.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/main/database_manager.hpp"
+
+namespace duckdb {
+
+// ============================================================================
+// Helper functions for column validation
+// ============================================================================
+
+/**
+ * FindMissingColumns: Checks which columns from a list don't exist in a table
+ *
+ * @param table - The table catalog entry to search
+ * @param column_names - List of column names to validate
+ * @return Vector of column names that were NOT found in the table
+ *
+ * This function performs case-insensitive column name matching.
+ */
+static vector<string> FindMissingColumns(const TableCatalogEntry &table, const vector<string> &column_names) {
+	vector<string> missing;
+	for (const auto &col_name : column_names) {
+		bool found = false;
+		for (auto &col : table.GetColumns().Logical()) {
+			if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(col_name)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			missing.push_back(col_name);
+		}
+	}
+	return missing;
+}
+
+/**
+ * FormatColumnList: Formats a list of column names for error messages
+ *
+ * Examples:
+ *   []           -> ""
+ *   ["col1"]     -> "'col1'"
+ *   ["a", "b"]   -> "'a', 'b'"
+ */
+static string FormatColumnList(const vector<string> &columns) {
+	if (columns.empty()) {
+		return "";
+	}
+	if (columns.size() == 1) {
+		return "'" + columns[0] + "'";
+	}
+
+	string result;
+	for (size_t i = 0; i < columns.size(); i++) {
+		if (i > 0) {
+			result += ", ";
+		}
+		result += "'" + columns[i] + "'";
+	}
+	return result;
+}
+
+// ============================================================================
+// Table name extraction
+// ============================================================================
+
+/**
+ * ExtractTableName: Extracts table name from CREATE or ALTER TABLE statement
+ *
+ * Handles:
+ *   - CREATE TABLE table_name ...
+ *   - CREATE PAC TABLE table_name ...
+ *   - CREATE TABLE IF NOT EXISTS table_name ...
+ *   - ALTER TABLE table_name ...
+ */
+string PACParserExtension::ExtractTableName(const string &sql, bool is_create) {
+	if (is_create) {
+		// Match: CREATE [PAC] TABLE [IF NOT EXISTS] table_name
+		std::regex create_regex(R"(create\s+(?:pac\s+)?table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z_][a-zA-Z0-9_]*))");
+		std::smatch match;
+		string sql_lower = StringUtil::Lower(sql);
+		if (std::regex_search(sql_lower, match, create_regex)) {
+			return match[1].str();
+		}
+	} else {
+		// Match: ALTER TABLE table_name
+		std::regex alter_regex(R"(alter\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+		std::smatch match;
+		string sql_lower = StringUtil::Lower(sql);
+		if (std::regex_search(sql_lower, match, alter_regex)) {
+			return match[1].str();
+		}
+	}
+	return "";
+}
+
+// ============================================================================
+// PAC clause extraction
+// ============================================================================
+
+/**
+ * ExtractPACPrimaryKey: Parses PAC KEY clause
+ *
+ * Syntax: PAC KEY (col1, col2, ...)
+ *
+ * Supports composite keys (multiple columns).
+ */
+bool PACParserExtension::ExtractPACPrimaryKey(const string &clause, vector<string> &pk_columns) {
+	// Match: PAC KEY (col1, col2, ...)
+	std::regex pk_regex(R"(pac\s+key\s*\(\s*([^)]+)\s*\))");
+	std::smatch match;
+	string clause_lower = StringUtil::Lower(clause);
+
+	if (std::regex_search(clause_lower, match, pk_regex)) {
+		string cols_str = match[1].str();
+		// Split by comma
+		auto cols = StringUtil::Split(cols_str, ',');
+		for (auto &col : cols) {
+			StringUtil::Trim(col);
+			if (!col.empty()) {
+				pk_columns.push_back(col);
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+/**
+ * ExtractPACLink: Parses PAC LINK clause
+ *
+ * Syntax: PAC LINK (local_col1, local_col2, ...) REFERENCES table(ref_col1, ref_col2, ...)
+ *
+ * This defines a foreign key relationship for PAC. The number of local columns
+ * must match the number of referenced columns (composite key support).
+ */
+bool PACParserExtension::ExtractPACLink(const string &clause, PACLink &link) {
+	// Match: PAC LINK (col1, col2, ...) REFERENCES table_name(ref_col1, ref_col2, ...)
+	// Support both single and composite foreign keys
+	std::regex link_regex(
+	    R"(pac\s+link\s*\(\s*([^)]+)\s*\)\s+references\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([^)]+)\s*\))");
+	std::smatch match;
+	string clause_lower = StringUtil::Lower(clause);
+
+	if (std::regex_search(clause_lower, match, link_regex)) {
+		// Parse local columns (comma-separated)
+		string local_cols_str = match[1].str();
+		auto local_cols = StringUtil::Split(local_cols_str, ',');
+		for (auto &col : local_cols) {
+			StringUtil::Trim(col);
+			if (!col.empty()) {
+				link.local_columns.push_back(col);
+			}
+		}
+
+		// Parse referenced table
+		link.referenced_table = match[2].str();
+
+		// Parse referenced columns (comma-separated)
+		string ref_cols_str = match[3].str();
+		auto ref_cols = StringUtil::Split(ref_cols_str, ',');
+		for (auto &col : ref_cols) {
+			StringUtil::Trim(col);
+			if (!col.empty()) {
+				link.referenced_columns.push_back(col);
+			}
+		}
+
+		// Validate that number of local columns matches number of referenced columns
+		if (link.local_columns.size() != link.referenced_columns.size()) {
+			return false;
+		}
+
+		return !link.local_columns.empty();
+	}
+	return false;
+}
+
+/**
+ * ExtractProtectedColumns: Parses PROTECTED clause
+ *
+ * Syntax: PROTECTED (col1, col2, ...)
+ *
+ * Protected columns are those that contain sensitive data and need PAC protection.
+ */
+bool PACParserExtension::ExtractProtectedColumns(const string &clause, vector<string> &protected_cols) {
+	// Match: PROTECTED (col1, col2, ...)
+	std::regex protected_regex(R"(protected\s*\(\s*([^)]+)\s*\))");
+	std::smatch match;
+	string clause_lower = StringUtil::Lower(clause);
+
+	if (std::regex_search(clause_lower, match, protected_regex)) {
+		string cols_str = match[1].str();
+		auto cols = StringUtil::Split(cols_str, ',');
+		for (auto &col : cols) {
+			StringUtil::Trim(col);
+			if (!col.empty()) {
+				protected_cols.push_back(col);
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+/**
+ * StripPACClauses: Removes all PAC-specific clauses from SQL
+ *
+ * This is necessary because DuckDB's standard parser doesn't understand PAC syntax.
+ * We remove PAC clauses and execute the "clean" SQL, while storing PAC metadata separately.
+ *
+ * Removed clauses:
+ *   - PAC KEY (...)
+ *   - PAC LINK (...) REFERENCES table(...)
+ *   - PROTECTED (...)
+ */
+string PACParserExtension::StripPACClauses(const string &sql) {
+	string result = sql;
+
+	// Remove PAC KEY clauses (case-insensitive)
+	result = std::regex_replace(
+	    result, std::regex(R"(,?\s*[Pp][Aa][Cc]\s+[Kk][Ee][Yy]\s*\([^)]+\)\s*,?)", std::regex_constants::icase), " ");
+
+	// Remove PAC LINK clauses (case-insensitive)
+	result = std::regex_replace(
+	    result,
+	    std::regex(
+	        R"(,?\s*[Pp][Aa][Cc]\s+[Ll][Ii][Nn][Kk]\s*\([^)]+\)\s+[Rr][Ee][Ff][Ee][Rr][Ee][Nn][Cc][Ee][Ss]\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]+\)\s*,?)",
+	        std::regex_constants::icase),
+	    " ");
+
+	// Remove PROTECTED clauses (case-insensitive)
+	result = std::regex_replace(
+	    result,
+	    std::regex(R"(,?\s*[Pp][Rr][Oo][Tt][Ee][Cc][Tt][Ee][Dd]\s*\([^)]+\)\s*,?)", std::regex_constants::icase), " ");
+
+	// Clean up multiple spaces and trailing commas
+	result = std::regex_replace(result, std::regex(R"(\s+)"), " ");
+	result = std::regex_replace(result, std::regex(R"(,\s*,)"), ",");
+	result = std::regex_replace(result, std::regex(R"(\(\s*,)"), "(");
+	result = std::regex_replace(result, std::regex(R"(,\s*\))"), ")");
+
+	return result;
+}
+
+// ============================================================================
+// SQL statement parsing
+// ============================================================================
+
+/**
+ * ParseCreatePACTable: Parses CREATE PAC TABLE statement
+ *
+ * Syntax:
+ *   CREATE PAC TABLE table_name (
+ *     col1 INTEGER,
+ *     col2 VARCHAR,
+ *     PAC KEY (col1),
+ *     PAC LINK (col2) REFERENCES other_table(other_col),
+ *     PROTECTED (col1, col2)
+ *   );
+ *
+ * Returns:
+ *   - stripped_sql: SQL with PAC clauses removed
+ *   - metadata: Extracted PAC metadata (keys, links, protected columns)
+ */
+bool PACParserExtension::ParseCreatePACTable(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
+	string query_lower = StringUtil::Lower(query);
+
+	// Check if this is a CREATE PAC TABLE statement
+	if (query_lower.find("create pac table") == string::npos && query_lower.find("create table") == string::npos) {
+		return false;
+	}
+
+	// Extract table name
+	metadata.table_name = ExtractTableName(query, true);
+	if (metadata.table_name.empty()) {
+		return false;
+	}
+
+	// Check if any PAC clauses exist
+	bool has_pac_clauses = query_lower.find("pac key") != string::npos ||
+	                       query_lower.find("pac link") != string::npos ||
+	                       query_lower.find("protected") != string::npos;
+
+	if (!has_pac_clauses && query_lower.find("create pac table") == string::npos) {
+		return false;
+	}
+
+	// Extract PAC clauses
+	ExtractPACPrimaryKey(query, metadata.primary_key_columns);
+
+	// Extract all PAC LINK clauses
+	std::regex link_regex(R"(pac\s+link\s*\([^)]+\)\s+references\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]+\))");
+	auto begin = std::sregex_iterator(query_lower.begin(), query_lower.end(), link_regex);
+	auto end = std::sregex_iterator();
+	for (auto it = begin; it != end; ++it) {
+		PACLink link;
+		if (ExtractPACLink((*it).str(), link)) {
+			metadata.links.push_back(link);
+		}
+	}
+
+	// Extract protected columns
+	ExtractProtectedColumns(query, metadata.protected_columns);
+
+	// Strip PAC clauses and replace "CREATE PAC TABLE" with "CREATE TABLE"
+	stripped_sql = StripPACClauses(query);
+	stripped_sql = std::regex_replace(stripped_sql, std::regex(R"(create\s+pac\s+table)", std::regex_constants::icase),
+	                                  "CREATE TABLE");
+
+	return true;
+}
+
+/**
+ * ParseAlterTableAddPAC: Parses ALTER PAC TABLE ... ADD ... statement
+ *
+ * Syntax:
+ *   ALTER PAC TABLE table_name ADD PAC KEY (col1);
+ *   ALTER PAC TABLE table_name ADD PAC LINK (col1) REFERENCES other(col2);
+ *   ALTER PAC TABLE table_name ADD PROTECTED (col1, col2);
+ *
+ * This operation is metadata-only (no actual DDL executed). It merges new
+ * metadata with existing metadata for the table.
+ *
+ * Validation:
+ *   - Columns must exist in the table
+ *   - Protected columns can't be added twice (idempotency check)
+ *   - PAC LINKs can't conflict (same local columns to different targets)
+ */
+bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
+	string query_lower = StringUtil::Lower(query);
+
+	// Check if this is an ALTER PAC TABLE statement
+	// This is a PAC-specific syntax: ALTER PAC TABLE table_name ADD PAC KEY/LINK/PROTECTED
+	if (query_lower.find("alter pac table") == string::npos) {
+		return false;
+	}
+
+	// Extract table name - for ALTER PAC TABLE, the table name comes after "alter pac table"
+	std::regex alter_pac_regex(R"(alter\s+pac\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+	std::smatch match;
+	if (!std::regex_search(query_lower, match, alter_pac_regex)) {
+		return false;
+	}
+	metadata.table_name = match[1].str();
+
+	// Get existing metadata if any
+	auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
+	if (existing) {
+		metadata = *existing;
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: Found existing metadata for " << metadata.table_name
+		          << ", links=" << existing->links.size() << ", protected=" << existing->protected_columns.size()
+		          << "\n";
+#endif
+	} else {
+#ifdef DEBUG
+		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: No existing metadata for " << metadata.table_name << "\n";
+#endif
+	}
+
+	// Check for PAC-related keywords
+	bool has_pac_key = query_lower.find("pac key") != string::npos;
+	bool has_pac_link = query_lower.find("pac link") != string::npos;
+	bool has_protected = query_lower.find("protected") != string::npos;
+
+	// Extract and merge new PAC clauses
+	if (has_pac_key) {
+		vector<string> new_pk_cols;
+		if (ExtractPACPrimaryKey(query, new_pk_cols)) {
+			// Only add columns that don't already exist
+			for (const auto &col : new_pk_cols) {
+				if (std::find(metadata.primary_key_columns.begin(), metadata.primary_key_columns.end(), col) ==
+				    metadata.primary_key_columns.end()) {
+					metadata.primary_key_columns.push_back(col);
+				}
+			}
+		}
+	}
+
+	// Extract PAC LINK clauses
+	if (has_pac_link) {
+		std::regex link_regex(R"(pac\s+link\s*\([^)]+\)\s+references\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]+\))",
+		                      std::regex_constants::icase);
+		auto begin = std::sregex_iterator(query.begin(), query.end(), link_regex);
+		auto end = std::sregex_iterator();
+		for (auto it = begin; it != end; ++it) {
+			PACLink link;
+			if (ExtractPACLink((*it).str(), link)) {
+				// Check if a link already exists on these local columns (to a different table or columns)
+				for (const auto &existing_link : metadata.links) {
+					if (existing_link.local_columns == link.local_columns) {
+						// Check if it's exactly the same link (same target table and columns)
+						if (StringUtil::Lower(existing_link.referenced_table) ==
+						        StringUtil::Lower(link.referenced_table) &&
+						    existing_link.referenced_columns == link.referenced_columns) {
+							// This is the exact same link - skip it (idempotent)
+							continue;
+						}
+						// Different target - this is an error
+						throw ParserException("Column(s) already have a PAC LINK defined. A column or set of columns "
+						                      "can only reference one target.");
+					}
+				}
+
+				// Add the link if it doesn't conflict
+				bool link_exists = false;
+				for (const auto &existing_link : metadata.links) {
+					if (existing_link.local_columns == link.local_columns &&
+					    StringUtil::Lower(existing_link.referenced_table) == StringUtil::Lower(link.referenced_table) &&
+					    existing_link.referenced_columns == link.referenced_columns) {
+						link_exists = true;
+						break;
+					}
+				}
+				if (!link_exists) {
+					metadata.links.push_back(link);
+				}
+			}
+		}
+	}
+
+	// Extract protected columns
+	if (has_protected) {
+		vector<string> new_protected_cols;
+		if (ExtractProtectedColumns(query, new_protected_cols)) {
+			// Check for duplicates in the new protected columns being added
+			for (size_t i = 0; i < new_protected_cols.size(); i++) {
+				for (size_t j = i + 1; j < new_protected_cols.size(); j++) {
+					if (StringUtil::Lower(new_protected_cols[i]) == StringUtil::Lower(new_protected_cols[j])) {
+						throw ParserException("Duplicate protected column '" + new_protected_cols[i] +
+						                      "' in ALTER PAC TABLE statement");
+					}
+				}
+			}
+
+			// Only add columns that don't already exist
+			for (const auto &col : new_protected_cols) {
+				bool already_protected = false;
+				for (const auto &existing_col : metadata.protected_columns) {
+					if (StringUtil::Lower(existing_col) == StringUtil::Lower(col)) {
+						already_protected = true;
+						break;
+					}
+				}
+				if (already_protected) {
+					throw ParserException("Column '" + col + "' is already marked as protected");
+				}
+				metadata.protected_columns.push_back(col);
+			}
+		}
+	}
+
+	// For ALTER PAC TABLE, we only update metadata, no actual DDL execution needed
+	stripped_sql = "";
+
+	return true;
+}
+
+/**
+ * ParseAlterTableDropPAC: Parses ALTER PAC TABLE ... DROP ... statement
+ *
+ * Syntax:
+ *   ALTER PAC TABLE table_name DROP PAC LINK (col1);
+ *   ALTER PAC TABLE table_name DROP PROTECTED (col1, col2);
+ *
+ * This operation is metadata-only (no actual DDL executed). It removes
+ * metadata entries from the table's metadata.
+ *
+ * Validation:
+ *   - Table must have existing metadata
+ *   - Columns/links must exist in metadata (can't drop non-existent entries)
+ */
+bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &stripped_sql, PACTableMetadata &metadata) {
+	string query_lower = StringUtil::Lower(query);
+
+	// Check if this is an ALTER PAC TABLE ... DROP statement
+	// Must check for specific DROP patterns (drop pac link, drop protected), not just "drop" anywhere
+	if (query_lower.find("alter pac table") == string::npos) {
+		return false;
+	}
+
+	// Check for DROP PAC LINK or DROP PROTECTED (not just "drop" which could be part of table name)
+	bool has_drop_link = query_lower.find("drop pac link") != string::npos;
+	bool has_drop_protected = query_lower.find("drop protected") != string::npos;
+
+	if (!has_drop_link && !has_drop_protected) {
+		return false;
+	}
+
+	// Extract table name - for ALTER PAC TABLE, the table name comes after "alter pac table"
+	std::regex alter_pac_regex(R"(alter\s+pac\s+table\s+([a-zA-Z_][a-zA-Z0-9_]*))");
+	std::smatch match;
+	if (!std::regex_search(query_lower, match, alter_pac_regex)) {
+		return false;
+	}
+	metadata.table_name = match[1].str();
+
+	// Get existing metadata - it must exist for DROP operations
+	auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
+	if (!existing) {
+		throw ParserException("Table '" + metadata.table_name + "' does not have any PAC metadata to drop");
+	}
+	metadata = *existing;
+
+	// Handle DROP PAC LINK (col1, col2, ...)
+	if (has_drop_link) {
+		std::regex drop_link_regex(R"(drop\s+pac\s+link\s*\(\s*([^)]+)\s*\))", std::regex_constants::icase);
+		if (std::regex_search(query_lower, match, drop_link_regex)) {
+			string cols_str = match[1].str();
+			auto drop_cols = StringUtil::Split(cols_str, ',');
+			vector<string> normalized_drop_cols;
+			for (auto &col : drop_cols) {
+				StringUtil::Trim(col);
+				if (!col.empty()) {
+					normalized_drop_cols.push_back(StringUtil::Lower(col));
+				}
+			}
+
+			// Find and remove the link with these local columns
+			bool found = false;
+			for (auto it = metadata.links.begin(); it != metadata.links.end(); ++it) {
+				// Normalize local columns for comparison
+				vector<string> normalized_local_cols;
+				for (const auto &col : it->local_columns) {
+					normalized_local_cols.push_back(StringUtil::Lower(col));
+				}
+
+				if (normalized_local_cols == normalized_drop_cols) {
+					metadata.links.erase(it);
+					found = true;
+					break;
+				}
+			}
+
+			if (!found) {
+				if (normalized_drop_cols.size() == 1) {
+					throw ParserException("No PAC LINK found on column '" + normalized_drop_cols[0] + "'");
+				} else {
+					string cols_list;
+					for (size_t i = 0; i < normalized_drop_cols.size(); i++) {
+						if (i > 0) {
+							cols_list += ", ";
+						}
+						cols_list += "'" + normalized_drop_cols[i] + "'";
+					}
+					throw ParserException("No PAC LINK found on columns (" + cols_list + ")");
+				}
+			}
+		}
+	}
+
+	// Handle DROP PROTECTED (col1, col2, ...)
+	if (has_drop_protected) {
+		std::regex drop_protected_regex(R"(drop\s+protected\s*\(\s*([^)]+)\s*\))", std::regex_constants::icase);
+		if (std::regex_search(query_lower, match, drop_protected_regex)) {
+			string cols_str = match[1].str();
+			auto drop_cols = StringUtil::Split(cols_str, ',');
+			for (auto &col : drop_cols) {
+				StringUtil::Trim(col);
+				if (col.empty())
+					continue;
+
+				// Find and remove the protected column
+				bool found = false;
+				for (auto it = metadata.protected_columns.begin(); it != metadata.protected_columns.end(); ++it) {
+					if (StringUtil::Lower(*it) == StringUtil::Lower(col)) {
+						metadata.protected_columns.erase(it);
+						found = true;
+						break;
+					}
+				}
+
+				if (!found) {
+					throw ParserException("Column '" + col + "' is not marked as protected");
+				}
+			}
+		}
+	}
+
+	// For ALTER PAC TABLE DROP, we only update metadata, no actual DDL execution needed
+	stripped_sql = "";
+
+	return true;
+}
+
+} // namespace duckdb

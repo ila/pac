@@ -27,13 +27,32 @@ else()
 endif()
 
 # Extension sources
-set(EXTENSION_SOURCES src/pac_extension.cpp src/pac_optimizer.cpp src/pac_privacy_unit.cpp
-        src/pac_compatibility_check.cpp src/pac_aggregate.cpp src/pac_helpers.cpp
-        src/pac_count.cpp src/pac_min_max.cpp src/pac_bitslice_compiler.cpp src/pac_compiler_helpers.cpp
-        src/pac_expression_builder.cpp src/pac_plan_traversal.cpp src/pac_projection_propagation.cpp
-        src/pac_parser.cpp src/pac_metadata_manager.cpp src/pac_metadata_serialization.cpp src/pac_parser_helpers.cpp
-        src/pac_subquery_handler.cpp src/pac_categorical.cpp src/pac_categorical_rewriter.cpp src/pac_sum.cpp src/pac_avg.cpp
-        src/pac_join_builder.cpp src/pac_fk_resolver.cpp src/pac_aggregate_hash.cpp)
+set(EXTENSION_SOURCES
+    src/core/pac_extension.cpp
+    src/core/pac_optimizer.cpp
+    src/core/pac_privacy_unit.cpp
+    src/metadata/pac_compatibility_check.cpp
+    src/metadata/pac_metadata_manager.cpp
+    src/metadata/pac_metadata_serialization.cpp
+    src/aggregates/pac_aggregate.cpp
+    src/aggregates/pac_aggregate_hash.cpp
+    src/aggregates/pac_count.cpp
+    src/aggregates/pac_min_max.cpp
+    src/aggregates/pac_sum.cpp
+    src/aggregates/pac_avg.cpp
+    src/compiler/pac_bitslice_compiler.cpp
+    src/compiler/pac_compiler_helpers.cpp
+    src/query_processing/pac_expression_builder.cpp
+    src/query_processing/pac_plan_traversal.cpp
+    src/query_processing/pac_projection_propagation.cpp
+    src/query_processing/pac_join_builder.cpp
+    src/query_processing/pac_fk_resolver.cpp
+    src/query_processing/pac_subquery_handler.cpp
+    src/parser/pac_parser.cpp
+    src/parser/pac_parser_helpers.cpp
+    src/categorical/pac_categorical.cpp
+    src/categorical/pac_categorical_rewriter.cpp
+    src/utils/pac_helpers.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
