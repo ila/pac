@@ -22,9 +22,10 @@ void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vect
 unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &check, ClientContext &context,
                                               unique_ptr<LogicalOperator> left_operator, unique_ptr<LogicalGet> right);
 
-// Create a LogicalGet operator for a table by name
+// Create a LogicalGet operator for a table by name, projecting only the specified columns
+// If required_columns is empty, projects all columns (backward compatible)
 unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<LogicalOperator> &plan, const string &table,
-                                        idx_t idx);
+                                        idx_t idx, const vector<string> &required_columns = {});
 
 // Examine PACCompatibilityResult.fk_paths and populate gets_present / gets_missing
 void PopulateGetsFromFKPath(const PACCompatibilityResult &check, vector<string> &gets_present,

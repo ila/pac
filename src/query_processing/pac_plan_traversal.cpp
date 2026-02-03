@@ -464,7 +464,7 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 			// For RIGHT_SEMI/RIGHT_ANTI, only right child columns flow through
 			if (delim_join.join_type == JoinType::RIGHT_SEMI || delim_join.join_type == JoinType::RIGHT_ANTI) {
 				// Table in left child is NOT accessible (filtered out by RIGHT_SEMI/RIGHT_ANTI)
-				if (op->children.size() >= 1 && has_table_in_subtree(op->children[0].get())) {
+				if (!op->children.empty() && has_table_in_subtree(op->children[0].get())) {
 					return false;
 				}
 				// Check right child (accessible side for RIGHT_SEMI/RIGHT_ANTI)
@@ -481,7 +481,7 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 					return false;
 				}
 				// Check left child (accessible side for SEMI/ANTI)
-				if (op->children.size() >= 1 && check_accessible(op->children[0].get())) {
+				if (!op->children.empty() && check_accessible(op->children[0].get())) {
 					return true;
 				}
 				return false;
@@ -494,7 +494,7 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 				return false;
 			}
 			// Check left child
-			if (op->children.size() >= 1 && check_accessible(op->children[0].get())) {
+			if (!op->children.empty() && check_accessible(op->children[0].get())) {
 				return true;
 			}
 			return false;

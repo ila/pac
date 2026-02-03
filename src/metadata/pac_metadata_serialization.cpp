@@ -49,8 +49,9 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) con
 	// Serialize primary keys
 	ss << "  \"primary_keys\": [";
 	for (size_t i = 0; i < metadata.primary_key_columns.size(); i++) {
-		if (i > 0)
+		if (i > 0) {
 			ss << ", ";
+		}
 		ss << "\"" << metadata.primary_key_columns[i] << "\"";
 	}
 	ss << "],\n";
@@ -58,16 +59,18 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) con
 	// Serialize links (now with support for composite keys)
 	ss << "  \"links\": [\n";
 	for (size_t i = 0; i < metadata.links.size(); i++) {
-		if (i > 0)
+		if (i > 0) {
 			ss << ",\n";
+		}
 		const auto &link = metadata.links[i];
 		ss << "    {\n";
 
 		// Serialize local_columns array
 		ss << "      \"local_columns\": [";
 		for (size_t j = 0; j < link.local_columns.size(); j++) {
-			if (j > 0)
+			if (j > 0) {
 				ss << ", ";
+			}
 			ss << "\"" << link.local_columns[j] << "\"";
 		}
 		ss << "],\n";
@@ -77,8 +80,9 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) con
 		// Serialize referenced_columns array
 		ss << "      \"referenced_columns\": [";
 		for (size_t j = 0; j < link.referenced_columns.size(); j++) {
-			if (j > 0)
+			if (j > 0) {
 				ss << ", ";
+			}
 			ss << "\"" << link.referenced_columns[j] << "\"";
 		}
 		ss << "]\n";
@@ -90,8 +94,9 @@ string PACMetadataManager::SerializeToJSON(const PACTableMetadata &metadata) con
 	// Serialize protected columns
 	ss << "  \"protected_columns\": [";
 	for (size_t i = 0; i < metadata.protected_columns.size(); i++) {
-		if (i > 0)
+		if (i > 0) {
 			ss << ", ";
+		}
 		ss << "\"" << metadata.protected_columns[i] << "\"";
 	}
 	ss << "]\n";
@@ -112,8 +117,9 @@ string PACMetadataManager::SerializeAllToJSON() const {
 
 	size_t idx = 0;
 	for (const auto &entry : table_metadata) {
-		if (idx > 0)
+		if (idx > 0) {
 			ss << ",\n";
+		}
 		ss << "    " << SerializeToJSON(entry.second);
 		idx++;
 	}

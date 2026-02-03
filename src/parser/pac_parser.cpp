@@ -123,8 +123,10 @@ struct PACDDLBindData : public TableFunctionData {
 // Thread-local storage for pending DDL operations
 // This is a workaround for passing data between parse and bind phases
 // since the bind function can't directly receive custom parameters.
+// NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
 static thread_local string g_pac_pending_sql;
 static thread_local string g_pac_pending_table_name;
+// NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
 
 // ============================================================================
 // Static bind and execution functions for PAC DDL

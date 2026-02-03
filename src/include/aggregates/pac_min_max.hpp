@@ -136,7 +136,8 @@ AUTOVECTORIZE inline void UpdateExtremesSIMD(hugeint_t *extremes, uint64_t key_h
 		uint64_t mask = -((key_hash >> i) & 1);
 		hugeint_t better = PAC_BETTER(value, extremes[i]);
 		extremes[i].lower = (better.lower & mask) | (extremes[i].lower & ~mask);
-		extremes[i].upper = (better.upper & mask) | (extremes[i].upper & ~mask);
+		extremes[i].upper = static_cast<int64_t>((static_cast<uint64_t>(better.upper) & mask) |
+		                                         (static_cast<uint64_t>(extremes[i].upper) & ~mask));
 	}
 }
 

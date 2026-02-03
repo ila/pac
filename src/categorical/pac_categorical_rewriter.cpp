@@ -312,8 +312,9 @@ static bool IsHavingClausePattern(LogicalOperator *filter_op, const ColumnBindin
 
 	// Skip projections to find the aggregate
 	while (child && child->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		if (child->children.empty())
+		if (child->children.empty()) {
 			break;
+		}
 		child = child->children[0].get();
 	}
 
@@ -1023,10 +1024,11 @@ static unique_ptr<Expression> BuildListTransformCall(OptimizerExtensionInput &in
 // Get struct field name for index (a, b, c, ..., z, aa, ab, ...)
 static string GetStructFieldName(idx_t index) {
 	if (index < 26) {
-		return string(1, 'a' + index);
+		return string(1, static_cast<char>('a' + static_cast<unsigned char>(index)));
 	}
 	// For indices >= 26, use aa, ab, etc.
-	return string(1, 'a' + (index / 26 - 1)) + string(1, 'a' + (index % 26));
+	return string(1, static_cast<char>('a' + static_cast<unsigned char>(index / 26 - 1))) +
+	       string(1, static_cast<char>('a' + static_cast<unsigned char>(index % 26)));
 }
 
 // Clone an expression tree for use as a lambda body with MULTIPLE PAC bindings

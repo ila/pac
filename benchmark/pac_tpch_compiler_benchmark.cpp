@@ -365,8 +365,6 @@ void RunTPCHCompilerBenchmark(double scale_factor, const string &scale_factor_st
     int seed = 42;
 	// Reset seed for deterministic noise
 	con.Query("SET pac_seed = " + std::to_string(seed));
-	// Disable optimizers
-	con.Query("SET disabled_optimizers='compressed_materialization,column_lifetime'");
 
     // Statistics tracking
     int total_queries = 0;

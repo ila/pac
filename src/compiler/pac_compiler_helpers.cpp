@@ -161,9 +161,10 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PACCompatibilityResult &chec
 	                                         std::move(right), std::move(conditions), std::move(extra));
 }
 
-// Create a LogicalGet operator for a table by name
+// Create a LogicalGet operator for a table by name, projecting only the specified columns
+// If required_columns is empty, projects all columns (backward compatible)
 unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<LogicalOperator> &plan, const string &table,
-                                        idx_t idx) {
+                                        idx_t idx, const vector<string> &required_columns) {
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 	CatalogSearchPath path(context);
 
@@ -182,17 +183,66 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 		vector<string> return_names = {};
 		vector<ColumnIndex> column_ids = {};
 		vector<idx_t> projection_ids = {};
-		for (auto &col : table_entry.GetColumns().Logical()) {
-			return_types.push_back(col.Type());
-			return_names.push_back(col.Name());
-			column_ids.push_back(ColumnIndex(col.Oid()));
-			projection_ids.push_back(column_ids.size() - 1);
+
+		// Build a set of required column names for fast lookup (case-insensitive)
+		std::unordered_set<string> required_set;
+		for (auto &col_name : required_columns) {
+			required_set.insert(StringUtil::Lower(col_name));
 		}
+
+		// Track which required columns we found
+		std::unordered_set<string> found_columns;
+
+		for (auto &col : table_entry.GetColumns().Logical()) {
+			string col_name_lower = StringUtil::Lower(col.Name());
+
+			// If required_columns is empty, include all columns (backward compatible)
+			// Otherwise, only include columns that are in the required set
+			if (required_columns.empty() || required_set.count(col_name_lower) > 0) {
+				return_types.push_back(col.Type());
+				return_names.push_back(col.Name());
+				column_ids.push_back(ColumnIndex(col.Oid()));
+				projection_ids.push_back(column_ids.size() - 1);
+
+				if (!required_columns.empty()) {
+					found_columns.insert(col_name_lower);
+				}
+			}
+		}
+
+#ifdef DEBUG
+		// Warn if we couldn't find some required columns
+		if (!required_columns.empty() && found_columns.size() < required_set.size()) {
+			string missing;
+			for (auto &col_name : required_columns) {
+				if (found_columns.count(StringUtil::Lower(col_name)) == 0) {
+					if (!missing.empty()) {
+						missing += ", ";
+					}
+					missing += col_name;
+				}
+			}
+			Printer::Print("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
+			               ", projecting all columns instead");
+
+			// Fall back to projecting all columns
+			return_types.clear();
+			return_names.clear();
+			column_ids.clear();
+			projection_ids.clear();
+			for (auto &col : table_entry.GetColumns().Logical()) {
+				return_types.push_back(col.Type());
+				return_names.push_back(col.Name());
+				column_ids.push_back(ColumnIndex(col.Oid()));
+				projection_ids.push_back(column_ids.size() - 1);
+			}
+		}
+#endif
 
 		unique_ptr<LogicalGet> get = make_uniq<LogicalGet>(idx, scan_function, std::move(bind_data),
 		                                                   std::move(return_types), std::move(return_names));
 		get->SetColumnIds(std::move(column_ids));
-		get->projection_ids = projection_ids; // we project everything
+		get->projection_ids = projection_ids;
 		get->ResolveOperatorTypes();
 		get->Verify(context);
 

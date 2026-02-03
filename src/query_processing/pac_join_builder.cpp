@@ -67,11 +67,9 @@ JoinChainResult BuildJoinChain(const PACCompatibilityResult &check, ClientContex
 		}
 
 		if (i == 0) {
-			auto join = CreateLogicalJoin(check, context, std::move(existing_node), std::move(right_op));
-			final_join = std::move(join);
+			final_join = CreateLogicalJoin(check, context, std::move(existing_node), std::move(right_op));
 		} else {
-			auto join = CreateLogicalJoin(check, context, std::move(final_join), std::move(right_op));
-			final_join = std::move(join);
+			final_join = CreateLogicalJoin(check, context, std::move(final_join), std::move(right_op));
 		}
 	}
 

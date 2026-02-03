@@ -289,7 +289,8 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 
 // Find the primary key column name for a given table. Searches the client's catalog search path
 // for the table and returns the first column name of the primary key constraint (if any).
-// Returns empty string when no primary key exists.
+// Also checks PAC KEY metadata if no database constraint is found.
+// Returns empty vector when no primary key exists.
 vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) {
 	Connection con(*context.db);
 	Catalog &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
@@ -325,27 +326,37 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 		string schema = table_name.substr(0, dot_pos);
 		string tbl = table_name.substr(dot_pos + 1);
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-		if (!entry)
+		if (!entry) {
 			return {};
+		}
 		auto &table_entry = entry->Cast<TableCatalogEntry>();
 		auto pk = table_entry.GetPrimaryKey();
-		if (!pk)
-			return {};
-		if (pk->type == ConstraintType::UNIQUE) {
+		if (pk && pk->type == ConstraintType::UNIQUE) {
 			auto &unique = pk->Cast<UniqueConstraint>();
 			// If explicit column names present, validate all are numeric
 			if (!unique.GetColumnNames().empty()) {
 				auto cols = unique.GetColumnNames();
 				auto validated = check_and_return_numeric_columns(table_entry, cols);
-				return validated; // either the validated column list or empty
+				if (!validated.empty()) {
+					return validated;
+				}
 			}
 			// Otherwise fall back to index-based single-column PK
 			if (unique.HasIndex()) {
 				auto idx = unique.GetIndex();
 				auto &col = table_entry.GetColumn(idx);
-				if (!col.Type().IsNumeric())
-					return {};
-				return {col.GetName()};
+				if (col.Type().IsNumeric()) {
+					return {col.GetName()};
+				}
+			}
+		}
+		// No database PK constraint found - check PAC KEY metadata
+		auto &metadata_mgr = PACMetadataManager::Get();
+		auto *pac_meta = metadata_mgr.GetTableMetadata(tbl);
+		if (pac_meta && !pac_meta->primary_key_columns.empty()) {
+			auto validated = check_and_return_numeric_columns(table_entry, pac_meta->primary_key_columns);
+			if (!validated.empty()) {
+				return validated;
 			}
 		}
 		return {};
@@ -360,23 +371,31 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 			continue;
 		auto &table_entry = entry->Cast<TableCatalogEntry>();
 		auto pk = table_entry.GetPrimaryKey();
-		if (!pk)
-			continue;
-		if (pk->type == ConstraintType::UNIQUE) {
+		if (pk && pk->type == ConstraintType::UNIQUE) {
 			auto &unique = pk->Cast<UniqueConstraint>();
 			if (!unique.GetColumnNames().empty()) {
 				auto cols = unique.GetColumnNames();
 				auto validated = check_and_return_numeric_columns(table_entry, cols);
-				if (!validated.empty())
+				if (!validated.empty()) {
 					return validated;
+				}
 				// otherwise continue searching other schemas
 			}
 			if (unique.HasIndex()) {
 				auto idx = unique.GetIndex();
 				auto &col = table_entry.GetColumn(idx);
-				if (!col.Type().IsNumeric())
-					continue;
-				return {col.GetName()};
+				if (col.Type().IsNumeric()) {
+					return {col.GetName()};
+				}
+			}
+		}
+		// No database PK constraint found - check PAC KEY metadata
+		auto &metadata_mgr = PACMetadataManager::Get();
+		auto *pac_meta = metadata_mgr.GetTableMetadata(table_name);
+		if (pac_meta && !pac_meta->primary_key_columns.empty()) {
+			auto validated = check_and_return_numeric_columns(table_entry, pac_meta->primary_key_columns);
+			if (!validated.empty()) {
+				return validated;
 			}
 		}
 	}
@@ -483,8 +502,9 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			string schema = tbl_name.substr(0, dot_pos);
 			string tbl = tbl_name.substr(dot_pos + 1);
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
-			if (entry)
-				return StringUtil::Lower(tbl);  // return unqualified table name, normalized to lowercase
+			if (entry) {
+				return StringUtil::Lower(tbl); // return unqualified table name, normalized to lowercase
+			}
 			return StringUtil::Lower(tbl_name); // fallback to original, normalized
 		}
 		// Non-qualified: walk the search path; if found return unqualified table name
@@ -492,8 +512,9 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 		for (auto &entry_path : path.Get()) {
 			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, tbl_name,
 			                              OnEntryNotFound::RETURN_NULL);
-			if (entry)
+			if (entry) {
 				return StringUtil::Lower(tbl_name); // already unqualified, normalized to lowercase
+			}
 		}
 		return StringUtil::Lower(tbl_name); // fallback, normalized to lowercase
 	};
@@ -547,8 +568,9 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			string cur = found_target;
 			while (true) {
 				path.push_back(cur);
-				if (cur == start_name)
+				if (cur == start_name) {
 					break;
+				}
 				auto it = parent.find(cur);
 				if (it == parent.end()) {
 					break; // safety
@@ -581,8 +603,9 @@ ReplanGuard::~ReplanGuard() {
 string GetPacPrivacyFile(ClientContext &context, const string &default_filename) {
 	Value v;
 	context.TryGetCurrentSetting("pac_privacy_file", v);
-	if (!v.IsNull())
+	if (!v.IsNull()) {
 		return v.ToString();
+	}
 	return default_filename;
 }
 
@@ -590,8 +613,9 @@ string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compiled_path", v);
 	string path = v.IsNull() ? default_path : v.ToString();
-	if (!path.empty() && path.back() != '/')
+	if (!path.empty() && path.back() != '/') {
 		path.push_back('/');
+	}
 	return path;
 }
 
@@ -613,8 +637,9 @@ int64_t GetPacM(ClientContext &context, int64_t default_m) {
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	Value v;
 	context.TryGetCurrentSetting("pac_noise", v);
-	if (v.IsNull())
+	if (v.IsNull()) {
 		return default_value;
+	}
 	try {
 		return v.GetValue<bool>();
 	} catch (...) {
@@ -625,8 +650,9 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 vector<string> PacTablesSetToVector(const std::unordered_set<string> &set) {
 	vector<string> out;
 	out.reserve(set.size());
-	for (auto &s : set)
+	for (auto &s : set) {
 		out.push_back(s);
+	}
 	std::sort(out.begin(), out.end());
 	return out;
 }
@@ -635,13 +661,15 @@ vector<string> PacTablesSetToVector(const std::unordered_set<string> &set) {
 string GetPacCompileMethod(ClientContext &context, const string &default_method) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compile_method", v);
-	if (v.IsNull())
+	if (v.IsNull()) {
 		return default_method;
+	}
 	try {
 		string s = v.ToString();
 		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-		if (s == "standard" || s == "bitslice")
+		if (s == "standard" || s == "bitslice") {
 			return s;
+		}
 		// fallback
 		return default_method;
 	} catch (...) {

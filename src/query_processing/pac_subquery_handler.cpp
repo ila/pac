@@ -156,8 +156,9 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 	// First, find the DELIM_JOIN by walking up from the root
 	LogicalComparisonJoin *delim_join = nullptr;
 	std::function<bool(LogicalOperator *)> find_delim_join = [&](LogicalOperator *op) -> bool {
-		if (!op)
+		if (!op) {
 			return false;
+		}
 
 		if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
 			// Check if this DELIM_JOIN has the target aggregate in its subtree
@@ -167,11 +168,13 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 			// Check if target_agg is in children[1] (the subquery side)
 			bool agg_in_right = false;
 			std::function<bool(LogicalOperator *)> find_agg = [&](LogicalOperator *child) -> bool {
-				if (child == target_agg)
+				if (child == target_agg) {
 					return true;
+				}
 				for (auto &c : child->children) {
-					if (find_agg(c.get()))
+					if (find_agg(c.get())) {
 						return true;
+					}
 				}
 				return false;
 			};
@@ -185,12 +188,14 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 			std::function<bool(LogicalOperator *)> find_source = [&](LogicalOperator *child) -> bool {
 				if (child->type == LogicalOperatorType::LOGICAL_GET) {
 					auto &get = child->Cast<LogicalGet>();
-					if (get.table_index == source_get.table_index)
+					if (get.table_index == source_get.table_index) {
 						return true;
+					}
 				}
 				for (auto &c : child->children) {
-					if (find_source(c.get()))
+					if (find_source(c.get())) {
 						return true;
+					}
 				}
 				return false;
 			};
@@ -206,8 +211,9 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 		}
 
 		for (auto &child : op->children) {
-			if (find_delim_join(child.get()))
+			if (find_delim_join(child.get())) {
 				return true;
+			}
 		}
 		return false;
 	};
@@ -303,8 +309,9 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 	// Find and update all DELIM_GETs in the subquery that reference this DELIM_JOIN
 	// We need to add the new column type to their chunk_types
 	std::function<void(LogicalOperator *)> update_delim_gets = [&](LogicalOperator *op) {
-		if (!op)
+		if (!op) {
 			return;
+		}
 
 		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
 			auto &delim_get = op->Cast<LogicalDelimGet>();
@@ -329,8 +336,9 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 	// Find the DELIM_GET that the aggregate can access and return the binding for the new column
 	// Walk from aggregate to find the closest DELIM_GET
 	std::function<LogicalDelimGet *(LogicalOperator *)> find_delim_get = [&](LogicalOperator *op) -> LogicalDelimGet * {
-		if (!op)
+		if (!op) {
 			return nullptr;
+		}
 
 		if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
 			return &op->Cast<LogicalDelimGet>();
@@ -338,8 +346,9 @@ DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, Logica
 
 		for (auto &child : op->children) {
 			auto result = find_delim_get(child.get());
-			if (result)
+			if (result) {
 				return result;
+			}
 		}
 		return nullptr;
 	};

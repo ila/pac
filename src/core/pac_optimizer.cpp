@@ -26,6 +26,49 @@
 namespace duckdb {
 
 // ============================================================================
+// RAII Guard to ensure optimizer rules are always re-enabled
+// ============================================================================
+// This guard ensures that COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
+// are re-enabled even if an exception is thrown or an early return occurs.
+class OptimizerRestoreGuard {
+public:
+	OptimizerRestoreGuard(ClientContext &context, PACOptimizerInfo *pac_info)
+	    : context(context), pac_info(pac_info), restored(false) {
+		if (pac_info) {
+			std::lock_guard<std::mutex> lock(pac_info->optimizer_mutex);
+			auto &config = DBConfig::GetConfig(context);
+
+			// Restore optimizers that were disabled in pre-optimize
+			if (pac_info->disabled_column_lifetime) {
+				config.options.disabled_optimizers.erase(OptimizerType::COLUMN_LIFETIME);
+				pac_info->disabled_column_lifetime = false;
+				we_disabled_optimizers = true;
+			}
+			if (pac_info->disabled_compressed_materialization) {
+				config.options.disabled_optimizers.erase(OptimizerType::COMPRESSED_MATERIALIZATION);
+				pac_info->disabled_compressed_materialization = false;
+				we_disabled_optimizers = true;
+			}
+			restored = true;
+		}
+	}
+
+	~OptimizerRestoreGuard() {
+		// Nothing to do - restoration happens in constructor
+	}
+
+	bool WeDisabledOptimizers() const {
+		return we_disabled_optimizers;
+	}
+
+private:
+	ClientContext &context;
+	PACOptimizerInfo *pac_info;
+	bool restored;
+	bool we_disabled_optimizers = false;
+};
+
+// ============================================================================
 // Helper function to run COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
 // ============================================================================
 // These optimizers are disabled in PACPreOptimizeFunction and must be run
@@ -219,7 +262,6 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	// If the optimizer extension provided a PACOptimizerInfo, and a replan is already in progress,
 	// skip running the PAC checks to avoid re-entrant behavior.
 	PACOptimizerInfo *pac_info = nullptr;
-	bool we_disabled_optimizers = false;
 	if (input.info) {
 		pac_info = dynamic_cast<PACOptimizerInfo *>(input.info.get());
 		if (pac_info && pac_info->replan_in_progress.load(std::memory_order_acquire)) {
@@ -228,23 +270,10 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		}
 	}
 
-	// Restore the disabled optimizers now (they were disabled in pre-optimize)
-	// We do this early so the config is restored regardless of what happens below
-	if (pac_info) {
-		std::lock_guard<std::mutex> lock(pac_info->optimizer_mutex);
-		auto &config = DBConfig::GetConfig(input.context);
-
-		if (pac_info->disabled_column_lifetime) {
-			config.options.disabled_optimizers.erase(OptimizerType::COLUMN_LIFETIME);
-			pac_info->disabled_column_lifetime = false;
-			we_disabled_optimizers = true;
-		}
-		if (pac_info->disabled_compressed_materialization) {
-			config.options.disabled_optimizers.erase(OptimizerType::COMPRESSED_MATERIALIZATION);
-			pac_info->disabled_compressed_materialization = false;
-			we_disabled_optimizers = true;
-		}
-	}
+	// Use RAII guard to ensure optimizers are always re-enabled, even on exceptions or early returns
+	// The guard restores the optimizers immediately in its constructor
+	OptimizerRestoreGuard restore_guard(input.context, pac_info);
+	bool we_disabled_optimizers = restore_guard.WeDisabledOptimizers();
 
 	// Run the PAC compatibility checks only if the plan is a projection, order by, or aggregate (i.e., a SELECT query)
 	// For EXPLAIN/EXPLAIN_ANALYZE, look at the child operator to decide whether to rewrite

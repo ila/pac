@@ -576,8 +576,9 @@ bool PACParserExtension::ParseAlterTableDropPAC(const string &query, string &str
 			auto drop_cols = StringUtil::Split(cols_str, ',');
 			for (auto &col : drop_cols) {
 				StringUtil::Trim(col);
-				if (col.empty())
+				if (col.empty()) {
 					continue;
+				}
 
 				// Find and remove the protected column
 				bool found = false;
