@@ -28,8 +28,6 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 
-#include <duckdb/planner/operator/logical_filter.hpp>
-
 namespace duckdb {
 
 /**
@@ -498,8 +496,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								break;
 							}
 						}
-						if (has_fk_to_pu)
+						if (has_fk_to_pu) {
 							break;
+						}
 					}
 
 					if (has_fk_to_pu) {
@@ -1035,8 +1034,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								break;
 							}
 						}
-						if (has_fk_to_pu)
+						if (has_fk_to_pu) {
 							break;
+						}
 					}
 
 					if (has_fk_to_pu) {
@@ -1060,8 +1060,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 											break;
 										}
 									}
-									if (!fk_cols.empty())
+									if (!fk_cols.empty()) {
 										break;
+									}
 								}
 
 								if (!fk_cols.empty()) {
@@ -1330,8 +1331,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 			for (auto test_ord_idx : candidate_orders_tables) {
 				vector<unique_ptr<LogicalOperator> *> test_nodes;
 				FindAllNodesByTableIndex(&plan, test_ord_idx, test_nodes);
-				if (test_nodes.empty())
+				if (test_nodes.empty()) {
 					continue;
+				}
 
 				auto &test_get = test_nodes[0]->get()->Cast<LogicalGet>();
 
@@ -1354,8 +1356,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 						}
 					}
 				}
-				if (test_fk_cols.empty())
+				if (test_fk_cols.empty()) {
 					continue;
+				}
 
 				// Ensure FK columns are projected
 				bool proj_ok = true;
@@ -1415,8 +1418,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 			for (auto &present_table : gets_present) {
 				auto it = check.table_metadata.find(present_table);
-				if (it == check.table_metadata.end())
+				if (it == check.table_metadata.end()) {
 					continue;
+				}
 
 				// Check if this table has FK to PU
 				bool has_fk_to_pu = false;
@@ -1429,12 +1433,14 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 							break;
 						}
 					}
-					if (has_fk_to_pu)
+					if (has_fk_to_pu) {
 						break;
+					}
 				}
 
-				if (!has_fk_to_pu || fk_cols.empty())
+				if (!has_fk_to_pu || fk_cols.empty()) {
 					continue;
+				}
 
 				// Find all instances of this FK table and check which one is in the aggregate's subtree
 				vector<unique_ptr<LogicalOperator> *> fk_table_nodes;
@@ -2030,7 +2036,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// For multi-PU support, we need to gather FK paths and missing tables for all PUs
 	// and deduplicate the tables that need to be joined
 	std::unordered_set<string> all_missing_tables;
-	vector<string> fk_path_to_use; // We'll use the first FK path as the base
+	// We'll use the first FK path as the base
 
 	if (pu_present_in_tree) {
 		// Case a) query scans PU table(s) - all PUs are in scanned_pu_tables
@@ -2053,7 +2059,7 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 		if (it == check.fk_paths.end() || it->second.empty()) {
 			throw InternalException("PAC compiler: expected fk_path for start table " + start_table);
 		}
-		fk_path_to_use = it->second;
+		vector<string> fk_path_to_use = it->second;
 
 		// Convert set back to vector for ModifyPlanWithoutPU
 		vector<string> unique_gets_missing(all_missing_tables.begin(), all_missing_tables.end());

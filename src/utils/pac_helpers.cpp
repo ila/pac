@@ -375,8 +375,9 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 			if (!unique.GetColumnNames().empty()) {
 				auto cols = unique.GetColumnNames();
 				auto validated = check_and_return_numeric_columns(table_entry, cols);
-				if (!validated.empty())
+				if (!validated.empty()) {
 					return validated;
+				}
 				// otherwise continue searching other schemas
 			}
 			if (unique.HasIndex()) {
@@ -566,8 +567,9 @@ FindForeignKeyBetween(ClientContext &context, const vector<string> &privacy_unit
 			string cur = found_target;
 			while (true) {
 				path.push_back(cur);
-				if (cur == start_name)
+				if (cur == start_name) {
 					break;
+				}
 				auto it = parent.find(cur);
 				if (it == parent.end()) {
 					break; // safety
@@ -634,8 +636,9 @@ int64_t GetPacM(ClientContext &context, int64_t default_m) {
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	Value v;
 	context.TryGetCurrentSetting("pac_noise", v);
-	if (v.IsNull())
+	if (v.IsNull()) {
 		return default_value;
+	}
 	try {
 		return v.GetValue<bool>();
 	} catch (...) {
@@ -646,8 +649,9 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 vector<string> PacTablesSetToVector(const std::unordered_set<string> &set) {
 	vector<string> out;
 	out.reserve(set.size());
-	for (auto &s : set)
+	for (auto &s : set) {
 		out.push_back(s);
+	}
 	std::sort(out.begin(), out.end());
 	return out;
 }
@@ -656,13 +660,15 @@ vector<string> PacTablesSetToVector(const std::unordered_set<string> &set) {
 string GetPacCompileMethod(ClientContext &context, const string &default_method) {
 	Value v;
 	context.TryGetCurrentSetting("pac_compile_method", v);
-	if (v.IsNull())
+	if (v.IsNull()) {
 		return default_method;
+	}
 	try {
 		string s = v.ToString();
 		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-		if (s == "standard" || s == "bitslice")
+		if (s == "standard" || s == "bitslice") {
 			return s;
+		}
 		// fallback
 		return default_method;
 	} catch (...) {
