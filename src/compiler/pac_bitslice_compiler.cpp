@@ -462,8 +462,9 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 								// Walk up from plan root and find smallest subtree containing both tables
 								std::function<bool(LogicalOperator *)> findCommonSubtree =
 								    [&](LogicalOperator *op) -> bool {
-									if (!op)
+									if (!op) {
 										return false;
+									}
 
 									bool has_connecting = HasTableIndexInSubtree(op, connecting_table_idx);
 									bool has_fk = HasTableIndexInSubtree(op, fk_table_idx);
