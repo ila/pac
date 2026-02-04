@@ -515,6 +515,289 @@ static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFun
 }
 
 // ============================================================================
+// PAC List Aggregates: Aggregate over LIST<DOUBLE> inputs element-wise
+// ============================================================================
+// These aggregates take LIST<DOUBLE> inputs (from PAC _counters results) and
+// produce LIST<DOUBLE> outputs. They aggregate element-wise across all input lists.
+
+enum class PacListAggType { SUM, AVG, COUNT, MIN, MAX };
+
+struct PacListAggregateState {
+	uint64_t key_hash;    // Bitmap: bit i = 1 if we've seen a non-null at position i
+	double values[64];    // Accumulated values
+	uint64_t counts[64];  // Count of non-null values (for avg/count)
+};
+
+template <PacListAggType AGG_TYPE>
+static void PacListAggregateInit(const AggregateFunction &, data_ptr_t state_ptr) {
+	auto &state = *reinterpret_cast<PacListAggregateState *>(state_ptr);
+	state.key_hash = 0;
+	double init_val = 0.0;
+	if constexpr (AGG_TYPE == PacListAggType::MIN) {
+		init_val = std::numeric_limits<double>::max();
+	} else if constexpr (AGG_TYPE == PacListAggType::MAX) {
+		init_val = std::numeric_limits<double>::lowest();
+	}
+	for (idx_t i = 0; i < 64; i++) {
+		state.values[i] = init_val;
+		state.counts[i] = 0;
+	}
+}
+
+template <PacListAggType AGG_TYPE>
+static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector,
+                                   idx_t count) {
+	D_ASSERT(input_count == 1);
+	auto &list_vec = inputs[0];
+
+	UnifiedVectorFormat list_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<double>(child_data);
+
+	UnifiedVectorFormat sdata;
+	state_vector.ToUnifiedFormat(count, sdata);
+	auto states = reinterpret_cast<PacListAggregateState **>(sdata.data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+		if (!list_data.validity.RowIsValid(list_idx)) {
+			continue;
+		}
+
+		auto &state = *states[sdata.sel->get_index(i)];
+		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+		auto &entry = list_entries[list_idx];
+		idx_t len = entry.length > 64 ? 64 : entry.length;
+
+		for (idx_t j = 0; j < len; j++) {
+			auto child_idx = child_data.sel->get_index(entry.offset + j);
+			if (!child_data.validity.RowIsValid(child_idx)) {
+				continue;
+			}
+			state.key_hash |= (1ULL << j);
+			double val = child_values[child_idx];
+			if constexpr (AGG_TYPE == PacListAggType::SUM) {
+				state.values[j] += val;
+			} else if constexpr (AGG_TYPE == PacListAggType::AVG) {
+				state.values[j] += val;
+				state.counts[j]++;
+			} else if constexpr (AGG_TYPE == PacListAggType::COUNT) {
+				state.counts[j]++;
+			} else if constexpr (AGG_TYPE == PacListAggType::MIN) {
+				if (val < state.values[j]) state.values[j] = val;
+			} else if constexpr (AGG_TYPE == PacListAggType::MAX) {
+				if (val > state.values[j]) state.values[j] = val;
+			}
+		}
+	}
+}
+
+template <PacListAggType AGG_TYPE>
+static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, AggregateInputData &, idx_t count) {
+	UnifiedVectorFormat sdata, tdata;
+	source_vec.ToUnifiedFormat(count, sdata);
+	target_vec.ToUnifiedFormat(count, tdata);
+	auto sources = reinterpret_cast<PacListAggregateState **>(sdata.data);
+	auto targets = reinterpret_cast<PacListAggregateState **>(tdata.data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto &source = *sources[sdata.sel->get_index(i)];
+		auto &target = *targets[tdata.sel->get_index(i)];
+
+		for (idx_t j = 0; j < 64; j++) {
+			if (!(source.key_hash & (1ULL << j))) continue;
+			bool target_has = (target.key_hash & (1ULL << j)) != 0;
+			target.key_hash |= (1ULL << j);
+
+			if constexpr (AGG_TYPE == PacListAggType::SUM) {
+				target.values[j] += source.values[j];
+			} else if constexpr (AGG_TYPE == PacListAggType::AVG) {
+				target.values[j] += source.values[j];
+				target.counts[j] += source.counts[j];
+			} else if constexpr (AGG_TYPE == PacListAggType::COUNT) {
+				target.counts[j] += source.counts[j];
+			} else if constexpr (AGG_TYPE == PacListAggType::MIN) {
+				if (!target_has || source.values[j] < target.values[j]) target.values[j] = source.values[j];
+			} else if constexpr (AGG_TYPE == PacListAggType::MAX) {
+				if (!target_has || source.values[j] > target.values[j]) target.values[j] = source.values[j];
+			}
+		}
+	}
+}
+
+template <PacListAggType AGG_TYPE>
+static void PacListAggregateFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count,
+                                     idx_t offset) {
+	UnifiedVectorFormat sdata;
+	state_vector.ToUnifiedFormat(count, sdata);
+	auto states = reinterpret_cast<PacListAggregateState **>(sdata.data);
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto &state = *states[sdata.sel->get_index(i)];
+		auto result_idx = i + offset;
+
+		if (state.key_hash == 0) {
+			result_validity.SetInvalid(result_idx);
+			continue;
+		}
+
+		vector<Value> list_values;
+		for (idx_t j = 0; j < 64; j++) {
+			if (!(state.key_hash & (1ULL << j))) {
+				list_values.push_back(Value());
+			} else if constexpr (AGG_TYPE == PacListAggType::AVG) {
+				list_values.push_back(state.counts[j] > 0
+				    ? Value::DOUBLE(state.values[j] / static_cast<double>(state.counts[j]))
+				    : Value());
+			} else if constexpr (AGG_TYPE == PacListAggType::COUNT) {
+				list_values.push_back(Value::DOUBLE(static_cast<double>(state.counts[j])));
+			} else {
+				list_values.push_back(Value::DOUBLE(state.values[j]));
+			}
+		}
+		result.SetValue(result_idx, Value::LIST(LogicalType::DOUBLE, std::move(list_values)));
+	}
+}
+
+static void PacListAggregateDestructor(Vector &, AggregateInputData &, idx_t) {}
+
+// ============================================================================
+// pac_first_list - Returns the first LIST<DOUBLE> value (for scalar subquery handling)
+// ============================================================================
+struct PacFirstListState {
+	bool has_value;
+	vector<Value> values;  // Store the actual list values
+};
+
+static void PacFirstListInit(const AggregateFunction &, data_ptr_t state_ptr) {
+	auto &state = *reinterpret_cast<PacFirstListState *>(state_ptr);
+	state.has_value = false;
+	state.values.clear();
+}
+
+static void PacFirstListUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector,
+                               idx_t count) {
+	UnifiedVectorFormat sdata;
+	state_vector.ToUnifiedFormat(count, sdata);
+	auto states = reinterpret_cast<PacFirstListState **>(sdata.data);
+
+	UnifiedVectorFormat input_data;
+	inputs[0].ToUnifiedFormat(count, input_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto &state = *states[sdata.sel->get_index(i)];
+		auto input_idx = input_data.sel->get_index(i);
+
+		// Only take the first non-null value
+		if (!state.has_value && input_data.validity.RowIsValid(input_idx)) {
+			// Get the list value and store it
+			auto list_val = inputs[0].GetValue(input_idx);
+			// Skip if the value itself is NULL (not just the row validity)
+			if (list_val.IsNull()) {
+				continue;
+			}
+			// Also check if the value type is actually a list
+			if (list_val.type().id() != LogicalTypeId::LIST) {
+				continue;
+			}
+			// Try to get children - if the internal pointer is null, skip
+			try {
+				auto &list_children = ListValue::GetChildren(list_val);
+				state.values.clear();
+				for (auto &child : list_children) {
+					state.values.push_back(child);
+				}
+				state.has_value = true;
+			} catch (...) {
+				// If we can't get children, skip this value
+				continue;
+			}
+		}
+	}
+}
+
+static void PacFirstListCombine(Vector &source_vec, Vector &target_vec, AggregateInputData &, idx_t count) {
+	UnifiedVectorFormat sdata, tdata;
+	source_vec.ToUnifiedFormat(count, sdata);
+	target_vec.ToUnifiedFormat(count, tdata);
+	auto sources = reinterpret_cast<PacFirstListState **>(sdata.data);
+	auto targets = reinterpret_cast<PacFirstListState **>(tdata.data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto &source = *sources[sdata.sel->get_index(i)];
+		auto &target = *targets[tdata.sel->get_index(i)];
+
+		if (!target.has_value && source.has_value) {
+			target.values = source.values;
+			target.has_value = true;
+		}
+	}
+}
+
+static void PacFirstListFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count,
+                                 idx_t offset) {
+	UnifiedVectorFormat sdata;
+	state_vector.ToUnifiedFormat(count, sdata);
+	auto states = reinterpret_cast<PacFirstListState **>(sdata.data);
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto &state = *states[sdata.sel->get_index(i)];
+		auto result_idx = i + offset;
+
+		if (!state.has_value) {
+			result_validity.SetInvalid(result_idx);
+		} else {
+			result.SetValue(result_idx, Value::LIST(LogicalType::DOUBLE, state.values));
+		}
+	}
+}
+
+static void PacFirstListDestructor(Vector &state_vec, AggregateInputData &, idx_t count) {
+	if (count == 0) return;
+	UnifiedVectorFormat sdata;
+	state_vec.ToUnifiedFormat(count, sdata);
+	auto states = reinterpret_cast<PacFirstListState **>(sdata.data);
+	for (idx_t i = 0; i < count; i++) {
+		auto &state = *states[sdata.sel->get_index(i)];
+		state.values.clear();
+		state.values.shrink_to_fit();
+	}
+}
+
+static AggregateFunction CreatePacFirstListAggregate() {
+	auto list_double_type = LogicalType::LIST(LogicalType::DOUBLE);
+	return AggregateFunction(
+	    "pac_first_list", {list_double_type}, list_double_type,
+	    AggregateFunction::StateSize<PacFirstListState>,
+	    PacFirstListInit, PacFirstListUpdate,
+	    PacFirstListCombine, PacFirstListFinalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, nullptr,
+	    PacFirstListDestructor);
+}
+
+template <PacListAggType AGG_TYPE>
+static AggregateFunction CreatePacListAggregate(const string &name) {
+	auto list_double_type = LogicalType::LIST(LogicalType::DOUBLE);
+	return AggregateFunction(
+	    name, {list_double_type}, list_double_type,
+	    AggregateFunction::StateSize<PacListAggregateState>,
+	    PacListAggregateInit<AGG_TYPE>, PacListAggregateUpdate<AGG_TYPE>,
+	    PacListAggregateCombine<AGG_TYPE>, PacListAggregateFinalize<AGG_TYPE>,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, nullptr,
+	    PacListAggregateDestructor);
+}
+
+// ============================================================================
 // Registration
 // ============================================================================
 void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
@@ -559,6 +842,17 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	ScalarFunction pac_noised("pac_noised", {list_double_type}, LogicalType::DOUBLE, PacNoisedFunction,
 	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_noised);
+
+	// List aggregates: aggregate over LIST<DOUBLE> inputs element-wise
+	// These handle cases where PAC _counters results are used as input to another aggregate
+	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::SUM>("pac_sum_list"));
+	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::AVG>("pac_avg_list"));
+	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::COUNT>("pac_count_list"));
+	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::MIN>("pac_min_list"));
+	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::MAX>("pac_max_list"));
+
+	// pac_first_list: Returns first LIST<DOUBLE> value (for scalar subquery handling)
+	loader.RegisterFunction(CreatePacFirstListAggregate());
 }
 
 } // namespace duckdb

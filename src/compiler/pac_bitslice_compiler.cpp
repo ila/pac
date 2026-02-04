@@ -2114,14 +2114,18 @@ void CompilePacBitsliceQuery(const PACCompatibilityResult &check, OptimizerExten
 	// If so, rewrite to use _counters variants and pac_filter for probabilistic filtering.
 	vector<CategoricalPatternInfo> categorical_patterns;
 	if (IsCategoricalQuery(plan, categorical_patterns)) {
-#ifdef DEBUG
 		Printer::Print("=== CATEGORICAL QUERY DETECTED ===");
 		Printer::Print("Found " + std::to_string(categorical_patterns.size()) + " categorical pattern(s)");
-#endif
+		for (idx_t i = 0; i < categorical_patterns.size(); i++) {
+			auto &p = categorical_patterns[i];
+			Printer::Print("  Pattern " + std::to_string(i) + ": parent_op=" +
+			               (p.parent_op ? LogicalOperatorToString(p.parent_op->type) : "null") +
+			               ", aggregate=" + p.aggregate_name);
+		}
 		RewriteCategoricalQuery(input, plan, categorical_patterns);
-#ifdef DEBUG
 		Printer::Print("=== CATEGORICAL REWRITE COMPLETE ===");
-#endif
+	} else {
+		Printer::Print("=== NO CATEGORICAL PATTERNS FOUND ===");
 	}
 
 #ifdef DEBUG

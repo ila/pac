@@ -55,10 +55,14 @@ struct CategoricalPatternInfo {
 	// The original return type of the PAC aggregate expression (before conversion to LIST<DOUBLE>)
 	// Used by double-lambda rewrite to cast list elements back to the expected type
 	LogicalType original_return_type;
+	// Scalar subquery wrapper that was skipped during pattern detection (if any)
+	// Points to the outer Projection of the pattern: Project(CASE) -> Aggregate(first) -> Project
+	// When set, these three operators should be stripped during rewrite
+	LogicalOperator *scalar_wrapper_op;
 
 	CategoricalPatternInfo()
 	    : comparison_expr(nullptr), parent_op(nullptr), expr_index(0), subquery_expr(nullptr), subquery_side(0),
-	      has_pac_binding(false), original_return_type(LogicalType::DOUBLE) {
+	      has_pac_binding(false), original_return_type(LogicalType::DOUBLE), scalar_wrapper_op(nullptr) {
 	}
 };
 

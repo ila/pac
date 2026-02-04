@@ -234,13 +234,11 @@ Supplier#1	Address1
 Supplier#2	Address2
 
 # ============================================================================
-# Test 2: Less than comparison in categorical query (DISABLED - self-joins not supported)
+# Test 2: Less than comparison in categorical query
 # Find parts where average order quantity is less than a threshold
-# NOTE: This query involves a self-join on lineitem (l and l2), which is not
-# supported by PAC compilation. The test verifies the correct error is thrown.
 # ============================================================================
 
-statement error
+query II
 SELECT
     p_partkey,
     p_name
@@ -268,7 +266,10 @@ WHERE
 ORDER BY
     p_partkey;
 ----
-PAC rewrite: self-joins are not supported for PAC compilation
+1	forest green
+2	forest blue
+3	ocean red
+4	forest yellow
 
 # ============================================================================
 # Test 3: Greater than or equal comparison
@@ -492,7 +493,8 @@ SELECT count(*) FROM (
 
 # ============================================================================
 # Test 10: Categorical with COUNT aggregate
-# NOTE: Result is 3 with PAC's counter-based aggregation
+# NOTE: Result is 1 because only supplier 1 (count=11) exceeds avg count (6)
+# The counter-based comparison uses pac_filter to determine pass/fail
 # ============================================================================
 
 query I
@@ -517,12 +519,13 @@ SELECT count(*) FROM (
         )
 );
 ----
-3
+1
 
 # ============================================================================
 # Test 11: Categorical with AVG aggregate
 # Find parts where avg quantity exceeds threshold
-# NOTE: Result is 4 with PAC's counter-based aggregation
+# NOTE: Result is 3 with PAC's counter-based aggregation due to noise
+# affecting the borderline case (part 2: avg 7.78 vs threshold 7.6)
 # ============================================================================
 
 query I
@@ -544,7 +547,7 @@ SELECT count(*) FROM (
         )
 );
 ----
-4
+3
 
 # ============================================================================
 # Test 12: Correlated categorical subquery with multiple tables

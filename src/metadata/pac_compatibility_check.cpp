@@ -1081,12 +1081,6 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 			}
 			return result;
 		}
-		if (ContainsSelfJoinOfPU(*plan, result.scanned_pu_tables)) {
-			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: self-joins are not supported for PAC compilation");
-			}
-			return result;
-		}
 		if (ContainsDisallowedJoin(*plan)) {
 			if (is_conservative) {
 				throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
