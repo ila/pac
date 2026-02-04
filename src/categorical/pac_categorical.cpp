@@ -7,6 +7,7 @@
 //
 
 #include "categorical/pac_categorical.hpp"
+#include "pac_debug.hpp"
 #include "aggregates/pac_aggregate.hpp"
 
 #include "duckdb/function/scalar_function.hpp"
@@ -507,7 +508,7 @@ static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFun
 	}
 
 #ifdef DEBUG
-	Printer::Print("PacCategoricalBind: mi=" + std::to_string(mi) + ", correction=" + std::to_string(correction) +
+	PAC_DEBUG_PRINT("PacCategoricalBind: mi=" + std::to_string(mi) + ", correction=" + std::to_string(correction) +
 	               ", seed=" + std::to_string(seed));
 #endif
 

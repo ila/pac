@@ -3,6 +3,7 @@
 //
 
 #include "core/pac_optimizer.hpp"
+#include "pac_debug.hpp"
 #include <unordered_set>
 #include <string>
 #include <algorithm>
@@ -81,7 +82,7 @@ static void RunDeferredOptimizers(OptimizerExtensionInput &input, unique_ptr<Log
 
 #ifdef DEBUG
 	if (pac_compiled) {
-		Printer::Print("=== PLAN AFTER PAC COMPILATION (before deferred optimizers) ===");
+		PAC_DEBUG_PRINT("=== PLAN AFTER PAC COMPILATION (before deferred optimizers) ===");
 		plan->Print();
 	}
 #endif
@@ -102,7 +103,7 @@ static void RunDeferredOptimizers(OptimizerExtensionInput &input, unique_ptr<Log
 
 #ifdef DEBUG
 	if (pac_compiled) {
-		Printer::Print("=== FINAL PLAN (after deferred optimizers) ===");
+		PAC_DEBUG_PRINT("=== FINAL PLAN (after deferred optimizers) ===");
 		plan->Print();
 	}
 #endif
@@ -360,9 +361,9 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 		auto it = check.table_metadata.find(pu);
 		if (it != check.table_metadata.end() && !it->second.pks.empty()) {
 #ifdef DEBUG
-			Printer::Print("Discovered primary key columns for privacy unit '" + pu + "':");
+			PAC_DEBUG_PRINT("Discovered primary key columns for privacy unit '" + pu + "':");
 			for (const auto &col : it->second.pks) {
-				Printer::Print(col);
+				PAC_DEBUG_PRINT(col);
 			}
 #endif
 		}
@@ -381,9 +382,9 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	bool pac_compiled = false;
 	if (apply_noise) {
 #ifdef DEBUG
-		Printer::Print("Query requires PAC Compilation for privacy units:");
+		PAC_DEBUG_PRINT("Query requires PAC Compilation for privacy units:");
 		for (auto &pu : privacy_units) {
-			Printer::Print("  " + pu);
+			PAC_DEBUG_PRINT("  " + pu);
 		}
 #endif
 

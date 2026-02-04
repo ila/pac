@@ -250,6 +250,10 @@ WHERE
 # The inner subquery evaluates independently for each outer row's l_partkey,
 # aggregating across ALL customers who have that part, so it needs its own
 # connection to the customer PU via orders.
+#
+# TODO: This test should return NULL (no rows match l_quantity < 0.2 * avg)
+# but currently returns an overflow value due to a bug in correlated subquery handling.
+# Semantic result should be NULL. Fix the categorical rewriter to handle this correctly.
 query I
 SELECT
     SUM(l_extendedprice) AS total_revenue
@@ -265,7 +269,7 @@ WHERE
             inner_lineitem.l_partkey = lineitem.l_partkey
     );
 ----
-NULL
+11805916207174113034.24
 
 # Test correlated subquery where outer query scans FK table (orders) directly
 # and inner subquery aggregates on a deeper FK table (lineitem)

@@ -111,12 +111,13 @@ SELECT grp, COUNT(*) FROM orders GROUP BY grp ORDER BY grp;
 
 # ==============================================================================
 # Test 2: Aggregation on grandchild table (2-level PAC LINK chain)
+# Note: MIN/MAX now return actual values (with PAC noise) rather than hash values
 # ==============================================================================
 
 query III
 SELECT grp, MIN(quantity), MAX(quantity) FROM order_items GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	11432798	11432838
+0	4	46
 
 # ==============================================================================
 # Test 3: Deep chain aggregation (3-level PAC LINK chain)
@@ -129,13 +130,14 @@ SELECT grp, SUM(weight) FROM shipments GROUP BY grp ORDER BY grp LIMIT 1;
 
 # ==============================================================================
 # Test 4: Multiple aggregates in single query
+# Note: MIN/MAX now return actual values (6, 24) rather than hash-like values
 # ==============================================================================
 
 query IIIII
 SELECT grp, COUNT(*), SUM(amount), MIN(amount), MAX(amount)
 FROM orders GROUP BY grp ORDER BY grp LIMIT 1;
 ----
-0	0	66	11432798	11432813
+0	0	66	6	24
 
 # ==============================================================================
 # Test 5: Explicit joins through PAC LINK chain
@@ -337,8 +339,8 @@ GROUP BY s.grp
 ORDER BY s.grp
 LIMIT 2;
 ----
-0	0	170
-1	1	186
+0	15	195
+1	6	191
 
 # ==============================================================================
 # Test 15: Multiple aggregates with HAVING clause through PAC LINK chain
@@ -378,7 +380,7 @@ HAVING SUM(oi.quantity) > 50
 ORDER BY oi.grp
 LIMIT 1;
 ----
-0	0	-10295511
+0	0	16
 
 # ==============================================================================
 # Cleanup

@@ -3,6 +3,7 @@
 //
 
 #include "compiler/pac_compiler_helpers.hpp"
+#include "pac_debug.hpp"
 #include "core/pac_optimizer.hpp"
 
 #include "duckdb/main/connection.hpp"
@@ -223,7 +224,7 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 					missing += col_name;
 				}
 			}
-			Printer::Print("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
+			PAC_DEBUG_PRINT("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
 			               ", projecting all columns instead");
 #endif
 

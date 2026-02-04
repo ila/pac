@@ -212,6 +212,7 @@ JOIN pu_no_pk np ON m.np_grp = np.grp
 14	580	3.22
 
 # Multi-PU with MIN/MAX aggregates and GROUP BY on non-join-key
+# Note: Grouping by mid_id creates single-row groups, PAC returns NULL for privacy
 query IIII
 SELECT
     m.mid_id,
@@ -225,7 +226,7 @@ GROUP BY m.mid_id
 ORDER BY m.mid_id
 LIMIT 1
 ----
-0	11469430	11469430	NULL
+0	NULL	NULL	NULL
 
 # Test with multiple aggregates on same column but different PU combinations
 query III
