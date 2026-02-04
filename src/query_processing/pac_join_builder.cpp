@@ -58,7 +58,7 @@ JoinChainResult BuildJoinChain(const PACCompatibilityResult &check, ClientContex
 	}
 
 	// Build the join chain
-	unique_ptr<LogicalOperator> final_join;
+	unique_ptr<LogicalOperator> final_join = std::move(existing_node);
 	for (size_t i = 0; i < tables_to_join.size(); ++i) {
 		auto &tbl_name = tables_to_join[i];
 		unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
@@ -66,11 +66,7 @@ JoinChainResult BuildJoinChain(const PACCompatibilityResult &check, ClientContex
 			throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
 		}
 
-		if (i == 0) {
-			final_join = CreateLogicalJoin(check, context, std::move(existing_node), std::move(right_op));
-		} else {
-			final_join = CreateLogicalJoin(check, context, std::move(final_join), std::move(right_op));
-		}
+		final_join = CreateLogicalJoin(check, context, std::move(final_join), std::move(right_op));
 	}
 
 	return JoinChainResult(std::move(final_join), fk_table_index);

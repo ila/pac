@@ -451,7 +451,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				local_idx++;
 			}
 
-			unique_ptr<LogicalOperator> final_join;
+			unique_ptr<LogicalOperator> final_join = std::move(existing_node);
 			for (size_t i = 0; i < tables_to_join_for_instance.size(); ++i) {
 				auto &tbl_name = tables_to_join_for_instance[i];
 				unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
@@ -460,7 +460,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 				}
 
 				if (i == 0) {
-					final_join = CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
+					final_join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
 				} else {
 					final_join = CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
 				}
@@ -917,7 +917,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 					local_idx++;
 				}
 
-				unique_ptr<LogicalOperator> final_join;
+				unique_ptr<LogicalOperator> final_join = std::move(existing_node);
 				for (size_t i = 0; i < tables_to_add.size(); ++i) {
 					auto &tbl_name = tables_to_add[i];
 					unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
@@ -928,7 +928,7 @@ void ModifyPlanWithoutPU(const PACCompatibilityResult &check, OptimizerExtension
 
 					if (i == 0) {
 						final_join =
-						    CreateLogicalJoin(check, input.context, std::move(existing_node), std::move(right_op));
+						    CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
 					} else {
 						final_join =
 						    CreateLogicalJoin(check, input.context, std::move(final_join), std::move(right_op));
