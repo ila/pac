@@ -32,32 +32,38 @@ FROM range(4000) t(i)
 
 # Ungrouped pac_count - should return variance of 64 bit counters
 query I
-SELECT pac_count(hash(rowid)::UBIGINT, 1, 0.0) IS NOT NULL FROM test_data
+SELECT pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL FROM test_data
 ----
 true
 
 # Verify ungrouped pac_count returns a bigint
 query I
-SELECT typeof(pac_count(hash(rowid)::UBIGINT, 1, 0.0)) FROM test_data
+SELECT typeof(pac_count(hash(rowid)::UBIGINT, 1)) FROM test_data
 ----
 BIGINT
 
 # Test with non-zero mi parameter (deterministic results due to pac_seed)
+statement ok
+SET pac_mi = 128
+
 query I
-SELECT pac_count(hash(rowid)::UBIGINT, 1, 128.0) IS NOT NULL FROM test_data
+SELECT pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL FROM test_data
 ----
 true
 
+statement ok
+SET pac_mi = 0
+
 # Test with explicit mi parameter (0.0 for no noise)
 query I
-SELECT pac_count(hash(rowid)::UBIGINT, 1, 0.0) IS NOT NULL FROM test_data
+SELECT pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL FROM test_data
 ----
 true
 
 # Grouped pac_count by value (0, 1, 2)
 # Each group has ~1333 rows
 query II
-SELECT value, pac_count(hash(rowid)::UBIGINT, 1, 0.0) IS NOT NULL AS has_result
+SELECT value, pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL AS has_result
 FROM test_data
 GROUP BY value
 ORDER BY value
@@ -68,7 +74,7 @@ ORDER BY value
 
 # Verify grouped results return bigints
 query II
-SELECT value, typeof(pac_count(hash(rowid)::UBIGINT, 1, 0.0)) AS result_type
+SELECT value, typeof(pac_count(hash(rowid)::UBIGINT, 1)) AS result_type
 FROM test_data
 GROUP BY value
 ORDER BY value
@@ -85,13 +91,13 @@ SELECT i AS rowid, i % 3 AS value,
 FROM range(4000) t(i)
 
 query I
-SELECT pac_count(key_hash, 1, 0.0) IS NOT NULL FROM test_with_nulls
+SELECT pac_count(key_hash, 1) IS NOT NULL FROM test_with_nulls
 ----
 true
 
 # Grouped with NULLs
 query II
-SELECT value, pac_count(key_hash, 1, 0.0) IS NOT NULL AS has_result
+SELECT value, pac_count(key_hash, 1) IS NOT NULL AS has_result
 FROM test_with_nulls
 GROUP BY value
 ORDER BY value
@@ -116,38 +122,38 @@ FROM range(120) t(i)
 # Basic column count - should count non-null values only
 # 120 rows total, 40 NULLs (every 3rd), so ~80 non-null
 query I
-SELECT pac_count(hash(rowid)::UBIGINT, nullable_col, 0.0) IS NOT NULL FROM test_nullable
+SELECT pac_count(hash(rowid)::UBIGINT, nullable_col) IS NOT NULL FROM test_nullable
 ----
 true
 
 # Verify return type
 query I
-SELECT typeof(pac_count(hash(rowid)::UBIGINT, nullable_col, 0.0)) FROM test_nullable
+SELECT typeof(pac_count(hash(rowid)::UBIGINT, nullable_col)) FROM test_nullable
 ----
 BIGINT
 
 # pac_count with column should return approximately COUNT(column)
 # COUNT(nullable_col) = 80, pac_count should be close
 query I
-SELECT abs(pac_count(hash(rowid)::UBIGINT, nullable_col, 0.0) - COUNT(nullable_col)) < 20 FROM test_nullable
+SELECT abs(pac_count(hash(rowid)::UBIGINT, nullable_col) - COUNT(nullable_col)) < 20 FROM test_nullable
 ----
 true
 
 # Column with no nulls (fast path) - should count all rows
 query I
-SELECT abs(pac_count(hash(rowid)::UBIGINT, non_null_col, 0.0) - COUNT(non_null_col)) < 20 FROM test_nullable
+SELECT abs(pac_count(hash(rowid)::UBIGINT, non_null_col) - COUNT(non_null_col)) < 20 FROM test_nullable
 ----
 true
 
 # Test with mi parameter: pac_count(hash, column, mi)
 query I
-SELECT pac_count(hash(rowid)::UBIGINT, nullable_col, 0.0) IS NOT NULL FROM test_nullable
+SELECT pac_count(hash(rowid)::UBIGINT, nullable_col) IS NOT NULL FROM test_nullable
 ----
 true
 
 # Grouped pac_count with column
 query II
-SELECT grp, pac_count(hash(rowid)::UBIGINT, nullable_col, 0.0) IS NOT NULL AS has_result
+SELECT grp, pac_count(hash(rowid)::UBIGINT, nullable_col) IS NOT NULL AS has_result
 FROM test_nullable
 GROUP BY grp
 ORDER BY grp
@@ -160,7 +166,7 @@ ORDER BY grp
 # Grouped count comparison - each group has 30 rows, ~20 non-null
 query I
 SELECT COUNT(*) = 4 FROM (
-    SELECT grp, pac_count(hash(rowid)::UBIGINT, nullable_col, 0.0) AS pc, COUNT(nullable_col) AS c
+    SELECT grp, pac_count(hash(rowid)::UBIGINT, nullable_col) AS pc, COUNT(nullable_col) AS c
     FROM test_nullable
     GROUP BY grp
     HAVING abs(pc - c) < 15
@@ -174,7 +180,7 @@ CREATE TABLE test_all_nulls AS
 SELECT i AS rowid, NULL::INTEGER AS all_null_col FROM range(100) t(i)
 
 query I
-SELECT pac_count(hash(rowid)::UBIGINT, all_null_col, 0.0) IS NULL FROM test_all_nulls
+SELECT pac_count(hash(rowid)::UBIGINT, all_null_col) IS NULL FROM test_all_nulls
 ----
 true
 

@@ -3,6 +3,7 @@
 //
 
 #include "compiler/pac_compiler_helpers.hpp"
+#include "pac_debug.hpp"
 #include "core/pac_optimizer.hpp"
 
 #include "duckdb/main/connection.hpp"
@@ -210,9 +211,10 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 			}
 		}
 
-#ifdef DEBUG
-		// Warn if we couldn't find some required columns
+		// If we couldn't find some required columns, fall back to projecting all columns
+		// This is a safety net for edge cases like missing schema PKs or PAC LINK metadata
 		if (!required_columns.empty() && found_columns.size() < required_set.size()) {
+#if PAC_DEBUG
 			string missing;
 			for (auto &col_name : required_columns) {
 				if (found_columns.count(StringUtil::Lower(col_name)) == 0) {
@@ -222,8 +224,9 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 					missing += col_name;
 				}
 			}
-			Printer::Print("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
-			               ", projecting all columns instead");
+			PAC_DEBUG_PRINT("CreateLogicalGet WARNING: Could not find columns [" + missing + "] in table " + table +
+			                ", projecting all columns instead");
+#endif
 
 			// Fall back to projecting all columns
 			return_types.clear();
@@ -237,7 +240,6 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 				projection_ids.push_back(column_ids.size() - 1);
 			}
 		}
-#endif
 
 		unique_ptr<LogicalGet> get = make_uniq<LogicalGet>(idx, scan_function, std::move(bind_data),
 		                                                   std::move(return_types), std::move(return_names));

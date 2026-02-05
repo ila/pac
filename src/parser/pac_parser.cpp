@@ -15,6 +15,7 @@
 //
 
 #include "parser/pac_parser.hpp"
+#include "pac_debug.hpp"
 
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -168,7 +169,7 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
 		string metadata_path = PACMetadataManager::GetMetadataFilePath(context);
 		// Don't save to file for in-memory databases
 		if (!metadata_path.empty()) {
-#ifdef DEBUG
+#if PAC_DEBUG
 			std::cerr << "[PAC DEBUG] PACDDLBindFunction: Saving metadata to: " << metadata_path << "\n";
 			std::cerr << "[PAC DEBUG] PACDDLBindFunction: table_name=" << table_name
 			          << ", sql_to_execute.empty()=" << sql_to_execute.empty() << "\n";

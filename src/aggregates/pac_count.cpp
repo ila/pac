@@ -5,29 +5,21 @@ namespace duckdb {
 
 static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFunction &func,
                                              vector<unique_ptr<Expression>> &args) {
-	// Check if pac_mi is explicitly set by the user - if so, use it and don't allow override
-	double mi = 128.0;
-	bool mi_from_setting = false;
-	Value pac_mi_val;
-	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
-		mi = pac_mi_val.GetValue<double>();
-		mi_from_setting = true;
-	}
+	// Read mi from pac_mi setting
+	double mi = GetPacMiFromSetting(ctx);
 
-	// Only allow override from function argument if pac_mi was not explicitly set
-	if (!mi_from_setting) {
-		for (idx_t i = 1; i < args.size(); i++) {
-			auto &arg = args[i];
-			if (arg->IsFoldable() &&
-			    (arg->return_type.IsNumeric() || arg->return_type.id() == LogicalTypeId::UNKNOWN)) {
-				auto val = ExpressionExecutor::EvaluateScalar(ctx, *arg);
-				if (val.type().IsNumeric()) {
-					mi = val.GetValue<double>();
-					if (mi < 0.0) {
-						throw InvalidInputException("pac_count: mi must be >= 0");
-					}
-					break;
+	// Get correction from optional argument (default 1.0)
+	double correction = 1.0;
+	for (idx_t i = 1; i < args.size(); i++) {
+		auto &arg = args[i];
+		if (arg->IsFoldable() && (arg->return_type.IsNumeric() || arg->return_type.id() == LogicalTypeId::UNKNOWN)) {
+			auto val = ExpressionExecutor::EvaluateScalar(ctx, *arg);
+			if (val.type().IsNumeric()) {
+				correction = val.GetValue<double>();
+				if (correction < 0.0) {
+					throw InvalidInputException("pac_count: correction must be >= 0");
 				}
+				break;
 			}
 		}
 	}
@@ -36,7 +28,9 @@ static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFuncti
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
-	return make_uniq<PacBindData>(mi, seed);
+	auto result = make_uniq<PacBindData>(mi, correction, seed);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 // State types: simple (non-scatter) always uses PacCountState directly
@@ -163,6 +157,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	std::mt19937_64 gen(seed);
 	double mi = input.bind_data->Cast<PacBindData>().mi;
+	double correction = input.bind_data->Cast<PacBindData>().correction;
+	uint64_t counter_selector = input.bind_data ? input.bind_data->Cast<PacBindData>().counter_selector : 0;
 	double buf[64];
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
@@ -170,8 +166,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 #endif
 		PacCountState *s = aggs[i]->GetState();
 		uint64_t key_hash = s ? s->key_hash : 0;
-		// Check if we should return NULL based on key_hash
-		if (PacNoiseInNull(key_hash, mi, gen)) {
+		// Check if we should return NULL based on key_hash (uses mi and correction)
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
 		}
@@ -181,7 +177,9 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		data[offset + i] = static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, gen, true, ~key_hash));
+		// Multiply by 2 to compensate for 50% sampling, then apply correction
+		data[offset + i] = static_cast<int64_t>(
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, counter_selector) * 2.0);
 	}
 }
 
@@ -194,9 +192,10 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 // against all subsamples and produce a mask.
 
 // Returns LIST<DOUBLE> with exactly 64 elements.
-// Position j is NULL if key_hash bit j is 0, otherwise value * 2 (to compensate for 50% sampling).
+// Position j is NULL if key_hash bit j is 0, otherwise value * correction.
 void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
+	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
 
 	// Result is LIST<DOUBLE>
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
@@ -209,6 +208,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 
 	auto child_data = FlatVector::GetData<double>(child_vec);
 	auto &child_validity = FlatVector::Validity(child_vec);
+	auto &result_validity = FlatVector::Validity(result);
 	double buf[64];
 
 	for (idx_t i = 0; i < count; i++) {
@@ -217,23 +217,30 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 #endif
 		PacCountState *s = aggs[i]->GetState();
 
-		// Set up the list entry
+		// Set up the list entry - always needed even for NULL results
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
-		uint64_t key_hash = s ? s->key_hash : 0;
-		if (s) {
-			s->FlushLevel(); // flush uint8_t level into uint64_t totals
-			s->GetTotalsAsDouble(buf);
-		} else {
-			memset(buf, 0, sizeof(buf));
+		if (!s) {
+			result_validity.SetInvalid(offset + i); // return NULL (no values seen)
+			// Still need to mark child elements as invalid for proper list structure
+			idx_t base = i * 64;
+			for (int j = 0; j < 64; j++) {
+				child_validity.SetInvalid(base + j);
+			}
+			continue;
 		}
 
-		// Copy counters to list: NULL where key_hash bit is 0, value * 2 otherwise
+		uint64_t key_hash = s->key_hash;
+		s->FlushLevel(); // flush uint8_t level into uint64_t totals
+		s->GetTotalsAsDouble(buf);
+
+		// Copy counters to list: NULL where key_hash bit is 0, value * 2 * correction otherwise
+		// The 2x factor compensates for 50% sampling, correction is user-specified multiplier
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
 			if ((key_hash >> j) & 1ULL) {
-				child_data[base + j] = buf[j] * 2.0; // multiply by 2 to compensate for 50% sampling
+				child_data[base + j] = buf[j] * 2.0 * correction; // 2x for 50% sampling, then correction
 			} else {
 				child_validity.SetInvalid(base + j); // NULL for positions not sampled
 			}

@@ -31,31 +31,37 @@ FROM range(4000) t(i)
 
 # Ungrouped pac_avg with INTEGER
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
 # Verify returns DOUBLE for integers
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::INTEGER, 0.0)) FROM test_data
+SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
 ----
 DOUBLE
 
 # Test with non-zero mi parameter (deterministic results due to pac_seed)
+statement ok
+SET pac_mi = 128
+
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER, 128.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
+statement ok
+SET pac_mi = 0
+
 # Test with explicit mi parameter (0.0 for no noise)
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
 # Grouped pac_avg
 query II
-SELECT grp, pac_avg(hash(rowid)::UBIGINT, value::INTEGER, 0.0) IS NOT NULL AS has_result
+SELECT grp, pac_avg(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL AS has_result
 FROM test_data
 GROUP BY grp
 ORDER BY grp
@@ -66,43 +72,43 @@ ORDER BY grp
 
 # Test with different numeric types
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::BIGINT, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, value::BIGINT) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::DOUBLE, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, value::DOUBLE) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::FLOAT, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, value::FLOAT) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value::SMALLINT, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, value::SMALLINT) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, (value % 127)::TINYINT, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, (value % 127)::TINYINT) IS NOT NULL FROM test_data
 ----
 true
 
 # Verify return type is always DOUBLE
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::BIGINT, 0.0)) FROM test_data
+SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::BIGINT)) FROM test_data
 ----
 DOUBLE
 
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::DOUBLE, 0.0)) FROM test_data
+SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::DOUBLE)) FROM test_data
 ----
 DOUBLE
 
 query I
-SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::TINYINT, 0.0)) FROM test_data
+SELECT typeof(pac_avg(hash(rowid)::UBIGINT, value::TINYINT)) FROM test_data
 ----
 DOUBLE
 
@@ -112,13 +118,13 @@ DOUBLE
 
 # Test ungrouped: NULL in value is ignored, result is NOT NULL
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(hash(rowid)::UBIGINT, CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
 # Test ungrouped: NULL in key_hash is ignored, result is NOT NULL
 query I
-SELECT pac_avg(CASE WHEN rowid = 50 THEN NULL ELSE hash(rowid)::UBIGINT END, value::INTEGER, 0.0) IS NOT NULL FROM test_data
+SELECT pac_avg(CASE WHEN rowid = 50 THEN NULL ELSE hash(rowid)::UBIGINT END, value::INTEGER) IS NOT NULL FROM test_data
 ----
 true
 
@@ -131,7 +137,7 @@ FROM range(30) t(i)
 
 # All groups should have non-NULL results (NULLs are just ignored)
 query II
-SELECT grp, pac_avg(hash(rowid)::UBIGINT, value, 0.0) IS NULL AS is_null
+SELECT grp, pac_avg(hash(rowid)::UBIGINT, value) IS NULL AS is_null
 FROM test_null_groups
 GROUP BY grp
 ORDER BY grp
@@ -150,14 +156,14 @@ DROP TABLE test_null_groups
 # With large enough data, pac_avg should be reasonably close to AVG
 # Using a tolerance of 10% of the actual average
 query I
-SELECT abs(pac_avg(hash(rowid)::UBIGINT, value::INTEGER, 0.0) - AVG(value)) < (AVG(value) * 0.1) FROM test_data
+SELECT abs(pac_avg(hash(rowid)::UBIGINT, value::INTEGER) - AVG(value)) < (AVG(value) * 0.1) FROM test_data
 ----
 true
 
 # Test grouped accuracy
 query I
 SELECT COUNT(*) = 3 FROM (
-    SELECT grp, pac_avg(hash(rowid)::UBIGINT, value::INTEGER, 0.0) AS pa, AVG(value) AS a
+    SELECT grp, pac_avg(hash(rowid)::UBIGINT, value::INTEGER) AS pa, AVG(value) AS a
     FROM test_data
     GROUP BY grp
     HAVING abs(pa - a) < (a * 0.2)
@@ -175,7 +181,7 @@ CREATE TABLE test_single AS
 SELECT 1 AS rowid, 42.0 AS value
 
 query I
-SELECT pac_avg(hash(rowid)::UBIGINT, value, 0.0) IS NOT NULL FROM test_single
+SELECT pac_avg(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_single
 ----
 1
 
@@ -188,7 +194,7 @@ CREATE TABLE test_constant AS
 SELECT i AS rowid, 50.0 AS value FROM range(1000) t(i)
 
 query I
-SELECT abs(pac_avg(hash(rowid)::UBIGINT, value, 0.0) - 50.0) < 10 FROM test_constant
+SELECT abs(pac_avg(hash(rowid)::UBIGINT, value) - 50.0) < 10 FROM test_constant
 ----
 true
 

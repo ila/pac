@@ -37,6 +37,13 @@ struct JoinChainResult {
 	}
 };
 
+// Chain joins from a pre-built map of LogicalGet nodes
+// Takes ownership of gets from the map and returns the final joined operator
+unique_ptr<LogicalOperator> ChainJoinsFromGetMap(const PACCompatibilityResult &check, ClientContext &context,
+                                                 unique_ptr<LogicalOperator> left_node,
+                                                 std::unordered_map<string, unique_ptr<LogicalGet>> &get_map,
+                                                 const vector<string> &tables_to_join);
+
 // Build a join chain from an existing node through a list of tables
 // Returns the joined operator and the table index of the FK table
 JoinChainResult BuildJoinChain(const PACCompatibilityResult &check, ClientContext &context,

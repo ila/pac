@@ -95,7 +95,9 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	auto &result_mask = FlatVector::Validity(result);
 
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
-	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
+	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
+	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+	uint64_t counter_selector = input.bind_data ? input.bind_data->Cast<PacBindData>().counter_selector : 0;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -108,7 +110,8 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		// Use per-group deterministic RNG seeded by both pac_seed and key_hash
 		// This ensures each group gets the same noise regardless of processing order
 		std::mt19937_64 gen(seed ^ key_hash);
-		if (PacNoiseInNull(key_hash, mi, gen)) {
+		// mi controls noise mode, correction reduces NULL probability (but does NOT scale min/max values)
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
 		}
@@ -118,10 +121,9 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		for (int j = 0; j < 64; j++) {
-			buf[j] /= 2.0; // if we add noise of the same scale to a min or max, it gets twice too big
-		}
-		data[offset + i] = FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, gen, true, ~key_hash));
+		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
+		data[offset + i] =
+		    FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, true, ~key_hash, counter_selector));
 	}
 }
 
@@ -182,16 +184,19 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 	}
 #undef BIND_TYPE
 
-	// Get mi parameter
-	double mi = 128.0;
+	// Read mi from pac_mi setting
+	double mi = GetPacMiFromSetting(ctx);
+
+	// Get correction from optional 3rd argument (default 1.0)
+	double correction = 1.0;
 	if (args.size() >= 3) {
 		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_%s: mi parameter must be a constant", IS_MAX ? "max" : "min");
+			throw InvalidInputException("pac_%s: correction parameter must be a constant", IS_MAX ? "max" : "min");
 		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		mi = mi_val.GetValue<double>();
-		if (mi < 0.0) {
-			throw InvalidInputException("pac_%s: mi must be >= 0", IS_MAX ? "max" : "min");
+		auto correction_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
+		correction = correction_val.GetValue<double>();
+		if (correction < 0.0) {
+			throw InvalidInputException("pac_%s: correction must be >= 0", IS_MAX ? "max" : "min");
 		}
 	}
 
@@ -201,7 +206,9 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
 
-	return make_uniq<PacBindData>(mi, seed);
+	auto result = make_uniq<PacBindData>(mi, correction, seed);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 // ============================================================================
@@ -223,6 +230,7 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 
 	auto child_data = FlatVector::GetData<double>(child_vec);
 	auto &child_validity = FlatVector::Validity(child_vec);
+	auto &result_validity = FlatVector::Validity(result);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -231,31 +239,32 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 #endif
 		auto *s = state_ptrs[i]->GetState();
 
-		// Set up the list entry
+		// Set up the list entry - always needed even for NULL results
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
-		double *dst = &child_data[i * 64];
-		if (s && s->initialized) {
-			uint64_t key_hash = s->key_hash;
-			// For each counter position, check if it was ever updated
-			for (idx_t j = 0; j < 64; j++) {
-				idx_t child_idx = i * 64 + j;
-				if ((key_hash >> j) & 1) {
-					// Counter was updated - return the value (no scaling for min/max)
-					dst[j] = ToDouble(s->extremes[j]);
-				} else {
-					// Counter was never updated - return NULL
-					// Assert that unset counters have their initialization value
-					D_ASSERT(s->extremes[j] ==
-					         (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
-					child_validity.SetInvalid(child_idx);
-				}
-			}
-		} else {
-			// No state - all counters are NULL
+		if (!s || !s->initialized) {
+			result_validity.SetInvalid(offset + i); // return NULL (no values seen)
+			// Still need to mark child elements as invalid for proper list structure
 			for (idx_t j = 0; j < 64; j++) {
 				child_validity.SetInvalid(i * 64 + j);
+			}
+			continue;
+		}
+
+		uint64_t key_hash = s->key_hash;
+		double *dst = &child_data[i * 64];
+		// For each counter position, check if it was ever updated
+		for (idx_t j = 0; j < 64; j++) {
+			idx_t child_idx = i * 64 + j;
+			if ((key_hash >> j) & 1) {
+				// Counter was updated - return the value (no scaling for min/max)
+				dst[j] = ToDouble(s->extremes[j]);
+			} else {
+				// Counter was never updated - return NULL
+				// Assert that unset counters have their initialization value
+				D_ASSERT(s->extremes[j] == (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
+				child_validity.SetInvalid(child_idx);
 			}
 		}
 	}
@@ -301,14 +310,18 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 	}
 #undef BIND_COUNTERS_TYPE
 
-	// Get mi parameter (not used for counters, but kept for consistency)
-	double mi = 128.0;
+	// Read mi from pac_mi setting
+	double mi = GetPacMiFromSetting(ctx);
+
+	// Get correction from optional 3rd argument (default 1.0, not used for counters but kept for consistency)
+	double correction = 1.0;
 	if (args.size() >= 3) {
 		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_%s_counters: mi parameter must be a constant", IS_MAX ? "max" : "min");
+			throw InvalidInputException("pac_%s_counters: correction parameter must be a constant",
+			                            IS_MAX ? "max" : "min");
 		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		mi = mi_val.GetValue<double>();
+		auto correction_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
+		correction = correction_val.GetValue<double>();
 	}
 
 	uint64_t seed = std::random_device {}();
@@ -317,7 +330,9 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
 
-	return make_uniq<PacBindData>(mi, seed);
+	auto result = make_uniq<PacBindData>(mi, correction, seed);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 // ============================================================================

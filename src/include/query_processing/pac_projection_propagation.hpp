@@ -13,7 +13,7 @@ namespace duckdb {
 
 class LogicalGet;
 class LogicalAggregate;
-class OptimizerExtensionInput;
+struct OptimizerExtensionInput;
 
 /**
  * PropagatePKThroughProjections: Propagates primary key columns through projection operators

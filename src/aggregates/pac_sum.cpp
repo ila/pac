@@ -404,7 +404,9 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
-	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 128.0;
+	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
+	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+	uint64_t counter_selector = input.bind_data ? input.bind_data->Cast<PacBindData>().counter_selector : 0;
 	// scale_divisor is used by pac_avg on DECIMAL to convert internal integer representation back to decimal
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
 
@@ -423,7 +425,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		uint64_t key_hash = pos->key_hash;
 		uint64_t exact_count = pos->exact_count;
 		std::mt19937_64 gen(seed ^ key_hash);
-		if (PacNoiseInNull(key_hash, mi, gen)) {
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
 			continue;
 		}
@@ -442,7 +444,12 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 				buf[j] /= divisor;
 			}
 		}
-		data[offset + i] = FromDouble<ACC_TYPE>(PacNoisySampleFrom64Counters(buf, mi, gen, true, ~key_hash));
+		double result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, counter_selector);
+		// Both pac_sum and pac_avg need 2x compensation:
+		// - pac_sum: doubles the sum to compensate for ~50% of values contributing to each counter
+		// - pac_avg: compensates for dividing by total_count instead of per-counter count
+		result_val *= 2.0;
+		data[offset + i] = FromDouble<ACC_TYPE>(result_val);
 	}
 }
 
@@ -578,24 +585,19 @@ void PacAvgFinalizeUnsignedDouble(Vector &states, AggregateInputData &input, Vec
 // Internal bind helper with scale_divisor parameter (used by BindDecimalPacSumAvg)
 static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vector<unique_ptr<Expression>> &args,
                                                         double scale_divisor) {
-	// Check if pac_mi is explicitly set by the user - if so, use it and don't allow override
-	double mi = 128.0;
-	bool mi_from_setting = false;
-	Value pac_mi_val;
-	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
-		mi = pac_mi_val.GetValue<double>();
-		mi_from_setting = true;
-	}
+	// Read mi from pac_mi setting
+	double mi = GetPacMiFromSetting(ctx);
 
-	// Only allow override from function argument if pac_mi was not explicitly set
-	if (!mi_from_setting && args.size() >= 3) {
+	// Get correction from optional 3rd argument (default 1.0)
+	double correction = 1.0;
+	if (args.size() >= 3) {
 		if (!args[2]->IsFoldable()) {
-			throw InvalidInputException("pac_sum/pac_avg: mi parameter must be a constant");
+			throw InvalidInputException("pac_sum/pac_avg: correction parameter must be a constant");
 		}
-		auto mi_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
-		mi = mi_val.GetValue<double>();
-		if (mi < 0.0) {
-			throw InvalidInputException("pac_sum/pac_avg: mi must be >= 0");
+		auto correction_val = ExpressionExecutor::EvaluateScalar(ctx, *args[2]);
+		correction = correction_val.GetValue<double>();
+		if (correction < 0.0) {
+			throw InvalidInputException("pac_sum/pac_avg: correction must be >= 0");
 		}
 	}
 	// Read pac_seed setting (optional) to produce deterministic RNG seed for tests
@@ -604,7 +606,9 @@ static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vect
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
-	return make_uniq<PacBindData>(mi, seed, scale_divisor);
+	auto result = make_uniq<PacBindData>(mi, correction, seed, scale_divisor);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
@@ -804,6 +808,10 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 
 	// scale_divisor for DECIMAL support (used by pac_avg)
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
+	// correction factor for value scaling
+	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+
+	auto &result_validity = FlatVector::Validity(result);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -811,13 +819,19 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 #endif
 		auto *s = state_ptrs[i]->GetState();
 
-		// Set up the list entry
+		// Set up the list entry - always needed even for NULL results
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
 		double buf[64] = {0};
 		uint64_t key_hash = 0;
-		if (s) {
+
+		// If no values were processed, key_hash stays 0, buf stays all zeros
+		// All 64 positions will be marked as NULL (key_hash bit = 0)
+		// Also set the result row itself to NULL for DEFAULT_NULL_HANDLING
+		if (!s) {
+			result_validity.SetInvalid(offset + i);
+		} else {
 			key_hash = s->key_hash;
 			uint64_t exact_count = s->exact_count;
 #ifndef PAC_SIGNEDSUM
@@ -841,14 +855,13 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 		}
 
 		// Copy counters to list: NULL where key_hash bit is 0, value (scaled) otherwise
-		// For pac_sum_counters: multiply by 2 to compensate for 50% sampling
-		// For pac_avg_counters: no scaling needed (both sum and count are halved, ratio unchanged)
+		// Both pac_sum_counters and pac_avg_counters need 2x compensation:
+		// - pac_sum_counters: doubles sum to compensate for ~50% of values in each counter
+		// - pac_avg_counters: compensates for dividing by total_count instead of per-counter count
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
 			if ((key_hash >> j) & 1ULL) {
-				// DIVIDE_BY_COUNT=true means pac_avg_counters, no scaling needed
-				// DIVIDE_BY_COUNT=false means pac_sum_counters, scale by 2
-				child_data[base + j] = DIVIDE_BY_COUNT ? buf[j] : buf[j] * 2.0;
+				child_data[base + j] = buf[j] * 2.0 * correction;
 			} else {
 				child_validity.SetInvalid(base + j); // NULL for positions not sampled
 			}

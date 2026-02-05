@@ -3,6 +3,7 @@
 //
 
 #include "core/pac_optimizer.hpp"
+#include "pac_debug.hpp"
 #include <unordered_set>
 #include <string>
 #include <algorithm>
@@ -32,8 +33,7 @@ namespace duckdb {
 // are re-enabled even if an exception is thrown or an early return occurs.
 class OptimizerRestoreGuard {
 public:
-	OptimizerRestoreGuard(ClientContext &context, PACOptimizerInfo *pac_info)
-	    : context(context), pac_info(pac_info), restored(false) {
+	OptimizerRestoreGuard(ClientContext &context, PACOptimizerInfo *pac_info) : we_disabled_optimizers(false) {
 		if (pac_info) {
 			std::lock_guard<std::mutex> lock(pac_info->optimizer_mutex);
 			auto &config = DBConfig::GetConfig(context);
@@ -49,7 +49,6 @@ public:
 				pac_info->disabled_compressed_materialization = false;
 				we_disabled_optimizers = true;
 			}
-			restored = true;
 		}
 	}
 
@@ -62,10 +61,7 @@ public:
 	}
 
 private:
-	ClientContext &context;
-	PACOptimizerInfo *pac_info;
-	bool restored;
-	bool we_disabled_optimizers = false;
+	bool we_disabled_optimizers;
 };
 
 // ============================================================================
@@ -79,12 +75,46 @@ static void RunDeferredOptimizers(OptimizerExtensionInput &input, unique_ptr<Log
 		return;
 	}
 
-#ifdef DEBUG
+#if PAC_DEBUG
 	if (pac_compiled) {
-		Printer::Print("=== PLAN AFTER PAC COMPILATION (before deferred optimizers) ===");
+		PAC_DEBUG_PRINT("=== PLAN AFTER PAC COMPILATION (before deferred optimizers) ===");
 		plan->Print();
 	}
 #endif
+
+	// Update the binder's table index counter to avoid conflicts with PAC-inserted operators
+	// PAC transformation may create operators with table indices higher than what the binder tracks
+	// Also count the number of nodes as a safety buffer
+	idx_t max_idx = 0;
+	idx_t node_count = 0;
+	std::function<void(LogicalOperator *)> findMaxIndexAndCount = [&](LogicalOperator *op) {
+		if (!op) {
+			return;
+		}
+		node_count++;
+		auto indices = op->GetTableIndex();
+		for (auto idx : indices) {
+			if (idx != DConstants::INVALID_INDEX && idx > max_idx) {
+				max_idx = idx;
+			}
+		}
+		for (auto &child : op->children) {
+			findMaxIndexAndCount(child.get());
+		}
+	};
+	findMaxIndexAndCount(plan.get());
+
+	// Use max_idx + node_count as the target to be safe
+	// This provides a buffer in case any table indices were missed
+	idx_t target_idx = max_idx + node_count;
+
+	// Ensure binder's table index counter is high enough so new table indices don't conflict
+	// GenerateTableIndex() returns the current value and increments it, so we call it
+	// until it returns a value higher than target_idx
+	idx_t current_idx = input.optimizer.binder.GenerateTableIndex();
+	while (current_idx <= target_idx) {
+		current_idx = input.optimizer.binder.GenerateTableIndex();
+	}
 
 	// Run column lifetime analyzer
 	ColumnLifetimeAnalyzer column_lifetime(input.optimizer, *plan, true);
@@ -97,12 +127,14 @@ static void RunDeferredOptimizers(OptimizerExtensionInput &input, unique_ptr<Log
 		compressed_materialization.Compress(plan);
 	}
 
-	// Resolve operator types after running optimizers
+	// Resolve operator types after deferred optimizers to ensure type consistency
+	// This is needed because ColumnLifetimeAnalyzer and CompressedMaterialization may
+	// modify the plan structure, and we need types to be properly synced for debug assertions
 	plan->ResolveOperatorTypes();
 
-#ifdef DEBUG
+#if PAC_DEBUG
 	if (pac_compiled) {
-		Printer::Print("=== FINAL PLAN (after deferred optimizers) ===");
+		PAC_DEBUG_PRINT("=== FINAL PLAN (after deferred optimizers) ===");
 		plan->Print();
 	}
 #endif
@@ -140,7 +172,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 		return;
 	}
 
-#ifdef DEBUG
+#if PAC_DEBUG
 	std::cerr << "[PAC DEBUG] DROP TABLE detected for table with PAC metadata: " << table_name << "\n";
 #endif
 
@@ -186,7 +218,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 		// Update the metadata
 		metadata_mgr.AddOrUpdateTable(other_table, updated_metadata);
 
-#ifdef DEBUG
+#if PAC_DEBUG
 		std::cerr << "[PAC DEBUG] Removed PAC LINKs from table '" << other_table << "' that referenced dropped table '"
 		          << table_name << "'"
 		          << "\n";
@@ -196,7 +228,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	// Remove metadata for the dropped table
 	metadata_mgr.RemoveTable(table_name);
 
-#ifdef DEBUG
+#if PAC_DEBUG
 	std::cerr << "[PAC DEBUG] Removed PAC metadata for dropped table: " << table_name << "\n";
 #endif
 
@@ -204,7 +236,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	string metadata_path = PACMetadataManager::GetMetadataFilePath(input.context);
 	if (!metadata_path.empty()) {
 		metadata_mgr.SaveToFile(metadata_path);
-#ifdef DEBUG
+#if PAC_DEBUG
 		std::cerr << "[PAC DEBUG] Saved updated PAC metadata after DROP TABLE"
 		          << "\n";
 #endif
@@ -355,18 +387,18 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 
 	vector<string> privacy_units = std::move(discovered_pus);
 
+#if PAC_DEBUG
 	// Print discovered PKs for diagnostics (if available) for each privacy unit
 	for (auto &pu : privacy_units) {
 		auto it = check.table_metadata.find(pu);
 		if (it != check.table_metadata.end() && !it->second.pks.empty()) {
-#ifdef DEBUG
-			Printer::Print("Discovered primary key columns for privacy unit '" + pu + "':");
+			PAC_DEBUG_PRINT("Discovered primary key columns for privacy unit '" + pu + "':");
 			for (const auto &col : it->second.pks) {
-				Printer::Print(col);
+				PAC_DEBUG_PRINT(col);
 			}
-#endif
 		}
 	}
+#endif
 
 	// Only proceed with compilation if plan passed structural eligibility
 	if (!check.eligible_for_rewrite) {
@@ -380,10 +412,10 @@ void PACRewriteRule::PACRewriteRuleFunction(OptimizerExtensionInput &input, uniq
 	bool apply_noise = IsPacNoiseEnabled(input.context, true);
 	bool pac_compiled = false;
 	if (apply_noise) {
-#ifdef DEBUG
-		Printer::Print("Query requires PAC Compilation for privacy units:");
-		for (auto &pu : privacy_units) {
-			Printer::Print("  " + pu);
+#if PAC_DEBUG
+		PAC_DEBUG_PRINT("Query requires PAC Compilation for privacy units:");
+		for (const auto &pu_name : privacy_units) {
+			PAC_DEBUG_PRINT("  " + pu_name);
 		}
 #endif
 

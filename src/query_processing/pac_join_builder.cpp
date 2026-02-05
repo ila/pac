@@ -30,6 +30,25 @@ CreateLogicalGetsForTables(ClientContext &context, unique_ptr<LogicalOperator> &
 	return get_map;
 }
 
+unique_ptr<LogicalOperator> ChainJoinsFromGetMap(const PACCompatibilityResult &check, ClientContext &context,
+                                                 unique_ptr<LogicalOperator> left_node,
+                                                 std::unordered_map<string, unique_ptr<LogicalGet>> &get_map,
+                                                 const vector<string> &tables_to_join) {
+	if (tables_to_join.empty()) {
+		return left_node;
+	}
+
+	unique_ptr<LogicalOperator> result = std::move(left_node);
+	for (auto &tbl_name : tables_to_join) {
+		unique_ptr<LogicalGet> right_op = std::move(get_map[tbl_name]);
+		if (!right_op) {
+			throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
+		}
+		result = CreateLogicalJoin(check, context, std::move(result), std::move(right_op));
+	}
+	return result;
+}
+
 JoinChainResult BuildJoinChain(const PACCompatibilityResult &check, ClientContext &context,
                                unique_ptr<LogicalOperator> &plan, unique_ptr<LogicalOperator> existing_node,
                                const vector<string> &tables_to_join, const string &fk_table_with_pu_reference,
@@ -57,18 +76,7 @@ JoinChainResult BuildJoinChain(const PACCompatibilityResult &check, ClientContex
 		}
 	}
 
-	// Build the join chain
-	unique_ptr<LogicalOperator> final_join = std::move(existing_node);
-	for (size_t i = 0; i < tables_to_join.size(); ++i) {
-		auto &tbl_name = tables_to_join[i];
-		unique_ptr<LogicalGet> right_op = std::move(local_get_map[tbl_name]);
-		if (!right_op) {
-			throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
-		}
-
-		final_join = CreateLogicalJoin(check, context, std::move(final_join), std::move(right_op));
-	}
-
+	auto final_join = ChainJoinsFromGetMap(check, context, std::move(existing_node), local_get_map, tables_to_join);
 	return JoinChainResult(std::move(final_join), fk_table_index);
 }
 
