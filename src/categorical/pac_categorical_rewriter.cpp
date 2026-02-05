@@ -246,8 +246,9 @@ static LogicalOperator *RecognizeDuckDBScalarWrapper(LogicalOperator *op) {
 					}
 				}
 			}
-			if (has_error_case)
+			if (has_error_case) {
 				break;
+			}
 		}
 	}
 
@@ -1124,16 +1125,21 @@ static void ReplacePacAggregatesInPlan(LogicalOperator *op, OptimizerExtensionIn
 
 // Map standard aggregate names to their pac_*_list equivalents
 static string GetListAggregateVariant(const string &name) {
-	if (name == "sum")
+	if (name == "sum") {
 		return "pac_sum_list";
-	if (name == "avg")
+	}
+	if (name == "avg") {
 		return "pac_avg_list";
-	if (name == "count")
+	}
+	if (name == "count") {
 		return "pac_count_list";
-	if (name == "min")
+	}
+	if (name == "min") {
 		return "pac_min_list";
-	if (name == "max")
+	}
+	if (name == "max") {
 		return "pac_max_list";
+	}
 	// Note: first/any_value are used by scalar subquery handlers.
 	// We don't convert them - instead we strip the scalar subquery wrapper entirely.
 	return "";
@@ -1141,8 +1147,9 @@ static string GetListAggregateVariant(const string &name) {
 
 // Check if an expression traces back to a PAC _counters aggregate
 static bool TracesPacCountersAggregate(Expression *expr, LogicalOperator *plan_root) {
-	if (!expr || !plan_root)
+	if (!expr || !plan_root) {
 		return false;
+	}
 
 	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = expr->Cast<BoundColumnRefExpression>();
@@ -1164,30 +1171,35 @@ static bool TracesPacCountersAggregate(Expression *expr, LogicalOperator *plan_r
 // Replace standard aggregates that operate on PAC counter results
 // with pac_*_list variants that aggregate element-wise
 static void ReplaceAggregatesOverCounters(LogicalOperator *op, ClientContext &context, LogicalOperator *plan_root) {
-	if (!op)
+	if (!op) {
 		return;
+	}
 
 	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &agg = op->Cast<LogicalAggregate>();
 		for (idx_t i = 0; i < agg.expressions.size(); i++) {
 			auto &agg_expr = agg.expressions[i];
-			if (agg_expr->type != ExpressionType::BOUND_AGGREGATE)
+			if (agg_expr->type != ExpressionType::BOUND_AGGREGATE) {
 				continue;
+			}
 
 			auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
-			if (bound_agg.children.empty())
+			if (bound_agg.children.empty()) {
 				continue;
+			}
 
 			// Check if input traces to a PAC _counters aggregate
 			bool traces_counters = TracesPacCountersAggregate(bound_agg.children[0].get(), plan_root);
 			PAC_DEBUG_PRINT("  Checking aggregate " + bound_agg.function.name +
 			                " traces_counters=" + (traces_counters ? "true" : "false"));
-			if (!traces_counters)
+			if (!traces_counters) {
 				continue;
+			}
 
 			string list_variant = GetListAggregateVariant(bound_agg.function.name);
-			if (list_variant.empty())
+			if (list_variant.empty()) {
 				continue;
+			}
 
 			PAC_DEBUG_PRINT("Converting " + bound_agg.function.name + " over LIST<DOUBLE> to " + list_variant);
 
@@ -1238,8 +1250,9 @@ static void ReplaceAggregatesOverCounters(LogicalOperator *op, ClientContext &co
 // This ensures that child aggregates are converted before checking parent aggregates
 static void ReplaceAggregatesOverCountersBottomUp(LogicalOperator *op, ClientContext &context,
                                                   LogicalOperator *plan_root) {
-	if (!op)
+	if (!op) {
 		return;
+	}
 
 	// First, process all children (bottom-up)
 	for (auto &child : op->children) {
@@ -2039,8 +2052,9 @@ static void UpdateExpressionTypesToList(Expression *expr, LogicalOperator *plan_
 // Sync column ref types in a single expression tree (bottom-up within expression)
 // Also propagates LIST<DOUBLE> types up through parent expressions like CASE, CAST, etc.
 static void SyncColumnRefTypesInExpression(Expression *expr, LogicalOperator *plan_root) {
-	if (!expr)
+	if (!expr) {
 		return;
+	}
 
 	// First recurse into all children (bottom-up: children before parent)
 	ExpressionIterator::EnumerateChildren(
@@ -2113,8 +2127,9 @@ static void SyncColumnRefTypesInExpression(Expression *expr, LogicalOperator *pl
 // Call this after all aggregate conversions to ensure types are consistent
 // Uses BOTTOM-UP processing so that child operator types are updated before we query them
 static void SyncColumnRefTypes(LogicalOperator *op, LogicalOperator *plan_root) {
-	if (!op)
+	if (!op) {
 		return;
+	}
 
 	// First recurse into children (BOTTOM-UP: children before current operator)
 	// This ensures that when we query GetBindingReturnType for a projection,
@@ -2160,8 +2175,9 @@ static void SyncColumnRefTypes(LogicalOperator *op, LogicalOperator *plan_root) 
 // Strip invalid CAST expressions from the plan where child is LIST but CAST expects scalar
 // Returns true if the expression was modified
 static bool StripInvalidCastsInExpression(unique_ptr<Expression> &expr) {
-	if (!expr)
+	if (!expr) {
 		return false;
+	}
 	bool modified = false;
 
 	// First recurse into children
@@ -2188,8 +2204,9 @@ static bool StripInvalidCastsInExpression(unique_ptr<Expression> &expr) {
 
 // Strip invalid CASTs throughout the plan
 static void StripInvalidCastsInPlan(LogicalOperator *op) {
-	if (!op)
+	if (!op) {
 		return;
+	}
 
 	// First recurse into children
 	for (auto &child : op->children) {
@@ -2324,20 +2341,24 @@ static void StripScalarWrapperInPlace(unique_ptr<LogicalOperator> &wrapper_ptr) 
 	}
 
 	auto &outer_proj = wrapper_ptr->Cast<LogicalProjection>();
-	if (outer_proj.children.empty())
+	if (outer_proj.children.empty()) {
 		return;
+	}
 
 	auto *agg_op = outer_proj.children[0].get();
-	if (agg_op->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY)
+	if (agg_op->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		return;
+	}
 
 	auto &agg = agg_op->Cast<LogicalAggregate>();
-	if (agg.children.empty())
+	if (agg.children.empty()) {
 		return;
+	}
 
 	auto *inner_proj_op = agg.children[0].get();
-	if (inner_proj_op->type != LogicalOperatorType::LOGICAL_PROJECTION)
+	if (inner_proj_op->type != LogicalOperatorType::LOGICAL_PROJECTION) {
 		return;
+	}
 
 	auto &inner_proj = inner_proj_op->Cast<LogicalProjection>();
 
@@ -2874,8 +2895,9 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	// Search the entire plan for wrapper patterns containing PAC aggregates
 	PAC_DEBUG_PRINT("=== Stripping scalar subquery wrappers ===");
 	std::function<void(LogicalOperator *)> stripWrappersRecursive = [&](LogicalOperator *op) {
-		if (!op)
+		if (!op) {
 			return;
+		}
 
 		// Check each child - if it's a wrapper, replace it in place
 		for (auto &child : op->children) {
@@ -3200,7 +3222,7 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 									// Not a simple column ref - check if it's from an aggregate child
 									// In categorical mode, assume any complex expression from a projection
 									// that traces here is likely LIST<DOUBLE>
-									if (source->children.size() > 0) {
+									if (!source->children.empty()) {
 										auto *child_source = source->children[0].get();
 										if (child_source &&
 										    child_source->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
@@ -3363,9 +3385,10 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 
 				// Debug: print full expression tree
 				std::function<void(Expression *, int)> printExprTree = [&](Expression *e, int depth) {
-					if (!e)
+					if (!e) {
 						return;
-					string indent(depth * 2, ' ');
+					}
+					string indent(static_cast<size_t>(depth) * 2, ' ');
 					PAC_DEBUG_PRINT(indent + "- " + ExpressionTypeToString(e->type) + ": " +
 					                e->ToString().substr(0, 80));
 					ExpressionIterator::EnumerateChildren(*e,
@@ -3390,8 +3413,9 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 				bool replaced = false;
 				std::function<void(unique_ptr<LogicalOperator> &)> replace_join;
 				replace_join = [&](unique_ptr<LogicalOperator> &op) {
-					if (!op || replaced)
+					if (!op || replaced) {
 						return;
+					}
 					for (auto &child : op->children) {
 						if (child.get() == pattern.parent_op) {
 							child = std::move(filter);
@@ -3543,9 +3567,10 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	// Debug: Print types of all projections to see if our changes persisted
 	PAC_DEBUG_PRINT("=== FINAL TYPE CHECK ===");
 	std::function<void(LogicalOperator *, int)> printTypes = [&](LogicalOperator *op, int depth) {
-		if (!op)
+		if (!op) {
 			return;
-		string indent(depth * 2, ' ');
+		}
+		string indent(static_cast<size_t>(depth) * 2, ' ');
 		if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 			auto &proj = op->Cast<LogicalProjection>();
 			PAC_DEBUG_PRINT(indent + "PROJECTION #" + std::to_string(proj.table_index) + " types:");

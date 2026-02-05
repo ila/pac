@@ -88,8 +88,9 @@ static void RunDeferredOptimizers(OptimizerExtensionInput &input, unique_ptr<Log
 	idx_t max_idx = 0;
 	idx_t node_count = 0;
 	std::function<void(LogicalOperator *)> findMaxIndexAndCount = [&](LogicalOperator *op) {
-		if (!op)
+		if (!op) {
 			return;
+		}
 		node_count++;
 		auto indices = op->GetTableIndex();
 		for (auto idx : indices) {

@@ -446,7 +446,7 @@ bool AreTableColumnsAccessible(LogicalOperator *from_op, idx_t table_index) {
 				}
 
 				// Check left child (accessible side)
-				if (op->children.size() >= 1 && check_accessible(op->children[0].get())) {
+				if (!op->children.empty() && check_accessible(op->children[0].get())) {
 					return true;
 				}
 

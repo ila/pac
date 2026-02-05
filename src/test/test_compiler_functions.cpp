@@ -214,7 +214,7 @@ static bool VerifyExprTypesMatchProducers(LogicalOperator *root) {
 					    ok = false;
 					    return;
 				    }
-				    auto prod_type = types[bcr.binding.column_index];
+				    const auto &prod_type = types[bcr.binding.column_index];
 				    if (bcr.return_type.id() != prod_type.id()) {
 					    std::cerr << "Verification failure: expression type mismatch for binding (table="
 					              << bcr.binding.table_index << ", col=" << bcr.binding.column_index

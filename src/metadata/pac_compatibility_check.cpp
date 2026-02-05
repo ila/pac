@@ -551,7 +551,7 @@ static void CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalO
 			if (table_metadata && !table_metadata->protected_columns.empty()) {
 				const auto &column_ids = get.GetColumnIds();
 				for (const auto &col_idx : column_ids) {
-					string col_name = get.GetColumnName(col_idx);
+					const string &col_name = get.GetColumnName(col_idx);
 					for (auto &protected_col : table_metadata->protected_columns) {
 						if (StringUtil::Lower(col_name) == StringUtil::Lower(protected_col)) {
 							throw InvalidInputException(

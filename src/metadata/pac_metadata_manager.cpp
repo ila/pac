@@ -152,7 +152,7 @@ string PACMetadataManager::GetMetadataFilePath(ClientContext &context) {
 	string schema_name = DEFAULT_SCHEMA; // Fallback to "main"
 	try {
 		CatalogSearchPath search_path(context);
-		auto entries = search_path.Get();
+		const auto &entries = search_path.Get();
 		if (!entries.empty()) {
 			schema_name = entries[0].schema;
 		}

@@ -367,8 +367,9 @@ vector<string> FindPrimaryKey(ClientContext &context, const string &table_name) 
 	for (auto &entry_path : path.Get()) {
 		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
 		                              OnEntryNotFound::RETURN_NULL);
-		if (!entry)
+		if (!entry) {
 			continue;
+		}
 		auto &table_entry = entry->Cast<TableCatalogEntry>();
 		auto pk = table_entry.GetPrimaryKey();
 		if (pk && pk->type == ConstraintType::UNIQUE) {

@@ -480,6 +480,9 @@ static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFun
 // ============================================================================
 // These aggregates take LIST<DOUBLE> inputs (from PAC _counters results) and
 // produce LIST<DOUBLE> outputs. They aggregate element-wise across all input lists.
+//
+// Design: Uses template specialization for SIMD-friendly code generation.
+// Each aggregate type has specialized ops that compile to tight vectorizable loops.
 
 enum class PacListAggType { SUM, AVG, COUNT, MIN, MAX };
 
@@ -489,19 +492,226 @@ struct PacListAggregateState {
 	uint64_t counts[64]; // Count of non-null values (for avg/count)
 };
 
+// ============================================================================
+// Template-specialized operations for each aggregate type
+// These are designed to be inlined and auto-vectorized by the compiler
+// ============================================================================
+
+template <PacListAggType AGG_TYPE>
+struct PacListOps {
+	static constexpr double InitValue();
+	static void UpdateDense(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT counts, const double *PAC_RESTRICT src,
+	                        idx_t len);
+	static void UpdateScatter(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT counts, const double *PAC_RESTRICT src,
+	                          const idx_t *PAC_RESTRICT indices, const uint64_t *PAC_RESTRICT valid_mask, idx_t len);
+	static void Combine(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT dst_counts, const double *PAC_RESTRICT src,
+	                    const uint64_t *PAC_RESTRICT src_counts, uint64_t src_mask, uint64_t dst_mask);
+	static double Finalize(double value, uint64_t count);
+};
+
+// SUM specialization
+template <>
+struct PacListOps<PacListAggType::SUM> {
+	static constexpr double InitValue() {
+		return 0.0;
+	}
+	static void UpdateDense(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                        idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[i] += src[i];
+		}
+	}
+	static void UpdateScatter(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                          const idx_t *PAC_RESTRICT indices, const uint64_t *PAC_RESTRICT, idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[indices[i]] += src[i];
+		}
+	}
+	static void Combine(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                    const uint64_t *PAC_RESTRICT, uint64_t, uint64_t) {
+		for (idx_t i = 0; i < 64; i++) {
+			dst[i] += src[i];
+		}
+	}
+	static double Finalize(double value, uint64_t) {
+		return value;
+	}
+};
+
+// AVG specialization
+template <>
+struct PacListOps<PacListAggType::AVG> {
+	static constexpr double InitValue() {
+		return 0.0;
+	}
+	static void UpdateDense(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT counts, const double *PAC_RESTRICT src,
+	                        idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[i] += src[i];
+			counts[i]++;
+		}
+	}
+	static void UpdateScatter(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT counts, const double *PAC_RESTRICT src,
+	                          const idx_t *PAC_RESTRICT indices, const uint64_t *PAC_RESTRICT, idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[indices[i]] += src[i];
+			counts[indices[i]]++;
+		}
+	}
+	static void Combine(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT dst_counts, const double *PAC_RESTRICT src,
+	                    const uint64_t *PAC_RESTRICT src_counts, uint64_t, uint64_t) {
+		for (idx_t i = 0; i < 64; i++) {
+			dst[i] += src[i];
+			dst_counts[i] += src_counts[i];
+		}
+	}
+	static double Finalize(double value, uint64_t count) {
+		return count > 0 ? value / static_cast<double>(count) : 0.0;
+	}
+};
+
+// COUNT specialization
+template <>
+struct PacListOps<PacListAggType::COUNT> {
+	static constexpr double InitValue() {
+		return 0.0;
+	}
+	static void UpdateDense(double *PAC_RESTRICT, uint64_t *PAC_RESTRICT counts, const double *PAC_RESTRICT,
+	                        idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			counts[i]++;
+		}
+	}
+	static void UpdateScatter(double *PAC_RESTRICT, uint64_t *PAC_RESTRICT counts, const double *PAC_RESTRICT,
+	                          const idx_t *PAC_RESTRICT indices, const uint64_t *PAC_RESTRICT, idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			counts[indices[i]]++;
+		}
+	}
+	static void Combine(double *PAC_RESTRICT, uint64_t *PAC_RESTRICT dst_counts, const double *PAC_RESTRICT,
+	                    const uint64_t *PAC_RESTRICT src_counts, uint64_t, uint64_t) {
+		for (idx_t i = 0; i < 64; i++) {
+			dst_counts[i] += src_counts[i];
+		}
+	}
+	static double Finalize(double, uint64_t count) {
+		return static_cast<double>(count);
+	}
+};
+
+// MIN specialization
+template <>
+struct PacListOps<PacListAggType::MIN> {
+	static constexpr double InitValue() {
+		return std::numeric_limits<double>::max();
+	}
+	static void UpdateDense(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                        idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[i] = std::min(dst[i], src[i]);
+		}
+	}
+	static void UpdateScatter(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                          const idx_t *PAC_RESTRICT indices, const uint64_t *PAC_RESTRICT, idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[indices[i]] = std::min(dst[indices[i]], src[i]);
+		}
+	}
+	static void Combine(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                    const uint64_t *PAC_RESTRICT, uint64_t src_mask, uint64_t dst_mask) {
+		// For MIN: take source if target doesn't have the value yet, or if source is smaller
+		for (idx_t i = 0; i < 64; i++) {
+			bool src_has = (src_mask & (1ULL << i)) != 0;
+			bool dst_has = (dst_mask & (1ULL << i)) != 0;
+			if (src_has && (!dst_has || src[i] < dst[i])) {
+				dst[i] = src[i];
+			}
+		}
+	}
+	static double Finalize(double value, uint64_t) {
+		return value;
+	}
+};
+
+// MAX specialization
+template <>
+struct PacListOps<PacListAggType::MAX> {
+	static constexpr double InitValue() {
+		return std::numeric_limits<double>::lowest();
+	}
+	static void UpdateDense(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                        idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[i] = std::max(dst[i], src[i]);
+		}
+	}
+	static void UpdateScatter(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                          const idx_t *PAC_RESTRICT indices, const uint64_t *PAC_RESTRICT, idx_t len) {
+		for (idx_t i = 0; i < len; i++) {
+			dst[indices[i]] = std::max(dst[indices[i]], src[i]);
+		}
+	}
+	static void Combine(double *PAC_RESTRICT dst, uint64_t *PAC_RESTRICT, const double *PAC_RESTRICT src,
+	                    const uint64_t *PAC_RESTRICT, uint64_t src_mask, uint64_t dst_mask) {
+		// For MAX: take source if target doesn't have the value yet, or if source is larger
+		for (idx_t i = 0; i < 64; i++) {
+			bool src_has = (src_mask & (1ULL << i)) != 0;
+			bool dst_has = (dst_mask & (1ULL << i)) != 0;
+			if (src_has && (!dst_has || src[i] > dst[i])) {
+				dst[i] = src[i];
+			}
+		}
+	}
+	static double Finalize(double value, uint64_t) {
+		return value;
+	}
+};
+
+// ============================================================================
+// Aggregate function implementations using the specialized ops
+// ============================================================================
+
 template <PacListAggType AGG_TYPE>
 static void PacListAggregateInit(const AggregateFunction &, data_ptr_t state_ptr) {
 	auto &state = *reinterpret_cast<PacListAggregateState *>(state_ptr);
 	state.key_hash = 0;
-	double init_val = 0.0;
-	if (AGG_TYPE == PacListAggType::MIN) {
-		init_val = std::numeric_limits<double>::max();
-	} else if (AGG_TYPE == PacListAggType::MAX) {
-		init_val = std::numeric_limits<double>::lowest();
-	}
+	double init_val = PacListOps<AGG_TYPE>::InitValue();
 	for (idx_t i = 0; i < 64; i++) {
 		state.values[i] = init_val;
 		state.counts[i] = 0;
+	}
+}
+
+// Dense update: when child vector is flat and contiguous (no validity gaps)
+template <PacListAggType AGG_TYPE>
+static void PacListAggregateUpdateDense(PacListAggregateState &state, const double *child_values, idx_t offset,
+                                        idx_t len) {
+	state.key_hash |= (len == 64) ? ~0ULL : ((1ULL << len) - 1);
+	PacListOps<AGG_TYPE>::UpdateDense(state.values, state.counts, child_values + offset, len);
+}
+
+// Scatter update: when child has validity gaps or non-contiguous access
+template <PacListAggType AGG_TYPE>
+static void PacListAggregateUpdateScatter(PacListAggregateState &state, const double *child_values,
+                                          UnifiedVectorFormat &child_data, idx_t offset, idx_t len) {
+	// Temporary buffers for gathering valid values and their target indices
+	double valid_values[64];
+	idx_t valid_indices[64];
+	idx_t valid_count = 0;
+
+	for (idx_t j = 0; j < len; j++) {
+		auto child_idx = child_data.sel->get_index(offset + j);
+		if (child_data.validity.RowIsValid(child_idx)) {
+			valid_values[valid_count] = child_values[child_idx];
+			valid_indices[valid_count] = j;
+			state.key_hash |= (1ULL << j);
+			valid_count++;
+		}
+	}
+
+	if (valid_count > 0) {
+		PacListOps<AGG_TYPE>::UpdateScatter(state.values, state.counts, valid_values, valid_indices, nullptr,
+		                                    valid_count);
 	}
 }
 
@@ -523,6 +733,9 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 	state_vector.ToUnifiedFormat(count, sdata);
 	auto states = reinterpret_cast<PacListAggregateState **>(sdata.data);
 
+	// Check if child vector is flat with all valid entries (enables dense path)
+	bool child_is_flat = child_vec.GetVectorType() == VectorType::FLAT_VECTOR && child_data.validity.AllValid();
+
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
 		if (!list_data.validity.RowIsValid(list_idx)) {
@@ -534,27 +747,12 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 		auto &entry = list_entries[list_idx];
 		idx_t len = entry.length > 64 ? 64 : entry.length;
 
-		for (idx_t j = 0; j < len; j++) {
-			auto child_idx = child_data.sel->get_index(entry.offset + j);
-			if (!child_data.validity.RowIsValid(child_idx)) {
-				continue;
-			}
-			state.key_hash |= (1ULL << j);
-			double val = child_values[child_idx];
-			if (AGG_TYPE == PacListAggType::SUM) {
-				state.values[j] += val;
-			} else if (AGG_TYPE == PacListAggType::AVG) {
-				state.values[j] += val;
-				state.counts[j]++;
-			} else if (AGG_TYPE == PacListAggType::COUNT) {
-				state.counts[j]++;
-			} else if (AGG_TYPE == PacListAggType::MIN) {
-				if (val < state.values[j])
-					state.values[j] = val;
-			} else if (AGG_TYPE == PacListAggType::MAX) {
-				if (val > state.values[j])
-					state.values[j] = val;
-			}
+		if (child_is_flat) {
+			// Dense path: direct array access, fully vectorizable
+			PacListAggregateUpdateDense<AGG_TYPE>(state, child_values, entry.offset, len);
+		} else {
+			// Scatter path: handle validity and indirection
+			PacListAggregateUpdateScatter<AGG_TYPE>(state, child_values, child_data, entry.offset, len);
 		}
 	}
 }
@@ -571,27 +769,11 @@ static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, Aggr
 		auto &source = *sources[sdata.sel->get_index(i)];
 		auto &target = *targets[tdata.sel->get_index(i)];
 
-		for (idx_t j = 0; j < 64; j++) {
-			if (!(source.key_hash & (1ULL << j)))
-				continue;
-			bool target_has = (target.key_hash & (1ULL << j)) != 0;
-			target.key_hash |= (1ULL << j);
+		uint64_t src_mask = source.key_hash;
+		uint64_t dst_mask = target.key_hash;
+		target.key_hash |= src_mask;
 
-			if (AGG_TYPE == PacListAggType::SUM) {
-				target.values[j] += source.values[j];
-			} else if (AGG_TYPE == PacListAggType::AVG) {
-				target.values[j] += source.values[j];
-				target.counts[j] += source.counts[j];
-			} else if (AGG_TYPE == PacListAggType::COUNT) {
-				target.counts[j] += source.counts[j];
-			} else if (AGG_TYPE == PacListAggType::MIN) {
-				if (!target_has || source.values[j] < target.values[j])
-					target.values[j] = source.values[j];
-			} else if (AGG_TYPE == PacListAggType::MAX) {
-				if (!target_has || source.values[j] > target.values[j])
-					target.values[j] = source.values[j];
-			}
-		}
+		PacListOps<AGG_TYPE>::Combine(target.values, target.counts, source.values, source.counts, src_mask, dst_mask);
 	}
 }
 
@@ -615,17 +797,12 @@ static void PacListAggregateFinalize(Vector &state_vector, AggregateInputData &,
 		}
 
 		vector<Value> list_values;
+		list_values.reserve(64);
 		for (idx_t j = 0; j < 64; j++) {
 			if (!(state.key_hash & (1ULL << j))) {
 				list_values.push_back(Value());
-			} else if (AGG_TYPE == PacListAggType::AVG) {
-				list_values.push_back(state.counts[j] > 0
-				                          ? Value::DOUBLE(state.values[j] / static_cast<double>(state.counts[j]))
-				                          : Value());
-			} else if (AGG_TYPE == PacListAggType::COUNT) {
-				list_values.push_back(Value::DOUBLE(static_cast<double>(state.counts[j])));
 			} else {
-				list_values.push_back(Value::DOUBLE(state.values[j]));
+				list_values.push_back(Value::DOUBLE(PacListOps<AGG_TYPE>::Finalize(state.values[j], state.counts[j])));
 			}
 		}
 		result.SetValue(result_idx, Value::LIST(LogicalType::DOUBLE, std::move(list_values)));
