@@ -28,7 +28,9 @@ static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFuncti
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
-	return make_uniq<PacBindData>(mi, correction, seed);
+	auto result = make_uniq<PacBindData>(mi, correction, seed);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 // State types: simple (non-scatter) always uses PacCountState directly
@@ -156,6 +158,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	std::mt19937_64 gen(seed);
 	double mi = input.bind_data->Cast<PacBindData>().mi;
 	double correction = input.bind_data->Cast<PacBindData>().correction;
+	uint64_t counter_selector = input.bind_data ? input.bind_data->Cast<PacBindData>().counter_selector : 0;
 	double buf[64];
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
@@ -175,8 +178,8 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 			memset(buf, 0, sizeof(buf));
 		}
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
-		data[offset + i] =
-		    static_cast<int64_t>(PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash) * 2.0);
+		data[offset + i] = static_cast<int64_t>(
+		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, counter_selector) * 2.0);
 	}
 }
 

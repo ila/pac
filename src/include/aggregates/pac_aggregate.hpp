@@ -3,6 +3,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/random_engine.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 
 // Cross-platform restrict keyword: MSVC uses __restrict, GCC/Clang use __restrict__
 #if defined(_MSC_VER)
@@ -88,7 +89,8 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 // mi: mutual information parameter for noise calculation
 // correction: factor to multiply values by after compacting NULLs but before adding noise
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, double correction, std::mt19937_64 &gen,
-                                    bool use_deterministic_noise = true, uint64_t is_null = 0);
+                                    bool use_deterministic_noise = true, uint64_t is_null = 0,
+                                    uint64_t counter_selector = 0);
 
 // PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
 // Uses rnd&63 as threshold, returns true if bitcount > threshold
@@ -117,30 +119,53 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 	return 0.0; // default: deterministic mode
 }
 
+// Helper to compute a per-query pseudo-random number from ClientContext.
+// Combines the seed with DuckDB's monotonic query number (increments per SQL statement,
+// even within the same transaction) so that all aggregates within the same query share
+// the same counter_selector and query_hash, but different queries diverge.
+inline uint64_t GetQueryCounterSelector(ClientContext &ctx, uint64_t seed) {
+	transaction_t query_number = ctx.ActiveTransaction().GetActiveQuery();
+	return (seed ^ static_cast<uint64_t>(query_number)) * PAC_MAGIC_HASH;
+}
+
 // Bind data used by PAC aggregates to carry `mi` and `correction` parameters.
 struct PacBindData : public FunctionData {
 	double mi;                    // mutual information parameter from pac_mi setting (controls noise/NULL probability)
 	double correction;            // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
 	uint64_t seed;                // deterministic RNG seed for PAC aggregates
 	uint64_t query_hash;          // XOR'd with key_hash to randomize and avoid hash(0)==0 issue
+	uint64_t counter_selector;    // per-query deterministic counter index for NoisySample (same within a query)
 	double scale_divisor;         // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
 	bool use_deterministic_noise; // if true, use platform-agnostic Box-Muller noise generation
 	explicit PacBindData(double mi_val, double correction_val = 1.0, uint64_t seed_val = 0, double scale_div = 1.0,
 	                     bool use_det_noise = false)
 	    : mi(mi_val), correction(correction_val), seed(seed_val ? seed_val : PacGenerateRandomSeed()),
-	      query_hash(seed ^ PAC_MAGIC_HASH), scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
+	      query_hash(seed ^ PAC_MAGIC_HASH), counter_selector(seed * PAC_MAGIC_HASH), scale_divisor(scale_div),
+	      use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		auto copy = make_uniq<PacBindData>(mi, correction, seed, scale_divisor, use_deterministic_noise);
 		copy->query_hash = query_hash;
+		copy->counter_selector = counter_selector;
 		return copy;
 	}
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
-		       scale_divisor == o.scale_divisor && use_deterministic_noise == o.use_deterministic_noise;
+		       counter_selector == o.counter_selector && scale_divisor == o.scale_divisor &&
+		       use_deterministic_noise == o.use_deterministic_noise;
 	}
 };
+
+// Set counter_selector from the query number, and when mi > 0 also derive query_hash
+// from it (so that subsequent noisy queries get different key_hash assignments).
+// When mi == 0 (deterministic tests), query_hash stays seed-based for reproducibility.
+inline void SetQuerySpecificFields(PacBindData &bind_data, ClientContext &ctx) {
+	bind_data.counter_selector = GetQueryCounterSelector(ctx, bind_data.seed);
+	if (bind_data.mi > 0.0) {
+		bind_data.query_hash = bind_data.counter_selector ^ PAC_MAGIC_HASH;
+	}
+}
 
 // Helper to convert double to accumulator type (used by pac_sum finalizers)
 template <class T>

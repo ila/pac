@@ -42,19 +42,22 @@ struct PacCategoricalBindData : public FunctionData {
 	double mi;
 	double correction;
 	uint64_t seed;
+	uint64_t counter_selector; // per-query deterministic counter index for NoisySample
 
 	explicit PacCategoricalBindData(double mi_val = 0.0, double correction_val = 1.0,
 	                                uint64_t seed_val = std::random_device {}())
-	    : mi(mi_val), correction(correction_val), seed(seed_val) {
+	    : mi(mi_val), correction(correction_val), seed(seed_val), counter_selector(seed_val * PAC_MAGIC_HASH) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<PacCategoricalBindData>(mi, correction, seed);
+		auto copy = make_uniq<PacCategoricalBindData>(mi, correction, seed);
+		copy->counter_selector = counter_selector;
+		return copy;
 	}
 
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacCategoricalBindData>();
-		return mi == o.mi && correction == o.correction && seed == o.seed;
+		return mi == o.mi && correction == o.correction && seed == o.seed && counter_selector == o.counter_selector;
 	}
 };
 
@@ -376,12 +379,14 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 	double mi = 0.0;
 	double correction = 1.0;
 	uint64_t seed = 0;
+	uint64_t counter_selector = 0;
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	if (function.bind_info) {
 		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
 		mi = bind_data.mi;
 		correction = bind_data.correction;
 		seed = bind_data.seed;
+		counter_selector = bind_data.counter_selector;
 	}
 
 	UnifiedVectorFormat list_data;
@@ -445,7 +450,7 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 
 		// Get noised sample from counters
 		// Note: No 2x multiplier here because _counters functions already apply it
-		double noised = PacNoisySampleFrom64Counters(counters, mi, correction, gen, true, ~key_hash);
+		double noised = PacNoisySampleFrom64Counters(counters, mi, correction, gen, true, ~key_hash, counter_selector);
 		result_data[i] = noised;
 	}
 }
@@ -472,7 +477,11 @@ static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFun
 	                ", seed=" + std::to_string(seed));
 #endif
 
-	return make_uniq<PacCategoricalBindData>(mi, correction, seed);
+	auto result = make_uniq<PacCategoricalBindData>(mi, correction, seed);
+	result->counter_selector = GetQueryCounterSelector(ctx, seed);
+	// When mi > 0, also vary the seed used for per-row RNG so subsequent queries diverge
+	// (When mi == 0, keep seed-based behavior for deterministic test reproducibility)
+	return result;
 }
 
 // ============================================================================

@@ -5,6 +5,7 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/aggregate_function.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 #include <random>
 #ifndef M_PI
@@ -36,24 +37,6 @@ static double ComputeSecondMomentVariance(const vector<double> &values);
 // for a given mt19937_64 seed). Function names follow repository style (no snake_case).
 static inline uint64_t EngineNext(std::mt19937_64 &gen) {
 	return gen();
-}
-
-// DeterministicUniformRange: unbiased integer in [0, n-1] using rejection sampling on 64-bit engine outputs
-static inline idx_t DeterministicUniformRange(std::mt19937_64 &gen, idx_t n) {
-	if (n <= 0) {
-		return 0;
-	}
-	constexpr uint64_t maxv = std::numeric_limits<uint64_t>::max();
-	// compute largest multiple of n that fits in uint64_t (limit = floor((maxv+1)/n)*n)
-	// to avoid overflow use division
-	uint64_t limit = (maxv / static_cast<uint64_t>(n)) * static_cast<uint64_t>(n);
-	while (true) {
-		uint64_t r = EngineNext(gen);
-		if (r < limit) {
-			return static_cast<idx_t>(r % static_cast<uint64_t>(n));
-		}
-		// otherwise retry
-	}
 }
 
 // DeterministicUniformUnit: produce a uniform double in [0,1) using 53 bits from engine
@@ -114,7 +97,7 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 // correction: factor to multiply values by after compacting but before noising
 // Returns: correction*yJ + noise where yJ is a randomly selected counter
 double PacNoisySampleFrom64Counters(const double counters[64], double mi, double correction, std::mt19937_64 &gen,
-                                    bool use_deterministic_noise, uint64_t is_null) {
+                                    bool use_deterministic_noise, uint64_t is_null, uint64_t counter_selector) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
 
 	// Compact the counters array, removing entries where is_null bit is set
@@ -140,8 +123,9 @@ double PacNoisySampleFrom64Counters(const double counters[64], double mi, double
 	// Compute delta using the shared exported helper (uses mi for noise variance)
 	double delta = ComputeDeltaFromValues(vals, mi);
 
-	// Pick random index J in [0, N-1] to select the base counter yJ
-	int J = static_cast<int>(DeterministicUniformRange(gen, N));
+	// Pick counter index J in [0, N-1] deterministically from counter_selector.
+	// This ensures all aggregates within the same query pick the same counter (after compacting).
+	int J = static_cast<int>(counter_selector % static_cast<uint64_t>(N));
 	double yJ = vals[J];
 
 	if (delta <= 0.0 || !std::isfinite(delta)) {
@@ -241,6 +225,13 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	auto &local = ExecuteFunctionState::GetFunctionState(state)->Cast<PacAggregateLocalState>();
 	auto &gen = local.gen;
 
+	// Get counter_selector from bind data for deterministic counter selection
+	uint64_t counter_selector = 0;
+	auto &bound_expr = state.expr.Cast<BoundFunctionExpression>();
+	if (bound_expr.bind_info) {
+		counter_selector = bound_expr.bind_info->Cast<PacBindData>().counter_selector;
+	}
+
 	// --- extract lists ---
 	UnifiedVectorFormat vvals, vcnts;
 	vals.ToUnifiedFormat(count, vvals);
@@ -314,12 +305,17 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 
 		// ---------------- PAC core ----------------
 
-		// 1. pick J
-		idx_t J = DeterministicUniformRange(gen, values.size());
+		// mi <= 0 means no noise - always return counter[0] directly
+		if (mi <= 0.0) {
+			res[row] = values[0];
+			continue;
+		}
+
+		// 1. pick J deterministically from counter_selector (same within a query)
+		idx_t J = static_cast<idx_t>(counter_selector % static_cast<uint64_t>(values.size()));
 		double yJ = values[J];
 
 		// 2. empirical (second-moment) variance over the full list
-		// Compute delta using the shared helper (may throw if mi <= 0)
 		double delta = ComputeDeltaFromValues(values, mi);
 
 		if (delta <= 0.0 || !std::isfinite(delta)) {
@@ -345,7 +341,9 @@ static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunct
 	}
 	// mi is per-row for pac_aggregate; store default mi in bind data but it's unused here
 	double mi = 128.0;
-	return make_uniq<PacBindData>(mi, 1.0, seed);
+	auto result = make_uniq<PacBindData>(mi, 1.0, seed);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 void RegisterPacAggregateFunctions(ExtensionLoader &loader) {

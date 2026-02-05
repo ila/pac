@@ -406,6 +406,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+	uint64_t counter_selector = input.bind_data ? input.bind_data->Cast<PacBindData>().counter_selector : 0;
 	// scale_divisor is used by pac_avg on DECIMAL to convert internal integer representation back to decimal
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PacBindData>().scale_divisor : 1.0;
 
@@ -443,7 +444,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 				buf[j] /= divisor;
 			}
 		}
-		double result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash);
+		double result_val = PacNoisySampleFrom64Counters(buf, mi, correction, gen, true, ~key_hash, counter_selector);
 		// Both pac_sum and pac_avg need 2x compensation:
 		// - pac_sum: doubles the sum to compensate for ~50% of values contributing to each counter
 		// - pac_avg: compensates for dividing by total_count instead of per-counter count
@@ -605,7 +606,9 @@ static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vect
 	if (ctx.TryGetCurrentSetting("pac_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
-	return make_uniq<PacBindData>(mi, correction, seed, scale_divisor);
+	auto result = make_uniq<PacBindData>(mi, correction, seed, scale_divisor);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)

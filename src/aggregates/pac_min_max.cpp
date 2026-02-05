@@ -97,6 +97,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	uint64_t seed = input.bind_data ? input.bind_data->Cast<PacBindData>().seed : std::random_device {}();
 	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+	uint64_t counter_selector = input.bind_data ? input.bind_data->Cast<PacBindData>().counter_selector : 0;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -121,7 +122,8 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 			memset(buf, 0, sizeof(buf));
 		}
 		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
-		data[offset + i] = FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, true, ~key_hash));
+		data[offset + i] =
+		    FromDouble<T>(PacNoisySampleFrom64Counters(buf, mi, 1.0, gen, true, ~key_hash, counter_selector));
 	}
 }
 
@@ -204,7 +206,9 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
 
-	return make_uniq<PacBindData>(mi, correction, seed);
+	auto result = make_uniq<PacBindData>(mi, correction, seed);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 // ============================================================================
@@ -326,7 +330,9 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 		seed = uint64_t(pac_seed_val.GetValue<int64_t>());
 	}
 
-	return make_uniq<PacBindData>(mi, correction, seed);
+	auto result = make_uniq<PacBindData>(mi, correction, seed);
+	SetQuerySpecificFields(*result, ctx);
+	return result;
 }
 
 // ============================================================================
