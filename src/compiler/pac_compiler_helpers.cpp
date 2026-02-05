@@ -214,7 +214,7 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 		// If we couldn't find some required columns, fall back to projecting all columns
 		// This is a safety net for edge cases like missing schema PKs or PAC LINK metadata
 		if (!required_columns.empty() && found_columns.size() < required_set.size()) {
-#ifdef DEBUG
+#if PAC_DEBUG
 			string missing;
 			for (auto &col_name : required_columns) {
 				if (found_columns.count(StringUtil::Lower(col_name)) == 0) {

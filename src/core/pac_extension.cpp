@@ -23,6 +23,7 @@
 #include "aggregates/pac_min_max.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/pac_parser.hpp"
+#include "pac_debug.hpp"
 
 namespace duckdb {
 
@@ -127,7 +128,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 				metadata_path = filename;
 			}
 
-#ifdef DEBUG
+#if PAC_DEBUG
 			std::cerr << "[PAC DEBUG] LoadInternal: Checking for metadata at: " << metadata_path << "\n";
 #endif
 
@@ -136,29 +137,29 @@ static void LoadInternal(ExtensionLoader &loader) {
 			if (test_file.good()) {
 				test_file.close();
 				PACMetadataManager::Get().LoadFromFile(metadata_path);
-#ifdef DEBUG
+#if PAC_DEBUG
 				std::cerr << "[PAC DEBUG] LoadInternal: Successfully loaded metadata from " << metadata_path << "\n";
 				std::cerr << "[PAC DEBUG] LoadInternal: Loaded " << PACMetadataManager::Get().GetAllTableNames().size()
 				          << " tables"
 				          << "\n";
 #endif
 			} else {
-#ifdef DEBUG
+#if PAC_DEBUG
 				std::cerr << "[PAC DEBUG] LoadInternal: Metadata file not found at " << metadata_path << "\n";
 #endif
 			}
 		} else {
-#ifdef DEBUG
+#if PAC_DEBUG
 			std::cerr << "[PAC DEBUG] LoadInternal: No database paths available (in-memory DB?)"
 			          << "\n";
 #endif
 		}
 	} catch (const std::exception &e) {
-#ifdef DEBUG
+#if PAC_DEBUG
 		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata: " << e.what() << "\n";
 #endif
 	} catch (...) {
-#ifdef DEBUG
+#if PAC_DEBUG
 		std::cerr << "[PAC DEBUG] LoadInternal: Failed to load metadata (unknown exception)"
 		          << "\n";
 #endif

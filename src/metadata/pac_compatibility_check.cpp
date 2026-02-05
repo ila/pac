@@ -852,7 +852,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 	// Determine if we have tables linked to privacy units
 	bool has_fk_linked_tables = !result.fk_paths.empty();
 
-#ifdef DEBUG
+#if PAC_DEBUG
 	PAC_DEBUG_PRINT("PAC compatibility check: scanned_pu_tables = " + std::to_string(result.scanned_pu_tables.size()));
 	PAC_DEBUG_PRINT("PAC compatibility check: tables_with_protected_columns = " +
 	                std::to_string(tables_with_protected_columns.size()));
@@ -934,7 +934,7 @@ PACCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, C
 		// If the query already has PAC aggregates with proper joins, don't trigger rewrite
 		// The query is already using PAC functions correctly, so allow it as-is
 		if (has_pac_aggregates) {
-#ifdef DEBUG
+#if PAC_DEBUG
 			PAC_DEBUG_PRINT("PAC compatibility check: Query has PAC aggregates with proper joins - allowing as-is");
 			PAC_DEBUG_PRINT("=== QUERY PLAN (PAC aggregates with joins) ===");
 			plan->Print();

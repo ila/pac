@@ -34,36 +34,7 @@ struct PathEntry {
 	idx_t child_idx; // Which child led to the target table scan
 };
 
-static bool FindPathToTableScan(LogicalOperator *current, idx_t target_table_index, vector<PathEntry> &path) {
-	if (!current) {
-		return false;
-	}
-
-	// Check if this is the target table scan
-	if (current->type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = current->Cast<LogicalGet>();
-		if (get.table_index == target_table_index) {
-			return true;
-		}
-	}
-
-	// Try each child
-	for (idx_t child_idx = 0; child_idx < current->children.size(); child_idx++) {
-		if (FindPathToTableScan(current->children[child_idx].get(), target_table_index, path)) {
-			// Found it in this subtree - add current to path ONLY if it's not an aggregate
-			// The aggregate is the starting point and shouldn't be included in the path
-			// We only want operators BETWEEN the aggregate and the table scan
-			if (current->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-				path.push_back({current, child_idx});
-			}
-			return true;
-		}
-	}
-
-	return false;
-}
-
-// Similar to FindPathToTableScan, but STOPS at nested aggregates.
+// FindDirectPathToTableScan: Similar to the general path finder, but STOPS at nested aggregates.
 // This is used when we need to propagate columns only within the current aggregate's
 // direct subtree, not through nested aggregates (which have their own column scope).
 static bool FindDirectPathToTableScan(LogicalOperator *current, idx_t target_table_index, vector<PathEntry> &path,
@@ -113,14 +84,14 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 		// No direct path found - table scan is not in this aggregate's direct subtree
 		// (it may be behind a nested aggregate or in a different branch of the plan).
 		// Return nullptr to signal that this aggregate should NOT be transformed.
-#ifdef DEBUG
+#if PAC_DEBUG
 		PAC_DEBUG_PRINT("PropagatePKThroughProjections: No direct path found from aggregate to table #" +
 		                std::to_string(pu_get.table_index) + ", returning nullptr to skip transformation");
 #endif
 		return nullptr;
 	}
 
-#ifdef DEBUG
+#if PAC_DEBUG
 	PAC_DEBUG_PRINT("PropagatePKThroughProjections: Found path with " + std::to_string(path_ops.size()) +
 	                " operators from aggregate to table #" + std::to_string(pu_get.table_index));
 #endif
@@ -130,7 +101,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 	// The aggregate's child (the scan) has the column, so the binding is valid.
 	// Just return the original hash expression - it references the scan's output correctly.
 	if (path_ops.empty()) {
-#ifdef DEBUG
+#if PAC_DEBUG
 		PAC_DEBUG_PRINT("PropagatePKThroughProjections: Empty path - aggregate reads directly from scan");
 		PAC_DEBUG_PRINT("PropagatePKThroughProjections: Hash expression: " + hash_expr->ToString());
 
@@ -185,7 +156,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 
 		if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 			auto *proj = &op->Cast<LogicalProjection>();
-#ifdef DEBUG
+#if PAC_DEBUG
 			PAC_DEBUG_PRINT("PropagatePKThroughProjections: Processing projection #" +
 			                std::to_string(proj->table_index));
 #endif
@@ -228,12 +199,13 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 			}
 
 			binding_map = std::move(new_binding_map);
-			// Projections resolve their own types from expressions, so ResolveOperatorTypes is automatic
+			// After modifying projection expressions, we MUST call ResolveOperatorTypes to sync the types vector
+			proj->ResolveOperatorTypes();
 		} else if (IsJoinWithProjectionMap(op->type)) {
 			// Handle join operators - they may have projection maps that filter columns
 			auto &join = op->Cast<LogicalJoin>();
 			bool is_delim_join = (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
-#ifdef DEBUG
+#if PAC_DEBUG
 			PAC_DEBUG_PRINT("PropagatePKThroughProjections: Processing join (type=" +
 			                std::to_string(static_cast<int>(join.join_type)) + ", child_idx=" +
 			                std::to_string(child_idx) + ", op_type=" + std::to_string(static_cast<int>(op->type)) +
@@ -246,7 +218,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 			// NOTE: This applies to DELIM_JOIN too! DELIM_JOIN with RIGHT_SEMI still only
 			// outputs columns from the right child (the subquery side)
 			if ((join.join_type == JoinType::RIGHT_SEMI || join.join_type == JoinType::RIGHT_ANTI) && child_idx == 0) {
-#ifdef DEBUG
+#if PAC_DEBUG
 				PAC_DEBUG_PRINT("PropagatePKThroughProjections: Cannot propagate through RIGHT_SEMI/RIGHT_ANTI join "
 				                "from left child - returning nullptr");
 #endif
@@ -255,7 +227,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 			// Similarly, SEMI and ANTI joins only output columns from the LEFT child
 			// If our column is on the RIGHT side (child_idx=1), we cannot propagate through
 			if ((join.join_type == JoinType::SEMI || join.join_type == JoinType::ANTI) && child_idx == 1) {
-#ifdef DEBUG
+#if PAC_DEBUG
 				PAC_DEBUG_PRINT("PropagatePKThroughProjections: Cannot propagate through SEMI/ANTI join "
 				                "from right child - returning nullptr");
 #endif
@@ -286,7 +258,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 						if (!found) {
 							// Add to projection map
 							join.left_projection_map.push_back(old_binding.column_index);
-#ifdef DEBUG
+#if PAC_DEBUG
 							PAC_DEBUG_PRINT("PropagatePKThroughProjections: Added column " +
 							                std::to_string(old_binding.column_index) +
 							                " to DELIM_JOIN left_projection_map");
@@ -314,7 +286,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 						    join_bindings[i].column_index == old_binding.column_index) {
 							new_binding_map[original_key] = old_binding;
 							found = true;
-#ifdef DEBUG
+#if PAC_DEBUG
 							PAC_DEBUG_PRINT("PropagatePKThroughProjections: DELIM_JOIN preserves left child binding [" +
 							                std::to_string(old_binding.table_index) + "." +
 							                std::to_string(old_binding.column_index) + "]");
@@ -329,7 +301,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 						// This might occur with certain join types or plan structures.
 						// Keep the old binding and continue - the column should be accessible
 						// from the child operator.
-#ifdef DEBUG
+#if PAC_DEBUG
 						PAC_DEBUG_PRINT("PropagatePKThroughProjections: DELIM_JOIN left child binding [" +
 						                std::to_string(old_binding.table_index) + "." +
 						                std::to_string(old_binding.column_index) +
@@ -368,7 +340,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 					if (!found) {
 						// Column not in projection map - add it
 						proj_map->push_back(old_binding.column_index);
-#ifdef DEBUG
+#if PAC_DEBUG
 						PAC_DEBUG_PRINT("PropagatePKThroughProjections: Added column " +
 						                std::to_string(old_binding.column_index) + " to join projection map");
 #endif
@@ -396,7 +368,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 						// The binding passes through unchanged in the join's output
 						new_binding_map[original_key] = old_binding;
 						found = true;
-#ifdef DEBUG
+#if PAC_DEBUG
 						PAC_DEBUG_PRINT("PropagatePKThroughProjections: Join preserves binding [" +
 						                std::to_string(old_binding.table_index) + "." +
 						                std::to_string(old_binding.column_index) + "]");
@@ -408,7 +380,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 				if (!found) {
 					// Binding not found in join output - this shouldn't happen if we added it correctly
 					// Keep the old binding and hope for the best
-#ifdef DEBUG
+#if PAC_DEBUG
 					PAC_DEBUG_PRINT("PropagatePKThroughProjections: WARNING - binding [" +
 					                std::to_string(old_binding.table_index) + "." +
 					                std::to_string(old_binding.column_index) + "] not found in join output");
@@ -421,7 +393,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 		} else if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
 			// Handle filter operators - they also have projection maps that can filter columns
 			auto &filter = op->Cast<LogicalFilter>();
-#ifdef DEBUG
+#if PAC_DEBUG
 			PAC_DEBUG_PRINT("PropagatePKThroughProjections: Processing filter with projection_map.size=" +
 			                std::to_string(filter.projection_map.size()));
 #endif
@@ -443,7 +415,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 					if (!found) {
 						// Column not in projection map - add it
 						filter.projection_map.push_back(old_binding.column_index);
-#ifdef DEBUG
+#if PAC_DEBUG
 						PAC_DEBUG_PRINT("PropagatePKThroughProjections: Added column " +
 						                std::to_string(old_binding.column_index) + " to filter projection map");
 #endif
@@ -470,7 +442,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 						// The binding passes through unchanged in the filter's output
 						new_binding_map[original_key] = old_binding;
 						found = true;
-#ifdef DEBUG
+#if PAC_DEBUG
 						PAC_DEBUG_PRINT("PropagatePKThroughProjections: Filter preserves binding [" +
 						                std::to_string(old_binding.table_index) + "." +
 						                std::to_string(old_binding.column_index) + "]");
@@ -481,7 +453,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 
 				if (!found) {
 					// Binding not found in filter output - this shouldn't happen if we added it correctly
-#ifdef DEBUG
+#if PAC_DEBUG
 					PAC_DEBUG_PRINT("PropagatePKThroughProjections: WARNING - binding [" +
 					                std::to_string(old_binding.table_index) + "." +
 					                std::to_string(old_binding.column_index) + "] not found in filter output");
@@ -494,7 +466,7 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 		} else {
 			// For all other operators, just re-resolve their types
 			// so they pick up the new columns from their children
-#ifdef DEBUG
+#if PAC_DEBUG
 			PAC_DEBUG_PRINT("PropagatePKThroughProjections: Re-resolving types for operator type " +
 			                std::to_string(static_cast<int>(op->type)));
 #endif
@@ -509,9 +481,11 @@ unique_ptr<Expression> PropagatePKThroughProjections(LogicalOperator &plan, Logi
 			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
 			auto key = hash_binding_key(col_ref.binding);
 			if (binding_map.find(key) != binding_map.end()) {
+#if PAC_DEBUG
 				auto old_binding = col_ref.binding;
+#endif
 				col_ref.binding = binding_map[key];
-#ifdef DEBUG
+#if PAC_DEBUG
 				PAC_DEBUG_PRINT(
 				    "PropagatePKThroughProjections: Updated binding [" + std::to_string(old_binding.table_index) + "." +
 				    std::to_string(old_binding.column_index) + "] -> [" + std::to_string(col_ref.binding.table_index) +

@@ -274,37 +274,35 @@ ORDER BY
 # ============================================================================
 # Test 3: Greater than or equal comparison
 # Find suppliers with high-value lineitems
-# NOTE: This test is disabled because it fails in the test runner due to
-# state leakage from previous tests, but works correctly in isolation.
 # The query involves HAVING with a scalar subquery containing PAC aggregates.
 # ============================================================================
 
-# Disabled: Test runner state issue causes type mismatch error
-# query I
-# SELECT
-#     s_suppkey
-# FROM
-#     supplier
-# WHERE
-#     s_suppkey IN (
-#         SELECT
-#             l_suppkey
-#         FROM
-#             lineitem
-#             JOIN orders ON l_orderkey = o_orderkey
-#         GROUP BY l_suppkey
-#         HAVING sum(l_extendedprice) >= (
-#             SELECT
-#                 0.2 * sum(l2.l_extendedprice)
-#             FROM
-#                 lineitem l2
-#                 JOIN orders o2 ON l2.l_orderkey = o2.o_orderkey
-#         )
-#     )
-# ORDER BY
-#     s_suppkey;
-# ----
-# 2
+query I
+SELECT
+    s_suppkey
+FROM
+    supplier
+WHERE
+    s_suppkey IN (
+        SELECT
+            l_suppkey
+        FROM
+            lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+        GROUP BY l_suppkey
+        HAVING sum(l_extendedprice) >= (
+            SELECT
+                0.2 * sum(l2.l_extendedprice)
+            FROM
+                lineitem l2
+                JOIN orders o2 ON l2.l_orderkey = o2.o_orderkey
+        )
+    )
+ORDER BY
+    s_suppkey;
+----
+1
+2
 
 # ============================================================================
 # Test 4: Less than or equal comparison

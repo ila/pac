@@ -808,19 +808,27 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 	// correction factor for value scaling
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
 
+	auto &result_validity = FlatVector::Validity(result);
+
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
 		PacSumFlushBuffer<SIGNED, State>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 #endif
 		auto *s = state_ptrs[i]->GetState();
 
-		// Set up the list entry
+		// Set up the list entry - always needed even for NULL results
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
 		double buf[64] = {0};
 		uint64_t key_hash = 0;
-		if (s) {
+
+		// If no values were processed, key_hash stays 0, buf stays all zeros
+		// All 64 positions will be marked as NULL (key_hash bit = 0)
+		// Also set the result row itself to NULL for DEFAULT_NULL_HANDLING
+		if (!s) {
+			result_validity.SetInvalid(offset + i);
+		} else {
 			key_hash = s->key_hash;
 			uint64_t exact_count = s->exact_count;
 #ifndef PAC_SIGNEDSUM

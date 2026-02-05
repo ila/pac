@@ -1,6 +1,7 @@
 #pragma once
 
-// Set to 1 to enable debug output, 0 to disable
+// Set to 1 to enable verbose PAC debug output, 0 to disable
+// This is separate from DuckDB's DEBUG macro to avoid cluttering test output
 #define PAC_DEBUG 0
 
 #if PAC_DEBUG

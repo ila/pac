@@ -36,21 +36,6 @@ static inline int Popcount64(uint64_t x) {
 }
 
 // ============================================================================
-// Helper: Proportional noised select
-// ============================================================================
-// Returns true with probability proportional to popcount(mask)/count
-// For count=64, this is equivalent to PacNoisedSelect
-static inline bool PacNoisedSelectWithCount(uint64_t mask, uint64_t rnd, idx_t count) {
-	if (count == 0) {
-		return false;
-	}
-	int popcount = Popcount64(mask);
-	// Probability = popcount / count
-	// True if random value in [0, count) < popcount
-	return (rnd % count) < static_cast<uint64_t>(popcount);
-}
-
-// ============================================================================
 // Bind data for PAC categorical functions
 // ============================================================================
 struct PacCategoricalBindData : public FunctionData {
@@ -314,9 +299,12 @@ static void PacFilterWithCorrectionFunction(DataChunk &args, ExpressionState &st
 }
 
 // ============================================================================
-// PAC_MASK_AND: Combine two masks with AND
+// PAC_MASK_AND / PAC_MASK_OR: Combine two masks with binary operation
 // ============================================================================
-static void PacMaskAndFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+enum class MaskBinaryOp { AND, OR };
+
+template <MaskBinaryOp OP>
+static void PacMaskBinaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &mask1_vec = args.data[0];
 	auto &mask2_vec = args.data[1];
 	idx_t count = args.size();
@@ -339,37 +327,11 @@ static void PacMaskAndFunction(DataChunk &args, ExpressionState &state, Vector &
 			continue;
 		}
 
-		result_data[i] = masks1[idx1] & masks2[idx2];
-	}
-}
-
-// ============================================================================
-// PAC_MASK_OR: Combine two masks with OR
-// ============================================================================
-static void PacMaskOrFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &mask1_vec = args.data[0];
-	auto &mask2_vec = args.data[1];
-	idx_t count = args.size();
-
-	UnifiedVectorFormat mask1_data, mask2_data;
-	mask1_vec.ToUnifiedFormat(count, mask1_data);
-	mask2_vec.ToUnifiedFormat(count, mask2_data);
-	auto masks1 = UnifiedVectorFormat::GetData<uint64_t>(mask1_data);
-	auto masks2 = UnifiedVectorFormat::GetData<uint64_t>(mask2_data);
-
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto idx1 = mask1_data.sel->get_index(i);
-		auto idx2 = mask2_data.sel->get_index(i);
-
-		if (!mask1_data.validity.RowIsValid(idx1) || !mask2_data.validity.RowIsValid(idx2)) {
-			result_validity.SetInvalid(i);
-			continue;
+		if (OP == MaskBinaryOp::AND) {
+			result_data[i] = masks1[idx1] & masks2[idx2];
+		} else {
+			result_data[i] = masks1[idx1] | masks2[idx2];
 		}
-
-		result_data[i] = masks1[idx1] | masks2[idx2];
 	}
 }
 
@@ -409,8 +371,6 @@ static void PacMaskNotFunction(DataChunk &args, ExpressionState &state, Vector &
 static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
-
-	auto &local_state = ExecuteFunctionState::GetFunctionState(state)->Cast<PacCategoricalLocalState>();
 
 	// Get mi and correction from bind data
 	double mi = 0.0;
@@ -507,7 +467,7 @@ static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFun
 		seed = static_cast<uint64_t>(pac_seed_val.GetValue<int64_t>());
 	}
 
-#ifdef DEBUG
+#if PAC_DEBUG
 	PAC_DEBUG_PRINT("PacCategoricalBind: mi=" + std::to_string(mi) + ", correction=" + std::to_string(correction) +
 	                ", seed=" + std::to_string(seed));
 #endif
@@ -534,9 +494,9 @@ static void PacListAggregateInit(const AggregateFunction &, data_ptr_t state_ptr
 	auto &state = *reinterpret_cast<PacListAggregateState *>(state_ptr);
 	state.key_hash = 0;
 	double init_val = 0.0;
-	if constexpr (AGG_TYPE == PacListAggType::MIN) {
+	if (AGG_TYPE == PacListAggType::MIN) {
 		init_val = std::numeric_limits<double>::max();
-	} else if constexpr (AGG_TYPE == PacListAggType::MAX) {
+	} else if (AGG_TYPE == PacListAggType::MAX) {
 		init_val = std::numeric_limits<double>::lowest();
 	}
 	for (idx_t i = 0; i < 64; i++) {
@@ -581,17 +541,17 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 			}
 			state.key_hash |= (1ULL << j);
 			double val = child_values[child_idx];
-			if constexpr (AGG_TYPE == PacListAggType::SUM) {
+			if (AGG_TYPE == PacListAggType::SUM) {
 				state.values[j] += val;
-			} else if constexpr (AGG_TYPE == PacListAggType::AVG) {
+			} else if (AGG_TYPE == PacListAggType::AVG) {
 				state.values[j] += val;
 				state.counts[j]++;
-			} else if constexpr (AGG_TYPE == PacListAggType::COUNT) {
+			} else if (AGG_TYPE == PacListAggType::COUNT) {
 				state.counts[j]++;
-			} else if constexpr (AGG_TYPE == PacListAggType::MIN) {
+			} else if (AGG_TYPE == PacListAggType::MIN) {
 				if (val < state.values[j])
 					state.values[j] = val;
-			} else if constexpr (AGG_TYPE == PacListAggType::MAX) {
+			} else if (AGG_TYPE == PacListAggType::MAX) {
 				if (val > state.values[j])
 					state.values[j] = val;
 			}
@@ -617,17 +577,17 @@ static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, Aggr
 			bool target_has = (target.key_hash & (1ULL << j)) != 0;
 			target.key_hash |= (1ULL << j);
 
-			if constexpr (AGG_TYPE == PacListAggType::SUM) {
+			if (AGG_TYPE == PacListAggType::SUM) {
 				target.values[j] += source.values[j];
-			} else if constexpr (AGG_TYPE == PacListAggType::AVG) {
+			} else if (AGG_TYPE == PacListAggType::AVG) {
 				target.values[j] += source.values[j];
 				target.counts[j] += source.counts[j];
-			} else if constexpr (AGG_TYPE == PacListAggType::COUNT) {
+			} else if (AGG_TYPE == PacListAggType::COUNT) {
 				target.counts[j] += source.counts[j];
-			} else if constexpr (AGG_TYPE == PacListAggType::MIN) {
+			} else if (AGG_TYPE == PacListAggType::MIN) {
 				if (!target_has || source.values[j] < target.values[j])
 					target.values[j] = source.values[j];
-			} else if constexpr (AGG_TYPE == PacListAggType::MAX) {
+			} else if (AGG_TYPE == PacListAggType::MAX) {
 				if (!target_has || source.values[j] > target.values[j])
 					target.values[j] = source.values[j];
 			}
@@ -658,11 +618,11 @@ static void PacListAggregateFinalize(Vector &state_vector, AggregateInputData &,
 		for (idx_t j = 0; j < 64; j++) {
 			if (!(state.key_hash & (1ULL << j))) {
 				list_values.push_back(Value());
-			} else if constexpr (AGG_TYPE == PacListAggType::AVG) {
+			} else if (AGG_TYPE == PacListAggType::AVG) {
 				list_values.push_back(state.counts[j] > 0
 				                          ? Value::DOUBLE(state.values[j] / static_cast<double>(state.counts[j]))
 				                          : Value());
-			} else if constexpr (AGG_TYPE == PacListAggType::COUNT) {
+			} else if (AGG_TYPE == PacListAggType::COUNT) {
 				list_values.push_back(Value::DOUBLE(static_cast<double>(state.counts[j])));
 			} else {
 				list_values.push_back(Value::DOUBLE(state.values[j]));
@@ -673,121 +633,6 @@ static void PacListAggregateFinalize(Vector &state_vector, AggregateInputData &,
 }
 
 static void PacListAggregateDestructor(Vector &, AggregateInputData &, idx_t) {
-}
-
-// ============================================================================
-// pac_first_list - Returns the first LIST<DOUBLE> value (for scalar subquery handling)
-// ============================================================================
-struct PacFirstListState {
-	bool has_value;
-	vector<Value> values; // Store the actual list values
-};
-
-static void PacFirstListInit(const AggregateFunction &, data_ptr_t state_ptr) {
-	auto &state = *reinterpret_cast<PacFirstListState *>(state_ptr);
-	state.has_value = false;
-	state.values.clear();
-}
-
-static void PacFirstListUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector,
-                               idx_t count) {
-	UnifiedVectorFormat sdata;
-	state_vector.ToUnifiedFormat(count, sdata);
-	auto states = reinterpret_cast<PacFirstListState **>(sdata.data);
-
-	UnifiedVectorFormat input_data;
-	inputs[0].ToUnifiedFormat(count, input_data);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto &state = *states[sdata.sel->get_index(i)];
-		auto input_idx = input_data.sel->get_index(i);
-
-		// Only take the first non-null value
-		if (!state.has_value && input_data.validity.RowIsValid(input_idx)) {
-			// Get the list value and store it
-			auto list_val = inputs[0].GetValue(input_idx);
-			// Skip if the value itself is NULL (not just the row validity)
-			if (list_val.IsNull()) {
-				continue;
-			}
-			// Also check if the value type is actually a list
-			if (list_val.type().id() != LogicalTypeId::LIST) {
-				continue;
-			}
-			// Try to get children - if the internal pointer is null, skip
-			try {
-				auto &list_children = ListValue::GetChildren(list_val);
-				state.values.clear();
-				for (auto &child : list_children) {
-					state.values.push_back(child);
-				}
-				state.has_value = true;
-			} catch (...) {
-				// If we can't get children, skip this value
-				continue;
-			}
-		}
-	}
-}
-
-static void PacFirstListCombine(Vector &source_vec, Vector &target_vec, AggregateInputData &, idx_t count) {
-	UnifiedVectorFormat sdata, tdata;
-	source_vec.ToUnifiedFormat(count, sdata);
-	target_vec.ToUnifiedFormat(count, tdata);
-	auto sources = reinterpret_cast<PacFirstListState **>(sdata.data);
-	auto targets = reinterpret_cast<PacFirstListState **>(tdata.data);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto &source = *sources[sdata.sel->get_index(i)];
-		auto &target = *targets[tdata.sel->get_index(i)];
-
-		if (!target.has_value && source.has_value) {
-			target.values = source.values;
-			target.has_value = true;
-		}
-	}
-}
-
-static void PacFirstListFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count,
-                                 idx_t offset) {
-	UnifiedVectorFormat sdata;
-	state_vector.ToUnifiedFormat(count, sdata);
-	auto states = reinterpret_cast<PacFirstListState **>(sdata.data);
-
-	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto &state = *states[sdata.sel->get_index(i)];
-		auto result_idx = i + offset;
-
-		if (!state.has_value) {
-			result_validity.SetInvalid(result_idx);
-		} else {
-			result.SetValue(result_idx, Value::LIST(LogicalType::DOUBLE, state.values));
-		}
-	}
-}
-
-static void PacFirstListDestructor(Vector &state_vec, AggregateInputData &, idx_t count) {
-	if (count == 0)
-		return;
-	UnifiedVectorFormat sdata;
-	state_vec.ToUnifiedFormat(count, sdata);
-	auto states = reinterpret_cast<PacFirstListState **>(sdata.data);
-	for (idx_t i = 0; i < count; i++) {
-		auto &state = *states[sdata.sel->get_index(i)];
-		state.values.clear();
-		state.values.shrink_to_fit();
-	}
-}
-
-static AggregateFunction CreatePacFirstListAggregate() {
-	auto list_double_type = LogicalType::LIST(LogicalType::DOUBLE);
-	return AggregateFunction("pac_first_list", {list_double_type}, list_double_type,
-	                         AggregateFunction::StateSize<PacFirstListState>, PacFirstListInit, PacFirstListUpdate,
-	                         PacFirstListCombine, PacFirstListFinalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                         nullptr, nullptr, PacFirstListDestructor);
 }
 
 template <PacListAggType AGG_TYPE>
@@ -830,11 +675,11 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// Mask combination functions (kept for potential future use)
 	ScalarFunction pac_mask_and("pac_mask_and", {LogicalType::UBIGINT, LogicalType::UBIGINT}, LogicalType::UBIGINT,
-	                            PacMaskAndFunction);
+	                            PacMaskBinaryFunction<MaskBinaryOp::AND>);
 	loader.RegisterFunction(pac_mask_and);
 
 	ScalarFunction pac_mask_or("pac_mask_or", {LogicalType::UBIGINT, LogicalType::UBIGINT}, LogicalType::UBIGINT,
-	                           PacMaskOrFunction);
+	                           PacMaskBinaryFunction<MaskBinaryOp::OR>);
 	loader.RegisterFunction(pac_mask_or);
 
 	ScalarFunction pac_mask_not("pac_mask_not", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacMaskNotFunction);
@@ -853,9 +698,6 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::COUNT>("pac_count_list"));
 	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::MIN>("pac_min_list"));
 	loader.RegisterFunction(CreatePacListAggregate<PacListAggType::MAX>("pac_max_list"));
-
-	// pac_first_list: Returns first LIST<DOUBLE> value (for scalar subquery handling)
-	loader.RegisterFunction(CreatePacFirstListAggregate());
 }
 
 } // namespace duckdb

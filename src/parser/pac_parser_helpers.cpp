@@ -15,68 +15,13 @@
 
 #include "parser/pac_parser.hpp"
 #include "parser/pac_parser_helpers.hpp"
+#include "pac_debug.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/database_manager.hpp"
 
 namespace duckdb {
-
-// ============================================================================
-// Helper functions for column validation
-// ============================================================================
-
-/**
- * FindMissingColumns: Checks which columns from a list don't exist in a table
- *
- * @param table - The table catalog entry to search
- * @param column_names - List of column names to validate
- * @return Vector of column names that were NOT found in the table
- *
- * This function performs case-insensitive column name matching.
- */
-static vector<string> FindMissingColumns(const TableCatalogEntry &table, const vector<string> &column_names) {
-	vector<string> missing;
-	for (const auto &col_name : column_names) {
-		bool found = false;
-		for (auto &col : table.GetColumns().Logical()) {
-			if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(col_name)) {
-				found = true;
-				break;
-			}
-		}
-		if (!found) {
-			missing.push_back(col_name);
-		}
-	}
-	return missing;
-}
-
-/**
- * FormatColumnList: Formats a list of column names for error messages
- *
- * Examples:
- *   []           -> ""
- *   ["col1"]     -> "'col1'"
- *   ["a", "b"]   -> "'a', 'b'"
- */
-static string FormatColumnList(const vector<string> &columns) {
-	if (columns.empty()) {
-		return "";
-	}
-	if (columns.size() == 1) {
-		return "'" + columns[0] + "'";
-	}
-
-	string result;
-	for (size_t i = 0; i < columns.size(); i++) {
-		if (i > 0) {
-			result += ", ";
-		}
-		result += "'" + columns[i] + "'";
-	}
-	return result;
-}
 
 // ============================================================================
 // Table name extraction
@@ -366,13 +311,13 @@ bool PACParserExtension::ParseAlterTableAddPAC(const string &query, string &stri
 	auto existing = PACMetadataManager::Get().GetTableMetadata(metadata.table_name);
 	if (existing) {
 		metadata = *existing;
-#ifdef DEBUG
+#if PAC_DEBUG
 		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: Found existing metadata for " << metadata.table_name
 		          << ", links=" << existing->links.size() << ", protected=" << existing->protected_columns.size()
 		          << "\n";
 #endif
 	} else {
-#ifdef DEBUG
+#if PAC_DEBUG
 		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: No existing metadata for " << metadata.table_name << "\n";
 #endif
 	}
