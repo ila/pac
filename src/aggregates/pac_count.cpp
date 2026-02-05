@@ -205,6 +205,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 
 	auto child_data = FlatVector::GetData<double>(child_vec);
 	auto &child_validity = FlatVector::Validity(child_vec);
+	auto &result_validity = FlatVector::Validity(result);
 	double buf[64];
 
 	for (idx_t i = 0; i < count; i++) {
@@ -213,17 +214,23 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 #endif
 		PacCountState *s = aggs[i]->GetState();
 
-		// Set up the list entry
+		// Set up the list entry - always needed even for NULL results
 		list_entries[offset + i].offset = i * 64;
 		list_entries[offset + i].length = 64;
 
-		uint64_t key_hash = s ? s->key_hash : 0;
-		if (s) {
-			s->FlushLevel(); // flush uint8_t level into uint64_t totals
-			s->GetTotalsAsDouble(buf);
-		} else {
-			memset(buf, 0, sizeof(buf));
+		if (!s) {
+			result_validity.SetInvalid(offset + i); // return NULL (no values seen)
+			// Still need to mark child elements as invalid for proper list structure
+			idx_t base = i * 64;
+			for (int j = 0; j < 64; j++) {
+				child_validity.SetInvalid(base + j);
+			}
+			continue;
 		}
+
+		uint64_t key_hash = s->key_hash;
+		s->FlushLevel(); // flush uint8_t level into uint64_t totals
+		s->GetTotalsAsDouble(buf);
 
 		// Copy counters to list: NULL where key_hash bit is 0, value * 2 * correction otherwise
 		// The 2x factor compensates for 50% sampling, correction is user-specified multiplier
