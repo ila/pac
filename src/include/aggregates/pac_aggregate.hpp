@@ -128,8 +128,7 @@ struct PacBindData : public FunctionData {
 	explicit PacBindData(double mi_val, double correction_val = 1.0, uint64_t seed_val = 0, double scale_div = 1.0,
 	                     bool use_det_noise = false)
 	    : mi(mi_val), correction(correction_val), seed(seed_val ? seed_val : PacGenerateRandomSeed()),
-	      query_hash((mi_val > 0.0) ? ((seed ^ PAC_MAGIC_HASH) + seed) : 0), scale_divisor(scale_div),
-	      use_deterministic_noise(use_det_noise) {
+	      query_hash(seed ^ PAC_MAGIC_HASH), scale_divisor(scale_div), use_deterministic_noise(use_det_noise) {
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		auto copy = make_uniq<PacBindData>(mi, correction, seed, scale_divisor, use_deterministic_noise);

@@ -131,9 +131,9 @@ GROUP BY
 ORDER BY
     o_orderpriority;
 ----
-1-URGENT	0
-2-HIGH	0
-3-MEDIUM	0
+1-URGENT	4
+2-HIGH	4
+3-MEDIUM	2
 
 # Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries
 # This tests the case where lineitem (FK-linked table) appears in both outer aggregate and inner aggregate
@@ -235,7 +235,7 @@ WHERE
     )
     AND l_discount > 0.04;
 ----
-2099.52
+2499.52
 
 # Test correlated subquery where outer and inner both need separate joins to PU
 # This is a CORRELATED subquery (references outer table via l_partkey), unlike the IN clause which is uncorrelated
@@ -294,7 +294,7 @@ SELECT COUNT(*) FROM (
     WHERE o_custkey = 1
 );
 ----
-0
+4
 
 # Test TPC-H Q21-style query: Suppliers Who Kept Orders Waiting
 # This tests complex correlated subqueries with:
@@ -413,4 +413,4 @@ ORDER BY
     s_name;
 ----
 Supplier#001	2
-Supplier#002	0
+Supplier#002	2

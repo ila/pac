@@ -207,9 +207,9 @@ ORDER BY
     custdist DESC,
     c_count DESC;
 ----
-0	4
-2	2
+2	5
 4	1
+0	1
 NULL	1
 
 # Test 3: TPC-H Q8-style query with CASE expression in outer aggregate
@@ -245,8 +245,8 @@ GROUP BY
 ORDER BY
     o_year;
 ----
-1995	1.00
-1996	0.42
+1995	0.31
+1996	0.75
 
 
 # Test 8: Q8 variation with different CASE condition
@@ -280,8 +280,8 @@ GROUP BY
 ORDER BY
     o_year;
 ----
-1995	0.0000
-1996	0.0000
+1995	15138.8160
+1996	6265.2416
 
 # Test 4: TPC-H Q9-style query with complex arithmetic in subquery
 # Tests: Subquery with multiple joins, complex arithmetic expression (subtraction of products), GROUP BY multiple columns
@@ -316,9 +316,9 @@ ORDER BY
     nation,
     o_year DESC;
 ----
-FRANCE	1996	-299.8272
-FRANCE	1995	-139.9808
-GERMANY	1996	0.0000
+FRANCE	1996	-919.1424
+FRANCE	1995	-99.9936
+GERMANY	1996	-119.9616
 GERMANY	1995	NULL
 
 # Test 5: TPC-H Q15-style query with CTE and subquery computing max from CTE
@@ -355,7 +355,7 @@ WHERE
 ORDER BY
     s_suppkey;
 ----
-3	Supplier#003	5688.5248	NULL
+3	Supplier#003	5387.0592	NULL
 
 # Clean up
 statement ok
