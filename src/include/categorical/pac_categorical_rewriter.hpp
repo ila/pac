@@ -155,6 +155,15 @@ struct PacBindingInfo {
 	idx_t index;               // Position in the list (0-based, for list_zip field access)
 };
 
+// Pre-collected rewrite info for a single expression (filter, join cond, or projection expr).
+// Groups all PAC bindings found in that expression so we know upfront if we need list_zip.
+struct ExpressionRewriteInfo {
+	LogicalOperator *parent_op;          // Filter, Join, or Projection operator
+	idx_t expr_index;                    // Index into parent's expressions/conditions
+	vector<PacBindingInfo> pac_bindings; // ALL PAC bindings in this expression
+	LogicalType original_return_type;    // Original type before counters conversion
+};
+
 } // namespace duckdb
 
 #endif // PAC_CATEGORICAL_REWRITER_HPP
