@@ -31,6 +31,32 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "query_processing/pac_plan_traversal.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_subquery_expression.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_lambda_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_cross_product.hpp"
+#include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/function/function_binder.hpp"
+#include "duckdb/function/lambda_functions.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
+#include "duckdb/common/types.hpp"
+#include "duckdb/function/scalar/struct_functions.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 
 namespace duckdb {
 
@@ -70,21 +96,48 @@ struct CategoricalPatternInfo {
 	}
 };
 
+// Pre-collected rewrite info for a single expression (filter, join cond, or projection expr).
+// Groups all PAC bindings found in that expression so we know upfront if we need list_zip.
+struct ExpressionRewriteInfo {
+	LogicalOperator *parent_op;                // Filter, Join, or Projection operator
+	idx_t expr_index;                          // Index into parent's expressions/conditions
+	vector<PacBindingInfo> pac_bindings;       // ALL PAC bindings (filter/proj), or combined left+right (join)
+	vector<PacBindingInfo> left_pac_bindings;  // For joins: left-side bindings
+	vector<PacBindingInfo> right_pac_bindings; // For joins: right-side bindings
+	LogicalType original_return_type;          // Original type before counters conversion
+};
+
+// The kind of wrapping to apply after BuildCounterListTransform
+enum class PacWrapKind {
+	PAC_NOISED, // Projection: list_transform -> pac_noised -> optional cast
+	PAC_FILTER  // Filter/Join: list_transform -> pac_filter
+};
+
+void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *plan_root,
+                                       vector<CategoricalPatternInfo> &patterns, bool inside_aggregate);
+
 // Check if the plan contains a categorical query pattern
 // Returns true if found, and populates pattern_info with details
-bool IsCategoricalQuery(unique_ptr<LogicalOperator> &plan, vector<CategoricalPatternInfo> &patterns);
+inline bool IsCategoricalQuery(unique_ptr<LogicalOperator> &plan, vector<CategoricalPatternInfo> &patterns) {
+	patterns.clear();
+	// Use plan-aware version, passing plan root for column binding tracing
+	FindCategoricalPatternsInOperator(plan.get(), plan.get(), patterns, false);
+	return !patterns.empty();
+}
 
 // Rewrite a categorical query to use counters and mask-based selection
 // This modifies the plan in-place
 void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                              vector<CategoricalPatternInfo> &patterns);
 
-// Check if a function name is a PAC aggregate
+// ==========================================================================================
+// simple inlined methods
+// ==========================================================================================
 static inline bool IsPacAggregate(const string &pattern, const string &suffix = "", const string &prefix = "pac_") {
 	const string name = StringUtil::Lower(pattern);
 	for (auto &aggr_name : {"sum", "count", "avg", "min", "max"}) {
 		if (name == prefix + aggr_name + suffix) {
-			return true;
+			return true; // function name is some PAC aggregate
 		}
 	}
 	return false;
@@ -124,11 +177,6 @@ static inline string GetListAggregateVariant(const string &name) {
 	return "";
 }
 
-// Hash a column binding to a unique 64-bit value for use in maps/sets
-static inline uint64_t HashBinding(const ColumnBinding &binding) {
-	return (uint64_t(binding.table_index) << 32) | binding.column_index;
-}
-
 // Check if a type is numerical (can be used with pac_noised)
 static bool IsNumericalType(const LogicalType &type) {
 	switch (type.id()) {
@@ -151,16 +199,189 @@ static bool IsNumericalType(const LogicalType &type) {
 	}
 }
 
-// Pre-collected rewrite info for a single expression (filter, join cond, or projection expr).
-// Groups all PAC bindings found in that expression so we know upfront if we need list_zip.
-struct ExpressionRewriteInfo {
-	LogicalOperator *parent_op;                // Filter, Join, or Projection operator
-	idx_t expr_index;                          // Index into parent's expressions/conditions
-	vector<PacBindingInfo> pac_bindings;       // ALL PAC bindings (filter/proj), or combined left+right (join)
-	vector<PacBindingInfo> left_pac_bindings;  // For joins: left-side bindings
-	vector<PacBindingInfo> right_pac_bindings; // For joins: right-side bindings
-	LogicalType original_return_type;          // Original type before counters conversion
-};
+// Hash a column binding to a unique 64-bit value for use in maps/sets
+static inline uint64_t HashBinding(const ColumnBinding &binding) {
+	return (uint64_t(binding.table_index) << 32) | binding.column_index;
+}
+
+// ==========================================================================================
+// inlined  helper methods for the categorical rewrites
+// ==========================================================================================
+
+// Get struct field name for index (a, b, c, ..., z, aa, ab, ...)
+static inline string GetStructFieldName(idx_t index) {
+	if (index < 26) {
+		return string(1, static_cast<char>('a' + static_cast<unsigned char>(index)));
+	}
+	// For indices >= 26, use aa, ab, etc.
+	return string(1, static_cast<char>('a' + static_cast<unsigned char>(index / 26 - 1))) +
+	       string(1, static_cast<char>('a' + static_cast<unsigned char>(index % 26)));
+}
+
+// Check if an expression is already wrapped in a categorical rewrite terminal function
+// This includes pac_noised, pac_filter, list_transform, and list_zip
+// These functions indicate that the expression has already been processed by categorical rewriting
+static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
+	if (!expr) {
+		return false;
+	}
+	if (expr->type == ExpressionType::BOUND_FUNCTION) {
+		auto &func = expr->Cast<BoundFunctionExpression>();
+		// Check for all categorical rewrite terminal functions
+		if (func.function.name == "pac_noised" || func.function.name == "pac_filter" ||
+		    func.function.name == "pac_coalesce" || func.function.name == "list_transform" ||
+		    func.function.name == "list_zip") {
+			return true;
+		}
+	}
+	// Check for CAST(terminal_function(...))
+	if (expr->type == ExpressionType::OPERATOR_CAST) {
+		auto &cast = expr->Cast<BoundCastExpression>();
+		return IsAlreadyWrappedInPacNoised(cast.child.get());
+	}
+	return false;
+}
+
+// Search an operator subtree for PAC aggregates
+// Returns the first PAC aggregate name found, empty string otherwise
+static inline string FindPacAggregateInOperator(LogicalOperator *op) {
+	// Check if this is an aggregate operator with PAC aggregates
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &agg = op->Cast<LogicalAggregate>();
+		for (auto &agg_expr : agg.expressions) {
+			if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
+				auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
+				if (IsAnyPacAggregate(bound_agg.function.name)) {
+					return GetBasePacAggregateName(bound_agg.function.name);
+				}
+			}
+		}
+	}
+	for (auto &child : op->children) {
+		string result = FindPacAggregateInOperator(child.get());
+		if (!result.empty()) {
+			return result;
+		}
+	}
+	return "";
+}
+
+// Helper: Find the operator in the plan that produces a given table_index
+static inline LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index) {
+	// Check if this operator produces the table_index
+	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = op->Cast<LogicalProjection>();
+		if (proj.table_index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggr = op->Cast<LogicalAggregate>();
+		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
+			return op;
+		}
+	}
+	// Note: Joins don't have their own table_index, they pass through from children
+	// So we just recurse into children (handled below)
+	for (auto &child : op->children) {
+		auto *result = FindOperatorByTableIndex(child.get(), table_index);
+		if (result) {
+			return result;
+		}
+	}
+	return nullptr;
+}
+
+// DuckDB wraps scalar subqueries in a runtime check that the query returns 1 row. For our rewrites, we know this is
+// fine, and the wrapper operators are in the way, so we find and remove them, when inside a rewritten subtree.
+//
+// Recognize (and optionally strip) a scalar subquery wrapper operator in place
+// Pattern: Project(CASE) #X -> Aggregate(first, count*) -> Project #Z -> [inner]
+// When remove=true: deletes outer Project and Aggregate, keeps inner Project with outer's table_index
+// Returns the inner operator (below inner projection) if pattern matches, nullptr otherwise
+static inline bool IsScalarSubqueryWrapper(const BoundCaseExpression &case_expr) {
+	if (case_expr.case_checks.size() != 1 || !case_expr.else_expr) {
+		return false;
+	}
+	auto &check = case_expr.case_checks[0];
+	if (check.then_expr && check.then_expr->type == ExpressionType::BOUND_FUNCTION) {
+		auto &func = check.then_expr->Cast<BoundFunctionExpression>();
+		return func.function.name == "error";
+	}
+	return false;
+}
+
+// Recognize DuckDB's scalar subquery wrapper pattern
+//
+// Pattern  (uncorrelated): Projection -> Aggregate(first) -> Projection
+//   Projection (CASE error if count > 1, else first(value))
+//   └── Aggregate (first(#0), count_star())
+//       └── Projection (#0)
+//           └── [actual scalar subquery result]
+// Check if a CASE expression is DuckDB's scalar subquery wrapper pattern:
+// CASE WHEN count>1 THEN error(...) ELSE value END
+static inline LogicalOperator *RecognizeDuckDBScalarWrapper(LogicalOperator *op) {
+	auto &outer_proj = op->Cast<LogicalProjection>();
+	if (outer_proj.expressions.empty()) {
+		return nullptr;
+	}
+	auto &expr = outer_proj.expressions[0];
+	if (expr->type != ExpressionType::CASE_EXPR) {
+		return nullptr;
+	}
+	if (!IsScalarSubqueryWrapper(expr->Cast<BoundCaseExpression>())) {
+		return nullptr;
+	}
+	if (outer_proj.children.empty()) {
+		return nullptr;
+	}
+	auto *child = outer_proj.children[0].get();
+	if (child->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return nullptr;
+	}
+	auto &agg = child->Cast<LogicalAggregate>();
+	if (agg.expressions.empty()) {
+		return nullptr;
+	}
+	auto &agg_expr = agg.expressions[0];
+	if (agg_expr->type != ExpressionType::BOUND_AGGREGATE) {
+		return nullptr;
+	}
+	auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
+	if (StringUtil::Lower(bound_agg.function.name) != "first") {
+		return nullptr;
+	}
+	if (agg.children.empty()) {
+		return nullptr;
+	}
+	auto *inner_proj_op = agg.children[0].get();
+	if (inner_proj_op->type != LogicalOperatorType::LOGICAL_PROJECTION) {
+		return nullptr;
+	}
+	auto &inner_proj = inner_proj_op->Cast<LogicalProjection>();
+	return inner_proj.children.empty() ? nullptr : inner_proj.children[0].get();
+}
+
+static inline LogicalOperator *StripScalarWrapperInPlace(unique_ptr<LogicalOperator> &wrapper_ptr, bool remove = true) {
+	if (!wrapper_ptr || wrapper_ptr->type != LogicalOperatorType::LOGICAL_PROJECTION) {
+		return nullptr;
+	}
+	auto *unwrapped = RecognizeDuckDBScalarWrapper(wrapper_ptr.get());
+	if (!unwrapped) {
+		return nullptr;
+	}
+	if (remove) {
+		auto &outer_proj = wrapper_ptr->Cast<LogicalProjection>();
+		auto &agg = outer_proj.children[0]->Cast<LogicalAggregate>();
+		auto &inner_proj = agg.children[0]->Cast<LogicalProjection>();
+		inner_proj.table_index = outer_proj.table_index; // Change inner projection's table_index to match outer's
+		inner_proj.types.clear();                        // Update inner projection's types to match its expressions
+		for (auto &expr : inner_proj.expressions) {
+			inner_proj.types.push_back(expr->return_type);
+		}
+		wrapper_ptr = std::move(agg.children[0]); // Replace the wrapper_ptr with the inner projection
+	}
+	return unwrapped;
+}
 
 } // namespace duckdb
 
