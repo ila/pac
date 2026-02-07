@@ -371,6 +371,75 @@ static void PacMaskNotFunction(DataChunk &args, ExpressionState &state, Vector &
 // Takes a list of 64 counter values, reconstructs key_hash from NULL/non-NULL pattern,
 // and returns a single noised value using PacNoisySampleFrom64Counters.
 // This is essentially what pac_sum/avg/count/min/max aggregates do in their finalize.
+// pac_coalesce(LIST<DOUBLE>) -> LIST<DOUBLE>
+// If the input list is NULL, returns a list of 64 NULL doubles.
+// Otherwise returns the input unchanged. This is needed because COALESCE
+// with a constant fallback list would have only 1 element, but pac_filter
+// needs exactly 64 for majority voting.
+static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &input = args.data[0];
+	idx_t count = args.size();
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	// First pass: count total elements needed
+	UnifiedVectorFormat input_data;
+	input.ToUnifiedFormat(count, input_data);
+	auto input_entries = UnifiedVectorFormat::GetData<list_entry_t>(input_data);
+
+	idx_t total_elements = 0;
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = input_data.sel->get_index(i);
+		if (input_data.validity.RowIsValid(idx)) {
+			total_elements += input_entries[idx].length;
+		} else {
+			total_elements += 64; // will fill with NULLs
+		}
+	}
+
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+	auto child_data = FlatVector::GetData<double>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
+
+	// Get the source child vector for non-NULL lists
+	auto &input_child = ListVector::GetEntry(input);
+	UnifiedVectorFormat input_child_data;
+	input_child.ToUnifiedFormat(ListVector::GetListSize(input), input_child_data);
+	auto src_data = UnifiedVectorFormat::GetData<double>(input_child_data);
+
+	idx_t offset = 0;
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = input_data.sel->get_index(i);
+		list_entries[i].offset = offset;
+
+		if (input_data.validity.RowIsValid(idx)) {
+			// Non-NULL: copy the input list
+			auto &entry = input_entries[idx];
+			list_entries[i].length = entry.length;
+			for (idx_t j = 0; j < entry.length; j++) {
+				auto src_idx = input_child_data.sel->get_index(entry.offset + j);
+				if (input_child_data.validity.RowIsValid(src_idx)) {
+					child_data[offset + j] = src_data[src_idx];
+				} else {
+					child_validity.SetInvalid(offset + j);
+				}
+			}
+			offset += entry.length;
+		} else {
+			// NULL input: produce 64 NULL doubles
+			list_entries[i].length = 64;
+			for (idx_t j = 0; j < 64; j++) {
+				child_validity.SetInvalid(offset + j);
+			}
+			offset += 64;
+		}
+	}
+}
+
 static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
@@ -871,8 +940,13 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	ScalarFunction pac_mask_not("pac_mask_not", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacMaskNotFunction);
 	loader.RegisterFunction(pac_mask_not);
 
-	// pac_noised(list<double>) -> DOUBLE : Apply noise to 64 counter values
+	// pac_coalesce(list<double>) -> list<double> : Replace NULL list with 64 NULL doubles
 	auto list_double_type = LogicalType::LIST(LogicalType::DOUBLE);
+	ScalarFunction pac_coalesce("pac_coalesce", {list_double_type}, list_double_type, PacCoalesceFunction);
+	pac_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	loader.RegisterFunction(pac_coalesce);
+
+	// pac_noised(list<double>) -> DOUBLE : Apply noise to 64 counter values
 	ScalarFunction pac_noised("pac_noised", {list_double_type}, LogicalType::DOUBLE, PacNoisedFunction,
 	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_noised);

@@ -70,21 +70,90 @@ struct CategoricalPatternInfo {
 // Returns true if found, and populates pattern_info with details
 bool IsCategoricalQuery(unique_ptr<LogicalOperator> &plan, vector<CategoricalPatternInfo> &patterns);
 
-// Check if an expression contains a PAC aggregate (directly or in subquery)
-// Returns the name of the PAC aggregate if found, empty string otherwise
-string FindPacAggregateInExpression(Expression *expr);
-
-// Check if an expression is a comparison that involves a PAC aggregate result
-bool IsComparisonWithPacAggregate(Expression *expr, CategoricalPatternInfo &info);
-
 // Rewrite a categorical query to use counters and mask-based selection
 // This modifies the plan in-place
 void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                              vector<CategoricalPatternInfo> &patterns);
 
-// Convert a PAC aggregate name to its counters variant
-// e.g., "pac_sum" -> "pac_sum_counters", "pac_count" -> "pac_count_counters"
-string GetCountersVariant(const string &aggregate_name);
+// Check if a function name is a PAC aggregate
+static inline bool IsPacAggregate(const string &pattern, const string suffix = "", const string prefix = "pac_") {
+	const string name = StringUtil::Lower(pattern);
+	for (auto &aggr_name : {"sum", "count", "avg", "min", "max"}) {
+		if (name == prefix + aggr_name + suffix) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static inline bool IsPacCountersAggregate(const string &name) {
+	return IsPacAggregate(name, "_counters"); // Check if a function name is already a PAC counters variant
+}
+
+static inline bool IsPacListAggregate(const string &name) {
+	return IsPacAggregate(name, "_list"); // Check if a function name is a PAC list aggregate (pac_*_list)
+}
+
+static inline bool IsAnyPacAggregate(const string &name) {
+	return IsPacAggregate(name) || IsPacCountersAggregate(name) || IsPacListAggregate(name);
+}
+
+string inline GetCountersVariant(const string &aggregate_name) {
+	if (IsPacCountersAggregate(aggregate_name)) {
+		return aggregate_name;
+	}
+	D_ASSERT(IsPacAggregate(aggregate_name));
+	return aggregate_name + "_counters";
+}
+
+static inline string GetBasePacAggregateName(const string &name) {
+	if (IsPacCountersAggregate(name)) {
+		return name.substr(0, name.size() - 9); // Remove "_counters" suffix
+	}
+	return name;
+}
+
+static inline string GetListAggregateVariant(const string &name) {
+	if (IsPacAggregate(name, "", "")) {
+		return "pac_" + name + "_list";
+	}
+	return "";
+}
+
+// Hash a column binding to a unique 64-bit value for use in maps/sets
+static inline uint64_t HashBinding(const ColumnBinding &binding) {
+	return (uint64_t(binding.table_index) << 32) | binding.column_index;
+}
+
+// Check if a type is numerical (can be used with pac_noised)
+static bool IsNumericalType(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
+	case LogicalTypeId::DECIMAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// Information about a single PAC aggregate binding found in an expression
+struct PacBindingInfo {
+	ColumnBinding binding;
+	string aggregate_name;     // e.g., "pac_sum", "pac_count"
+	LogicalType original_type; // The type before conversion to LIST<DOUBLE>
+	idx_t index;               // Position in the list (0-based, for list_zip field access)
+};
 
 } // namespace duckdb
 

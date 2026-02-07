@@ -589,8 +589,7 @@ Supplier#1	Address1
 Supplier#2	Address2
 
 # ============================================================================
-# Test 13: Categorical with NULL handling - DISABLED
-# NOTE: Outer COALESCE around PAC subqueries is not fully supported.
+# Test 13: Categorical with NULL handling 
 # The pattern `coalesce((SELECT pac_agg(...)), default_value)` at the filter
 # level doesn't work correctly because after PAC transformation, the subquery
 # returns LIST<DOUBLE> and coalesce(LIST, scalar) isn't valid.
@@ -598,25 +597,24 @@ Supplier#2	Address2
 #   SELECT coalesce(sum(...), 0) FROM ...
 # ============================================================================
 
-# Disabled due to current limitation
-# query I
-# SELECT count(*) FROM (
-#     SELECT
-#         ps_partkey
-#     FROM
-#         partsupp
-#     WHERE
-#         ps_availqty > coalesce((
-#             SELECT sum(l_quantity)
-#             FROM lineitem
-#             JOIN orders ON l_orderkey = o_orderkey
-#             WHERE l_partkey = ps_partkey
-#               AND l_suppkey = ps_suppkey
-#               AND l_shipdate > DATE '2000-01-01'  -- No matching rows
-#         ), 0)
-# );
-# ----
-# 6
+query I
+SELECT count(*) FROM (
+    SELECT
+        ps_partkey
+    FROM
+        partsupp
+    WHERE
+        ps_availqty > coalesce((
+            SELECT sum(l_quantity)
+            FROM lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+            WHERE l_partkey = ps_partkey
+              AND l_suppkey = ps_suppkey
+              AND l_shipdate > DATE '2000-01-01'  -- No matching rows
+        ), 0)
+);
+----
+6
 
 # ============================================================================
 # Cleanup
