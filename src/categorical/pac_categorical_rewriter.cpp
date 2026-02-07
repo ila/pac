@@ -2688,7 +2688,9 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	plan->ResolveOperatorTypes();
 
 	PAC_DEBUG_PRINT("=== PLAN AFTER COUNTERS REPLACEMENT ===");
+#if PAC_DEBUG
 	plan->Print();
+#endif
 
 	// Step 5: Lambda-based filter rewriting with support for multiple PAC aggregates
 	// For single PAC aggregate: double-lambda approach (cast then predicate)
