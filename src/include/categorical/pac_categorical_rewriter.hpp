@@ -34,6 +34,14 @@
 
 namespace duckdb {
 
+// Information about a single PAC aggregate binding found in an expression
+struct PacBindingInfo {
+	ColumnBinding binding;
+	string aggregate_name;     // e.g., "pac_sum", "pac_count"
+	LogicalType original_type; // The type before conversion to LIST<DOUBLE>
+	idx_t index;               // Position in the list (0-based, for list_zip field access)
+};
+
 // Information about a detected categorical pattern
 struct CategoricalPatternInfo {
 	// The parent operator containing the expression (Filter, Join, or Projection)
@@ -53,6 +61,8 @@ struct CategoricalPatternInfo {
 	// Points to the outer Projection of the pattern: Project(CASE) -> Aggregate(first) -> Project
 	// When set, these three operators should be stripped during rewrite
 	LogicalOperator *scalar_wrapper_op;
+	// Pre-collected PAC bindings from detection (avoids recomputation in BuildRewriteMap)
+	vector<PacBindingInfo> pac_bindings;
 
 	CategoricalPatternInfo()
 	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE),
@@ -141,21 +151,15 @@ static bool IsNumericalType(const LogicalType &type) {
 	}
 }
 
-// Information about a single PAC aggregate binding found in an expression
-struct PacBindingInfo {
-	ColumnBinding binding;
-	string aggregate_name;     // e.g., "pac_sum", "pac_count"
-	LogicalType original_type; // The type before conversion to LIST<DOUBLE>
-	idx_t index;               // Position in the list (0-based, for list_zip field access)
-};
-
 // Pre-collected rewrite info for a single expression (filter, join cond, or projection expr).
 // Groups all PAC bindings found in that expression so we know upfront if we need list_zip.
 struct ExpressionRewriteInfo {
-	LogicalOperator *parent_op;          // Filter, Join, or Projection operator
-	idx_t expr_index;                    // Index into parent's expressions/conditions
-	vector<PacBindingInfo> pac_bindings; // ALL PAC bindings in this expression
-	LogicalType original_return_type;    // Original type before counters conversion
+	LogicalOperator *parent_op;                // Filter, Join, or Projection operator
+	idx_t expr_index;                          // Index into parent's expressions/conditions
+	vector<PacBindingInfo> pac_bindings;       // ALL PAC bindings (filter/proj), or combined left+right (join)
+	vector<PacBindingInfo> left_pac_bindings;  // For joins: left-side bindings
+	vector<PacBindingInfo> right_pac_bindings; // For joins: right-side bindings
+	LogicalType original_return_type;          // Original type before counters conversion
 };
 
 } // namespace duckdb
