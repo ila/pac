@@ -76,7 +76,7 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
                              vector<CategoricalPatternInfo> &patterns);
 
 // Check if a function name is a PAC aggregate
-static inline bool IsPacAggregate(const string &pattern, const string suffix = "", const string prefix = "pac_") {
+static inline bool IsPacAggregate(const string &pattern, const string &suffix = "", const string &prefix = "pac_") {
 	const string name = StringUtil::Lower(pattern);
 	for (auto &aggr_name : {"sum", "count", "avg", "min", "max"}) {
 		if (name == prefix + aggr_name + suffix) {
