@@ -36,16 +36,10 @@ namespace duckdb {
 
 // Information about a detected categorical pattern
 struct CategoricalPatternInfo {
-	// The comparison expression that needs rewriting (may be nullptr for general boolean expressions)
-	Expression *comparison_expr;
-	// The parent operator containing the expression (usually a Filter)
+	// The parent operator containing the expression (Filter, Join, or Projection)
 	LogicalOperator *parent_op;
-	// Index of the expression in the parent's expressions list
+	// Index of the expression in the parent's expressions list (or conditions list for joins)
 	idx_t expr_index;
-	// The subquery expression containing the PAC aggregate (column ref to PAC result)
-	Expression *subquery_expr;
-	// Which side of the comparison has the subquery (0 = left, 1 = right) - only for comparison patterns
-	idx_t subquery_side;
 	// The aggregate function name (e.g., "pac_sum", "pac_count")
 	string aggregate_name;
 	// The column binding that references the PAC aggregate result
@@ -61,8 +55,8 @@ struct CategoricalPatternInfo {
 	LogicalOperator *scalar_wrapper_op;
 
 	CategoricalPatternInfo()
-	    : comparison_expr(nullptr), parent_op(nullptr), expr_index(0), subquery_expr(nullptr), subquery_side(0),
-	      has_pac_binding(false), original_return_type(LogicalType::DOUBLE), scalar_wrapper_op(nullptr) {
+	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE),
+	      scalar_wrapper_op(nullptr) {
 	}
 };
 

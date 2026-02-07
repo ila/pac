@@ -303,49 +303,6 @@ static string FindPacAggregateInExpression(Expression *expr, LogicalOperator *pl
 	return result;
 }
 
-// Plan-aware version: find PAC aggregate in expression and populate pattern info
-// For comparisons, identifies which side has the PAC aggregate (left=0, right=1)
-// For other expression types, searches the entire expression
-static bool IsComparisonWithPacAggregate(Expression *expr, CategoricalPatternInfo &info, LogicalOperator *plan_root) {
-	// For comparison expressions, identify which side has the PAC aggregate
-	if (expr->type == ExpressionType::COMPARE_GREATERTHAN || expr->type == ExpressionType::COMPARE_LESSTHAN ||
-	    expr->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO ||
-	    expr->type == ExpressionType::COMPARE_LESSTHANOREQUALTO || expr->type == ExpressionType::COMPARE_EQUAL ||
-	    expr->type == ExpressionType::COMPARE_NOTEQUAL) {
-		auto &comp_expr = expr->Cast<BoundComparisonExpression>();
-
-		// Check left side for PAC aggregate
-		string left_pac = FindPacAggregateInExpression(comp_expr.left.get(), plan_root);
-		if (!left_pac.empty()) {
-			info.comparison_expr = expr;
-			info.subquery_expr = comp_expr.left.get();
-			info.subquery_side = 0;
-			info.aggregate_name = left_pac;
-			return true;
-		}
-		// Check right side for PAC aggregate
-		string right_pac = FindPacAggregateInExpression(comp_expr.right.get(), plan_root);
-		if (!right_pac.empty()) {
-			info.comparison_expr = expr;
-			info.subquery_expr = comp_expr.right.get();
-			info.subquery_side = 1;
-			info.aggregate_name = right_pac;
-			return true;
-		}
-		return false;
-	}
-	// For any other expression type, search the whole expression
-	string pac_name = FindPacAggregateInExpression(expr, plan_root);
-	if (!pac_name.empty()) {
-		info.comparison_expr = expr;
-		info.subquery_expr = expr;
-		info.subquery_side = 0;
-		info.aggregate_name = pac_name;
-		return true;
-	}
-	return false;
-}
-
 // Helper to check if a filter's child is an aggregate that produces the given binding
 // This detects HAVING clauses where the comparison references the immediate child aggregate
 static bool IsHavingClausePattern(LogicalOperator *filter_op, const ColumnBinding &binding,
@@ -373,8 +330,9 @@ static bool IsHavingClausePattern(LogicalOperator *filter_op, const ColumnBindin
 	return false;
 }
 
-// Helper to trace a binding through projections to find the original aggregate binding
-static ColumnBinding TraceBindingThroughProjections(const ColumnBinding &binding, LogicalOperator *plan_root) {
+// Resolve a column binding to its source by following through projection operators
+// (including functions within projections like `0.5 * agg_result` or `pac_scale_counters(col)`)
+static ColumnBinding ResolveBindingSource(const ColumnBinding &binding, LogicalOperator *plan_root) {
 	auto *source_op = FindOperatorByTableIndex(plan_root, binding.table_index);
 	if (!source_op || source_op->type != LogicalOperatorType::LOGICAL_PROJECTION) {
 		return binding;
@@ -384,7 +342,7 @@ static ColumnBinding TraceBindingThroughProjections(const ColumnBinding &binding
 		auto &expr = proj.expressions[binding.column_index];
 		if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-			return TraceBindingThroughProjections(col_ref.binding, plan_root);
+			return ResolveBindingSource(col_ref.binding, plan_root);
 		}
 		// For functions like 0.5 * agg_result, trace through the function's children
 		if (expr->type == ExpressionType::BOUND_FUNCTION) {
@@ -392,7 +350,7 @@ static ColumnBinding TraceBindingThroughProjections(const ColumnBinding &binding
 			for (auto &child : func_expr.children) {
 				if (child->type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = child->Cast<BoundColumnRefExpression>();
-					auto traced = TraceBindingThroughProjections(col_ref.binding, plan_root);
+					auto traced = ResolveBindingSource(col_ref.binding, plan_root);
 					// If we found a different binding, return it
 					if (traced.table_index != col_ref.binding.table_index) {
 						return traced;
@@ -433,7 +391,7 @@ static void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperat
 			string first_aggregate_name;
 
 			for (auto &binding_info : pac_bindings) {
-				ColumnBinding traced_binding = TraceBindingThroughProjections(binding_info.binding, plan_root);
+				ColumnBinding traced_binding = ResolveBindingSource(binding_info.binding, plan_root);
 				bool is_having = IsHavingClausePattern(op, traced_binding, plan_root);
 				if (!is_having) {
 					has_non_having_binding = true;
@@ -450,22 +408,15 @@ static void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperat
 				info.pac_binding = first_non_having_binding;
 				info.has_pac_binding = true;
 				info.aggregate_name = first_aggregate_name;
-				// For backward compatibility, also try to identify comparison structure
-				IsComparisonWithPacAggregate(filter_expr.get(), info, plan_root);
 
 				// Check if this binding goes through a scalar subquery wrapper
 				info.scalar_wrapper_op = FindScalarWrapperForBinding(first_non_having_binding, plan_root);
 
-				// Capture original return type BEFORE conversion to LIST<DOUBLE>
-				// This is needed for the double-lambda rewrite to cast elements back
-				if (info.subquery_expr) {
-					info.original_return_type = info.subquery_expr->return_type;
-				} else {
-					// Try to get the type from the aggregate directly
-					ColumnBinding traced = TraceBindingThroughProjections(first_non_having_binding, plan_root);
-					auto *agg_op = FindAggregateForBinding(traced, plan_root);
-					if (agg_op && traced.column_index < agg_op->expressions.size()) {
-						info.original_return_type = agg_op->expressions[traced.column_index]->return_type;
+				// Capture original return type from the first non-having PAC binding
+				for (auto &bi : pac_bindings) {
+					if (bi.binding == first_non_having_binding) {
+						info.original_return_type = bi.original_type;
+						break;
 					}
 				}
 #if PAC_DEBUG
@@ -502,26 +453,18 @@ static void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperat
 			// So we don't need the now_inside_aggregate check here - any PAC aggregate
 			// in a join condition is a categorical pattern (correlated subquery).
 			if (!left_pac.empty()) {
-				info.comparison_expr = nullptr; // Join conditions are handled differently
 				info.parent_op = op;
 				info.expr_index = i;
-				info.subquery_expr = cond.left.get();
-				info.subquery_side = 0;
 				info.aggregate_name = left_pac;
-				// Check for scalar wrapper if left is a column ref
 				if (cond.left->type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = cond.left->Cast<BoundColumnRefExpression>();
 					info.scalar_wrapper_op = FindScalarWrapperForBinding(col_ref.binding, plan_root);
 				}
 				patterns.push_back(info);
 			} else if (!right_pac.empty()) {
-				info.comparison_expr = nullptr;
 				info.parent_op = op;
 				info.expr_index = i;
-				info.subquery_expr = cond.right.get();
-				info.subquery_side = 1;
 				info.aggregate_name = right_pac;
-				// Check for scalar wrapper if right is a column ref
 				if (cond.right->type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = cond.right->Cast<BoundColumnRefExpression>();
 					info.scalar_wrapper_op = FindScalarWrapperForBinding(col_ref.binding, plan_root);
@@ -585,9 +528,6 @@ static void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperat
 				info.has_pac_binding = true;
 				info.aggregate_name = pac_bindings[0].aggregate_name;
 				info.original_return_type = expr->return_type;
-				info.comparison_expr = nullptr;
-				info.subquery_expr = nullptr;
-				info.scalar_wrapper_op = nullptr;
 
 				PAC_DEBUG_PRINT("Found projection-based categorical pattern in expr " + std::to_string(i) + " with " +
 				                std::to_string(pac_bindings.size()) + " PAC binding(s)");
@@ -994,43 +934,13 @@ CloneForLambdaBody(Expression *expr, const unordered_map<uint64_t, idx_t> &pac_b
 			return make_pac_replacement(it, "elem");
 		}
 
-		// Trace through projections to find the actual PAC aggregate binding
-		ColumnBinding traced = col_ref.binding;
-		auto *source_op = FindOperatorByTableIndex(plan_root, traced.table_index);
-
-		while (source_op && source_op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-			auto &proj = source_op->Cast<LogicalProjection>();
-			if (traced.column_index < proj.expressions.size()) {
-				auto &proj_expr = proj.expressions[traced.column_index];
-				if (proj_expr->type == ExpressionType::BOUND_COLUMN_REF) {
-					auto &inner_ref = proj_expr->Cast<BoundColumnRefExpression>();
-					traced = inner_ref.binding;
-					uint64_t traced_hash = HashBinding(traced);
-					auto traced_it = pac_binding_map.find(traced_hash);
-					if (traced_it != pac_binding_map.end()) {
-						PAC_DEBUG_PRINT("    CloneForLambdaBody: MATCHED (traced through projection)");
-						return make_pac_replacement(traced_it, "elem");
-					}
-					source_op = FindOperatorByTableIndex(plan_root, traced.table_index);
-				} else if (proj_expr->type == ExpressionType::BOUND_FUNCTION) {
-					// Check if this function (like pac_scale_counters) references a PAC binding
-					auto &func_expr = proj_expr->Cast<BoundFunctionExpression>();
-					for (auto &child : func_expr.children) {
-						if (child->type == ExpressionType::BOUND_COLUMN_REF) {
-							auto &child_ref = child->Cast<BoundColumnRefExpression>();
-							auto found_it = pac_binding_map.find(HashBinding(child_ref.binding));
-							if (found_it != pac_binding_map.end()) {
-								PAC_DEBUG_PRINT("    CloneForLambdaBody: MATCHED (through function in projection)");
-								return make_pac_replacement(found_it, col_ref.alias);
-							}
-						}
-					}
-					break;
-				} else {
-					break;
-				}
-			} else {
-				break;
+		// Trace through projections (and functions like pac_scale_counters) to find PAC binding
+		ColumnBinding traced = ResolveBindingSource(col_ref.binding, plan_root);
+		if (!(traced == col_ref.binding)) {
+			auto traced_it = pac_binding_map.find(HashBinding(traced));
+			if (traced_it != pac_binding_map.end()) {
+				PAC_DEBUG_PRINT("    CloneForLambdaBody: MATCHED (traced through projection)");
+				return make_pac_replacement(traced_it, col_ref.alias);
 			}
 		}
 		PAC_DEBUG_PRINT("    CloneForLambdaBody: NO MATCH - capturing");
@@ -1534,6 +1444,55 @@ static unique_ptr<Expression> BuildCounterListTransform(OptimizerExtensionInput 
 	}
 }
 
+// The kind of wrapping to apply after BuildCounterListTransform
+enum class PacWrapKind {
+	PAC_NOISED, // Projection: list_transform -> pac_noised -> optional cast
+	PAC_FILTER  // Filter/Join: list_transform -> pac_filter
+};
+
+// Unified expression rewrite: build list_transform over PAC counters and wrap.
+// pac_bindings: all PAC aggregate bindings in the expression
+// expr: the expression to transform (boolean for filter, numeric for projection)
+// wrap_kind: determines terminal function and type parameters
+// target_type: for PAC_NOISED, cast result to this type (ignored for PAC_FILTER)
+static unique_ptr<Expression> RewriteExpressionWithCounters(OptimizerExtensionInput &input,
+                                                            const vector<PacBindingInfo> &pac_bindings,
+                                                            Expression *expr, LogicalOperator *plan_root,
+                                                            PacWrapKind wrap_kind,
+                                                            const LogicalType &target_type = LogicalType::DOUBLE) {
+	if (pac_bindings.empty()) {
+		return nullptr;
+	}
+
+	LogicalType element_type;
+	LogicalType result_element_type;
+
+	if (wrap_kind == PacWrapKind::PAC_NOISED) {
+		element_type = LogicalType::DOUBLE;
+		result_element_type = LogicalType::DOUBLE;
+	} else {
+		// Filter/Join: use original type for single binding (enables double-lambda),
+		// DOUBLE for multi-binding (list_zip always produces DOUBLE)
+		element_type = (pac_bindings.size() == 1) ? pac_bindings[0].original_type : LogicalType::DOUBLE;
+		result_element_type = LogicalType::BOOLEAN;
+	}
+
+	auto list_expr = BuildCounterListTransform(input, pac_bindings, expr, plan_root, element_type, result_element_type);
+	if (!list_expr) {
+		return nullptr;
+	}
+
+	if (wrap_kind == PacWrapKind::PAC_NOISED) {
+		auto noised = BuildPacNoisedCall(input, std::move(list_expr));
+		if (target_type != LogicalType::DOUBLE) {
+			noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
+		}
+		return noised;
+	} else {
+		return input.optimizer.BindScalarFunction("pac_filter", std::move(list_expr));
+	}
+}
+
 // Build a map from parent operators to their ExpressionRewriteInfo entries.
 // Groups patterns by (parent_op, expr_index) and pre-collects PAC bindings per expression.
 static unordered_map<LogicalOperator *, vector<ExpressionRewriteInfo>>
@@ -1714,20 +1673,22 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			    expr->Cast<BoundCastExpression>().return_type != LogicalType::DOUBLE) {
 				expr_to_clone = expr->Cast<BoundCastExpression>().child.get();
 			}
-			auto list_expr = BuildCounterListTransform(input, pac_bindings, expr_to_clone, plan_root,
-			                                           LogicalType::DOUBLE, LogicalType::DOUBLE);
-			if (!list_expr) {
-				continue;
-			}
 			if (is_filter_pattern_projection) {
+				// Intermediate: produce LIST<DOUBLE> for downstream filter (no terminal wrapping)
+				auto list_expr = BuildCounterListTransform(input, pac_bindings, expr_to_clone, plan_root,
+				                                           LogicalType::DOUBLE, LogicalType::DOUBLE);
+				if (!list_expr) {
+					continue;
+				}
 				proj.expressions[i] = std::move(list_expr);
 				proj.types[i] = LogicalType::LIST(LogicalType::DOUBLE);
 			} else {
-				auto noised = BuildPacNoisedCall(input, std::move(list_expr));
-				if (target_type != LogicalType::DOUBLE) {
-					noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
+				auto result = RewriteExpressionWithCounters(input, pac_bindings, expr_to_clone, plan_root,
+				                                            PacWrapKind::PAC_NOISED, target_type);
+				if (!result) {
+					continue;
 				}
-				proj.expressions[i] = std::move(noised);
+				proj.expressions[i] = std::move(result);
 				proj.types[i] = target_type;
 			}
 			PAC_DEBUG_PRINT("  Rewrote projection expr at index " + std::to_string(i));
@@ -1755,18 +1716,12 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				}
 				PAC_DEBUG_PRINT("RewriteBottomUp FILTER: " + std::to_string(pac_bindings.size()) + " PAC binding(s)");
 
-				LogicalType original_type = info.original_return_type.id() != LogicalTypeId::INVALID
-				                                ? info.original_return_type
-				                                : pac_bindings[0].original_type;
-				LogicalType element_type = (pac_bindings.size() == 1) ? original_type : LogicalType::DOUBLE;
-
-				auto list_bool = BuildCounterListTransform(input, pac_bindings, filter_expr.get(), plan_root,
-				                                           element_type, LogicalType::BOOLEAN);
-				if (!list_bool) {
+				auto result = RewriteExpressionWithCounters(input, pac_bindings, filter_expr.get(), plan_root,
+				                                            PacWrapKind::PAC_FILTER);
+				if (!result) {
 					continue;
 				}
-				filter.expressions[info.expr_index] =
-				    input.optimizer.BindScalarFunction("pac_filter", std::move(list_bool));
+				filter.expressions[info.expr_index] = std::move(result);
 				PAC_DEBUG_PRINT("  Rewrote filter expr at index " + std::to_string(info.expr_index));
 			}
 		}
@@ -1817,12 +1772,11 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 					// Build comparison expression from the join condition
 					auto comparison =
 					    make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
-					auto list_bool = BuildCounterListTransform(input, all_bindings, comparison.get(), plan_root,
-					                                           LogicalType::DOUBLE, LogicalType::BOOLEAN);
-					if (!list_bool) {
+					auto pac_filter_expr = RewriteExpressionWithCounters(input, all_bindings, comparison.get(),
+					                                                     plan_root, PacWrapKind::PAC_FILTER);
+					if (!pac_filter_expr) {
 						continue;
 					}
-					auto pac_filter_expr = input.optimizer.BindScalarFunction("pac_filter", std::move(list_bool));
 
 					// Convert COMPARISON_JOIN to CROSS_PRODUCT + FILTER
 					auto cross_product =
@@ -1841,23 +1795,19 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 					PAC_DEBUG_PRINT("  Converted two-list JOIN to CROSS_PRODUCT + FILTER");
 					break; // Replaced operator, can't process more conditions
 				} else {
-					// One side is list: use BuildCounterListTransform on the comparison
+					// One side is list: rewrite the comparison with pac_filter
 					auto &pac_bindings = left_is_list ? left_bindings : right_bindings;
 					if (pac_bindings.empty()) {
 						continue;
 					}
-					LogicalType original_type = pac_bindings[0].original_type;
-
-					// Build comparison expression from the join condition
 					auto comparison =
 					    make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
-					auto list_bool = BuildCounterListTransform(input, pac_bindings, comparison.get(), plan_root,
-					                                           original_type, LogicalType::BOOLEAN);
-					if (!list_bool) {
+					auto result = RewriteExpressionWithCounters(input, pac_bindings, comparison.get(), plan_root,
+					                                            PacWrapKind::PAC_FILTER);
+					if (!result) {
 						continue;
 					}
-					auto pac_filter_result = input.optimizer.BindScalarFunction("pac_filter", std::move(list_bool));
-					cond.left = std::move(pac_filter_result);
+					cond.left = std::move(result);
 					cond.right = make_uniq<BoundConstantExpression>(Value::BOOLEAN(true));
 					cond.comparison = ExpressionType::COMPARE_EQUAL;
 					PAC_DEBUG_PRINT("  Rewrote single-list JOIN condition");
