@@ -165,23 +165,25 @@ SET threads = 1;
 
 ## PAC Limitations
 
-When querying PAC tables (privacy units), the following restrictions apply:
+The PAC compiler has been tested with the TPC-H queries (SQL-92 constructs). In general, when querying PAC tables (privacy units), the following restrictions apply:
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| SUM, COUNT, AVG, MIN, MAX | ✅ Supported | Transformed to pac_sum, pac_count, etc. |
-| Other aggregates | ❌ Disallowed | Custom aggregates not supported |
-| Nested aggregates | ❌ Disallowed | Aggregate inside another aggregate |
-| Window functions | ❌ Disallowed | OVER clauses not supported |
-| DISTINCT | ❌ Disallowed | Use COUNT without DISTINCT |
-| INNER JOIN | ✅ Supported | Standard joins work |
-| OUTER JOIN | ⚠️ Limited | LEFT/RIGHT joins have restrictions |
-| CROSS JOIN | ❌ Disallowed | Cartesian products not allowed |
-| Subqueries | ⚠️ Limited | Correlated subqueries have restrictions |
-| UNION/EXCEPT/INTERSECT | ❌ Disallowed | Set operations not supported |
-| ORDER BY, LIMIT | ✅ Supported | On final query only |
-| GROUP BY | ✅ Supported | Cannot group by protected columns |
-| Projecting PROTECTED columns | ❌ Disallowed | Protected columns require aggregation |
+| Feature | Status | Notes                                    |
+|---------|--------|------------------------------------------|
+| SUM, COUNT, AVG, MIN, MAX | ✅ Supported | Transformed to pac_sum, pac_count, etc.  |
+| COUNT(DISTINCT col) | ✅ Supported | Distinct counting within aggregates      |
+| Other aggregates | ❌ Disallowed | Custom aggregates not supported          |
+| Window functions | ❌ Disallowed | OVER clauses not supported               |
+| SELECT DISTINCT | ❌ Disallowed | Use aggregates instead                   |
+| INNER JOIN | ✅ Supported | Standard joins work                      |
+| LEFT/RIGHT OUTER JOIN | ✅ Supported | Outer joins are supported                |
+| CROSS JOIN | ✅ Supported | Cartesian products allowed               |
+| Subqueries | ✅ Supported | Both correlated and uncorrelated         |
+| UNION / UNION ALL | ✅ Supported | Set union operations work                |
+| EXCEPT | ❌ Disallowed | Not implemented yet                      |
+| INTERSECT | ❌ Disallowed | Not implemented yet            |
+| ORDER BY, LIMIT | ✅ Supported | On final query only                      |
+| GROUP BY | ✅ Supported | Cannot group by protected columns        |
+| Projecting PROTECTED columns | ❌ Disallowed | Protected columns require aggregation    |
 | Projecting non-protected columns | ✅ Allowed | If PROTECTED is defined on other columns |
 
 ## Examples
