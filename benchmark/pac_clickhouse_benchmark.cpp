@@ -349,40 +349,48 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         // =====================================================================
         Log("=== Phase 1: Baseline runs (no PAC) ===");
 
-        // Ensure PAC is disabled before baseline runs
-        Log("Removing any existing PAC constraints...");
-        auto unset_result = con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
-        if (unset_result && unset_result->HasError()) {
-            Log(string("Note: Could not drop PROTECTED columns (may not exist): ") + unset_result->GetError());
-        }
-        unset_result = con.Query("ALTER TABLE hits UNSET PAC;");
-        if (unset_result && unset_result->HasError()) {
-            Log(string("Note: Could not UNSET PAC (may not be set): ") + unset_result->GetError());
-        }
+        // Cold run - use a fresh connection
+        {
+            Log("--- Cold run (fresh connection) ---");
+            Connection cold_con(db);
 
-        // Cold run
-        Log("--- Cold run ---");
-        for (size_t q = 0; q < queries.size(); ++q) {
-            int qnum = static_cast<int>(q + 1);
-            Log(string("Cold run Q") + std::to_string(qnum));
-            auto r = con.Query(queries[q]);
-            if (r && r->HasError()) {
-                Log(string("Cold run Q") + std::to_string(qnum) + " error: " + r->GetError());
+            // Ensure PAC is disabled
+            auto unset_result = cold_con.Query("ALTER PAC TABLE hits DROP PROTECTED (UserID, ClientIP);");
+            if (unset_result && unset_result->HasError()) {
+                Log(string("Note: Could not drop PROTECTED columns (may not exist): ") + unset_result->GetError());
             }
-        }
+            unset_result = cold_con.Query("ALTER TABLE hits UNSET PAC;");
+            if (unset_result && unset_result->HasError()) {
+                Log(string("Note: Could not UNSET PAC (may not be set): ") + unset_result->GetError());
+            }
 
-        // Warm runs (3 times)
+            for (size_t q = 0; q < queries.size(); ++q) {
+                int qnum = static_cast<int>(q + 1);
+                Log(string("Cold run Q") + std::to_string(qnum));
+                auto r = cold_con.Query(queries[q]);
+                if (r && r->HasError()) {
+                    Log(string("Cold run Q") + std::to_string(qnum) + " error: " + r->GetError());
+                }
+            }
+        } // cold_con destroyed here, releasing memory
+
+        // Warm runs (3 times) - each run gets a fresh connection
         for (int run = 1; run <= 3; ++run) {
-            Log(string("--- Baseline warm run ") + std::to_string(run) + " ---");
+            Log(string("--- Baseline warm run ") + std::to_string(run) + " (fresh connection) ---");
 
             // Small delay between runs
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            Connection run_con(db);
+
+            // Ensure PAC is disabled for this connection
+            run_con.Query("ALTER TABLE hits UNSET PAC;");
 
             for (size_t q = 0; q < queries.size(); ++q) {
                 int qnum = static_cast<int>(q + 1);
 
                 auto t0 = std::chrono::steady_clock::now();
-                auto r = con.Query(queries[q]);
+                auto r = run_con.Query(queries[q]);
                 auto t1 = std::chrono::steady_clock::now();
                 double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -408,37 +416,37 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     << (result.success ? "true" : "false") << ",\""
                     << (result.error_msg.empty() ? "" : result.error_msg) << "\"\n";
             }
-        }
+        } // run_con destroyed here, releasing memory
 
         // =====================================================================
         // Phase 2: Add PAC protection
         // =====================================================================
         Log("=== Phase 2: Adding PAC protection ===");
 
-    	// Add PAC table
-    	Log("Marking hits table as a PAC table...");
-    	auto pac_result = con.Query("ALTER TABLE hits SET PAC;");
-    	if (pac_result && pac_result->HasError()) {
-    		Log(string("Warning: Failed to mark table as PAC: ") + pac_result->GetError());
-    	}
+        {
+            Connection setup_con(db);
 
-        // Add PROTECTED columns annotation
-        // We use ALTER PAC TABLE to add protected columns
-        Log("Adding UserID and ClientIP as protected columns...");
-
-        // Add PROTECTED columns to hits table
-        pac_result = con.Query("ALTER PAC TABLE hits ADD PROTECTED (UserID, ClientIP);");
-        if (pac_result && pac_result->HasError()) {
-            Log(string("Warning: Failed to add PROTECTED columns: ") + pac_result->GetError());
-            // Try alternative: SET PAC on the table (requires PRIMARY KEY)
-            Log("Attempting to mark table as PAC privacy unit...");
-            pac_result = con.Query("ALTER TABLE hits SET PAC;");
+            // Add PAC table
+            Log("Marking hits table as a PAC table...");
+            auto pac_result = setup_con.Query("ALTER TABLE hits SET PAC;");
             if (pac_result && pac_result->HasError()) {
-                Log(string("Warning: Failed to SET PAC: ") + pac_result->GetError());
+                Log(string("Warning: Failed to mark table as PAC: ") + pac_result->GetError());
             }
-        }
 
-        Log("PAC protection configured.");
+            // Add PROTECTED columns annotation
+            Log("Adding UserID and ClientIP as protected columns...");
+            pac_result = setup_con.Query("ALTER PAC TABLE hits ADD PROTECTED (UserID, ClientIP);");
+            if (pac_result && pac_result->HasError()) {
+                Log(string("Warning: Failed to add PROTECTED columns: ") + pac_result->GetError());
+                Log("Attempting to mark table as PAC privacy unit...");
+                pac_result = setup_con.Query("ALTER TABLE hits SET PAC;");
+                if (pac_result && pac_result->HasError()) {
+                    Log(string("Warning: Failed to SET PAC: ") + pac_result->GetError());
+                }
+            }
+
+            Log("PAC protection configured.");
+        }
 
         // =====================================================================
         // Phase 3: PAC runs
@@ -450,15 +458,17 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         int pac_crash_count = 0;
 
         for (int run = 1; run <= 3; ++run) {
-            Log(string("--- PAC run ") + std::to_string(run) + " ---");
+            Log(string("--- PAC run ") + std::to_string(run) + " (fresh connection) ---");
 
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            Connection run_con(db);
 
             for (size_t q = 0; q < queries.size(); ++q) {
                 int qnum = static_cast<int>(q + 1);
 
                 auto t0 = std::chrono::steady_clock::now();
-                auto r = con.Query(queries[q]);
+                auto r = run_con.Query(queries[q]);
                 auto t1 = std::chrono::steady_clock::now();
                 double time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -496,7 +506,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     << (result.success ? "true" : "false") << ",\""
                     << (result.error_msg.empty() ? "" : result.error_msg) << "\"\n";
             }
-        }
+        } // run_con destroyed here, releasing memory
 
         csv.close();
         Log(string("Results written to: ") + actual_out);
