@@ -18,17 +18,12 @@ For tables that are not privacy units, you can still mark specific columns as `P
 
 Additional documentation is available in the `docs/` folder:
 
-| Document | Description |
-|----------|-------------|
-| [docs/build/README.md](docs/build/README.md) | Build instructions (Make, CMake, Ninja) |
-| [docs/build/clion.md](docs/build/clion.md) | CLion IDE setup and debugging |
-| [docs/build/updating.md](docs/build/updating.md) | How to update DuckDB version |
-| [docs/pac/internals.md](docs/pac/internals.md) | PAC algorithm implementation details |
-| [docs/test/README.md](docs/test/README.md) | Running SQL and C++ tests |
-| [docs/benchmark/README.md](docs/benchmark/README.md) | Benchmark overview |
-| [docs/benchmark/tpch.md](docs/benchmark/tpch.md) | TPC-H benchmark instructions |
-| [docs/benchmark/tpch_compiler.md](docs/benchmark/tpch_compiler.md) | TPC-H compiler benchmark |
-| [docs/benchmark/microbenchmarks.md](docs/benchmark/microbenchmarks.md) | Microbenchmark suite |
+| Document                                             | Description                                            |
+|------------------------------------------------------|--------------------------------------------------------|
+| [docs/build/README.md](docs/build/README.md)         | Build/install/update instructions (Make, CMake, Ninja) |
+| [docs/pac/README.md](docs/pac/README.md)             | PAC algorithm implementation details                   |
+| [docs/test/README.md](docs/test/README.md)           | Running SQL and C++ tests                              |
+| [docs/benchmark/README.md](docs/benchmark/README.md) | Benchmark overview                                     | |
 
 ## PAC SQL Syntax
 
@@ -297,6 +292,36 @@ CREATE TABLE sales (
 SELECT SUM(amount) FROM customers 
 JOIN sales ON customers.id = sales.customer_id;
 ```
+
+## PAC Utility Diff
+
+PAC provides a **utility diff** mode for measuring the accuracy of privacy-preserving query results compared to exact (non-private) results. This is useful for evaluating the trade-off between privacy and accuracy.
+
+### Quick Start
+
+```sql
+-- Enable utility diff with key-based matching (1 key column)
+SET pac_diffcols = '1';
+
+-- Run a grouped query - output shows relative error % instead of values
+SELECT department, SUM(salary) FROM employees GROUP BY department;
+
+-- Output to CSV file
+SET pac_diffcols = '1:/tmp/utility_results.csv';
+
+-- Disable utility diff
+SET pac_diffcols = NULL;
+```
+
+### How It Works
+
+When `pac_diffcols` is set, PAC:
+1. Executes both the PAC-compiled (private) query and the original (exact) query
+2. Joins the results using a FULL OUTER JOIN on key columns
+3. Computes relative error for numeric measure columns: `100 * |ref - pac| / max(0.00001, |ref|)`
+4. Reports **utility** (average relative error %) and **recall** (row matching rate)
+
+For detailed documentation, see [docs/pac/utility.md](docs/pac/utility.md).
 
 ## License
 
