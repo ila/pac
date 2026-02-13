@@ -103,7 +103,6 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 			gstate.missing_rows++;
 			continue;
 		}
-
 		// Check if any measure column is NULL → "+" row (pac-only, skip)
 		bool any_measure_null = false;
 		for (idx_t c = num_key_cols; c < num_cols; c++) {
@@ -115,7 +114,6 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 		if (any_measure_null) {
 			continue; // "+" row — no ref to compare against
 		}
-
 		// "=" matched row — accumulate utility (cell values are relative error %)
 		gstate.matched_rows++;
 
@@ -132,7 +130,6 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 			gstate.utility_count[idx]++;
 		}
 	}
-
 	// Pass through unchanged
 	chunk.Reference(input);
 	return OperatorResultType::NEED_MORE_INPUT;
@@ -162,7 +159,6 @@ OperatorFinalResultType PhysicalPacUtilitySummary::OperatorFinalize(Pipeline &pi
 	if (cols_with_data > 0) {
 		utility /= static_cast<double>(cols_with_data);
 	}
-
 	// Output results
 	if (!output_path.empty()) {
 		// Append to CSV file
@@ -171,12 +167,10 @@ OperatorFinalResultType PhysicalPacUtilitySummary::OperatorFinalize(Pipeline &pi
 			out << utility << "," << recall << "\n";
 			out.close();
 		}
-	} else {
-		// Print to stderr
-		string msg = "utility=" + std::to_string(utility) + " recall=" + std::to_string(recall);
-		Printer::Print(msg);
 	}
-
+	// Print to stderr
+	string msg = "utility=" + std::to_string(utility) + " recall=" + std::to_string(recall);
+		Printer::Print(msg);
 	return OperatorFinalResultType::FINISHED;
 }
 

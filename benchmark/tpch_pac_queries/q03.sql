@@ -1,5 +1,5 @@
 SELECT l_orderkey, 
-       pac_sum(hash(customer.c_custkey), l_extendedprice * (1 - l_discount)) AS revenue, 
+       sum(l_extendedprice * (1 - l_discount)) AS revenue, 
        o_orderdate, o_shippriority
 FROM customer JOIN orders ON c_custkey = o_custkey 
               JOIN lineitem ON l_orderkey = o_orderkey

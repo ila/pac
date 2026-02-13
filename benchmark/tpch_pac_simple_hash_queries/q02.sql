@@ -23,7 +23,7 @@ WHERE
     AND r_name = 'EUROPE'
     AND ps_supplycost = (
         SELECT
-            pac_min(hash(l_orderkey), ps_supplycost)
+            min(ps_supplycost)
         FROM
             partsupp,
             supplier,

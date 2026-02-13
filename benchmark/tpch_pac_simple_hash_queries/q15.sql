@@ -21,9 +21,6 @@ FROM
     revenue
 WHERE
     s_suppkey = supplier_no
-    AND total_revenue = (
-        SELECT
-            pac_max(hash(supplier_no), total_revenue)
-        FROM revenue)
+    AND total_revenue = (SELECT max(total_revenue) FROM revenue)
 ORDER BY
     s_suppkey;

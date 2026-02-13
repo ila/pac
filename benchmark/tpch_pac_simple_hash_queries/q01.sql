@@ -8,7 +8,7 @@ SELECT
     pac_avg(hash(l_orderkey), l_quantity) AS avg_qty,
     pac_avg(hash(l_orderkey), l_extendedprice) AS avg_price,
     pac_avg(hash(l_orderkey), l_discount) AS avg_disc,
-    pac_count(hash(l_orderkey), 1) AS count_order
+    pac_count(hash(l_orderkey)) AS count_order
 FROM
     lineitem
 WHERE

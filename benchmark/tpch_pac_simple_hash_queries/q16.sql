@@ -2,7 +2,7 @@ SELECT
     p_brand,
     p_type,
     p_size,
-    pac_count(hash(l_orderkey), ps_suppkey) AS supplier_cnt
+    count(ps_suppkey) AS supplier_cnt
 FROM
     partsupp,
     part
