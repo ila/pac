@@ -18,17 +18,12 @@ For tables that are not privacy units, you can still mark specific columns as `P
 
 Additional documentation is available in the `docs/` folder:
 
-| Document | Description |
-|----------|-------------|
-| [docs/build/README.md](docs/build/README.md) | Build instructions (Make, CMake, Ninja) |
-| [docs/build/clion.md](docs/build/clion.md) | CLion IDE setup and debugging |
-| [docs/build/updating.md](docs/build/updating.md) | How to update DuckDB version |
-| [docs/pac/internals.md](docs/pac/internals.md) | PAC algorithm implementation details |
-| [docs/test/README.md](docs/test/README.md) | Running SQL and C++ tests |
-| [docs/benchmark/README.md](docs/benchmark/README.md) | Benchmark overview |
-| [docs/benchmark/tpch.md](docs/benchmark/tpch.md) | TPC-H benchmark instructions |
-| [docs/benchmark/tpch_compiler.md](docs/benchmark/tpch_compiler.md) | TPC-H compiler benchmark |
-| [docs/benchmark/microbenchmarks.md](docs/benchmark/microbenchmarks.md) | Microbenchmark suite |
+| Document                                             | Description                                            |
+|------------------------------------------------------|--------------------------------------------------------|
+| [docs/build/README.md](docs/build/README.md)         | Build/install/update instructions (Make, CMake, Ninja) |
+| [docs/pac/README.md](docs/pac/README.md)             | PAC algorithm implementation details                   |
+| [docs/test/README.md](docs/test/README.md)           | Running SQL and C++ tests                              |
+| [docs/benchmark/README.md](docs/benchmark/README.md) | Benchmark overview                                     | |
 
 ## PAC SQL Syntax
 
