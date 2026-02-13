@@ -9,7 +9,8 @@ This folder contains detailed documentation for the PAC DuckDB extension.
 | [build/README.md](build/README.md)                           | Build instructions (Make, CMake, Ninja) |
 | [build/clion.md](build/clion.md)                             | CLion IDE setup and debugging |
 | [build/updating.md](build/updating.md)                       | How to update DuckDB version |
-| [pac/README.md](pac/README)                                  | PAC algorithm implementation details |
+| [pac/README.md](pac/README.md)                               | PAC algorithm implementation details |
+| [pac/utility.md](pac/utility.md)                             | PAC utility diff for accuracy measurement |
 | [test/README.md](test/README.md)                             | Running SQL and C++ tests |
 | [benchmark/README.md](benchmark/README.md)                   | Benchmark overview |
 | [benchmark/tpch.md](benchmark/tpch.md)                       | TPC-H benchmark instructions |
