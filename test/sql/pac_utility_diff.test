@@ -1,0 +1,111 @@
+# name: test/sql/pac_utility_diff.test
+# description: Test pac_diffcols setting with utility summary
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+statement ok
+SET pac_deterministic_noise = true
+
+# Create PU table and a child table with FK
+statement ok
+CREATE TABLE diff_pu(
+    id INTEGER PRIMARY KEY
+);
+
+statement ok
+CREATE TABLE diff_data(
+    id INTEGER PRIMARY KEY,
+    pu_id INTEGER REFERENCES diff_pu(id),
+    grp INTEGER,
+    val INTEGER
+);
+
+statement ok
+INSERT INTO diff_pu SELECT i FROM range(50) t(i);
+
+statement ok
+INSERT INTO diff_data
+SELECT i AS id, (i % 50) AS pu_id, (i % 3) + 1 AS grp,
+       CASE WHEN (i % 3) = 0 THEN 10 WHEN (i % 3) = 1 THEN 20 ELSE 30 END AS val
+FROM range(300) t(i);
+
+# Declare diff_pu as privacy unit
+statement ok
+ALTER TABLE diff_pu SET PAC;
+
+# ========== Test 1: pac_diffcols with key-based matching (perfect utility) ==========
+# pac_noise=true but pac_mi=0 means zero noise → utility should be 100%
+statement ok
+SET pac_noise = true
+
+statement ok
+SET pac_diffcols = '1'
+
+# grp = key column (shows ref value), total_val = numeric (shows relative error %; 0 = perfect)
+query II
+SELECT grp, SUM(val) AS total_val FROM diff_data GROUP BY grp ORDER BY grp
+----
+1	0
+2	0
+3	0
+
+statement ok
+SET pac_diffcols = NULL
+
+# ========== Test 2: Ungrouped query with positional diff ==========
+statement ok
+SET pac_noise = true
+
+statement ok
+SET pac_diffcols = '0'
+
+query I
+SELECT SUM(val) AS total_val FROM diff_data
+----
+0
+
+statement ok
+SET pac_diffcols = NULL
+
+# ========== Test 3: CSV output path ==========
+statement ok
+SET pac_noise = true
+
+statement ok
+SET pac_diffcols = '1:/tmp/test_pac_utility.csv'
+
+query II
+SELECT grp, SUM(val) AS total_val FROM diff_data GROUP BY grp ORDER BY grp
+----
+1	0
+2	0
+3	0
+
+statement ok
+SET pac_diffcols = NULL
+
+# ========== Cleanup ==========
+statement ok
+SET pac_diffcols = NULL
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+DROP TABLE diff_data;
+
+statement ok
+DROP TABLE diff_pu;

@@ -1,0 +1,416 @@
+# name: test/sql/pac_bitslice_compiler_correlated_subqueries.test
+# description: Test PAC bitslice compiler with correlated subqueries (semi-joins)
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_deterministic_noise = true;
+
+statement ok
+SET threads = 1;
+
+statement ok
+set pac_seed = 42;
+
+statement ok
+set pac_mi = 0;
+
+# Set up TPC-H schema with customer as privacy unit
+statement ok
+CREATE TABLE customer (
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_address VARCHAR,
+    c_nationkey INTEGER,
+    c_phone VARCHAR,
+    c_acctbal DECIMAL(15,2),
+    c_mktsegment VARCHAR,
+    c_comment VARCHAR
+);
+
+statement ok
+CREATE TABLE orders (
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderstatus VARCHAR,
+    o_totalprice DECIMAL(15,2),
+    o_orderdate DATE,
+    o_orderpriority VARCHAR,
+    o_clerk VARCHAR,
+    o_shippriority INTEGER,
+    o_comment VARCHAR,
+    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+);
+
+statement ok
+CREATE TABLE lineitem (
+    l_orderkey INTEGER,
+    l_partkey INTEGER,
+    l_suppkey INTEGER,
+    l_linenumber INTEGER,
+    l_quantity DECIMAL(15,2),
+    l_extendedprice DECIMAL(15,2),
+    l_discount DECIMAL(15,2),
+    l_tax DECIMAL(15,2),
+    l_returnflag VARCHAR,
+    l_linestatus VARCHAR,
+    l_shipdate DATE,
+    l_commitdate DATE,
+    l_receiptdate DATE,
+    l_shipinstruct VARCHAR,
+    l_shipmode VARCHAR,
+    l_comment VARCHAR,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey)
+);
+
+# Insert test data
+statement ok
+INSERT INTO customer VALUES
+    (1, 'Customer#1', 'Address1', 1, '111-111-1111', 1000.00, 'BUILDING', 'comment1'),
+    (2, 'Customer#2', 'Address2', 1, '222-222-2222', 2000.00, 'AUTOMOBILE', 'comment2'),
+    (3, 'Customer#3', 'Address3', 1, '333-333-3333', 3000.00, 'MACHINERY', 'comment3');
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, 'O', 100.00, '1993-07-15', '1-URGENT', 'Clerk#1', 0, 'comment1'),
+    (2, 1, 'O', 200.00, '1993-08-01', '2-HIGH', 'Clerk#2', 0, 'comment2'),
+    (3, 2, 'O', 300.00, '1993-07-20', '1-URGENT', 'Clerk#3', 0, 'comment3'),
+    (4, 2, 'F', 400.00, '1993-08-15', '3-MEDIUM', 'Clerk#4', 0, 'comment4'),
+    (5, 3, 'O', 500.00, '1993-09-01', '2-HIGH', 'Clerk#5', 0, 'comment5'),
+    (6, 3, 'O', 600.00, '1992-12-15', '1-URGENT', 'Clerk#6', 0, 'comment6');
+
+statement ok
+INSERT INTO lineitem VALUES
+    (1, 1, 1, 1, 10, 100.00, 0.05, 0.01, 'N', 'O', '1993-08-01', '1993-07-20', '1993-08-05', 'DELIVER IN PERSON', 'TRUCK', 'comment1'),
+    (2, 2, 2, 1, 20, 200.00, 0.05, 0.01, 'N', 'O', '1993-08-10', '1993-08-05', '1993-08-15', 'TAKE BACK RETURN', 'MAIL', 'comment2'),
+    (3, 3, 3, 1, 15, 150.00, 0.05, 0.01, 'N', 'O', '1993-07-25', '1993-07-22', '1993-07-28', 'DELIVER IN PERSON', 'RAIL', 'comment3'),
+    (3, 4, 4, 2, 25, 250.00, 0.05, 0.01, 'N', 'O', '1993-07-30', '1993-07-25', '1993-08-02', 'NONE', 'SHIP', 'comment4'),
+    (4, 5, 5, 1, 30, 300.00, 0.05, 0.01, 'R', 'F', '1993-08-20', '1993-08-18', '1993-08-25', 'COLLECT COD', 'FOB', 'comment5'),
+    (5, 6, 6, 1, 35, 350.00, 0.05, 0.01, 'N', 'O', '1993-09-05', '1993-09-10', '1993-09-15', 'DELIVER IN PERSON', 'TRUCK', 'comment6');
+
+# Configure PAC
+statement ok
+ALTER TABLE customer SET PAC;
+
+statement ok
+SET pac_join_elimination = true;
+
+statement ok
+set pac_seed = 42;
+
+statement ok
+SET pac_deterministic_noise = true;
+
+# Test correlated subquery with EXISTS (semi-join) - similar to TPC-H Q04
+# This query finds order priorities for orders in a date range that have at least one lineitem
+# where the commit date is before the receipt date (late commitment)
+query II
+SELECT
+    o_orderpriority,
+    count(*) AS order_count
+FROM
+    orders
+WHERE
+    o_orderdate >= CAST('1993-07-01' AS date)
+    AND o_orderdate < CAST('1993-10-01' AS date)
+    AND EXISTS (
+        SELECT
+            *
+        FROM
+            lineitem
+        WHERE
+            l_orderkey = o_orderkey
+            AND l_commitdate < l_receiptdate)
+GROUP BY
+    o_orderpriority
+ORDER BY
+    o_orderpriority;
+----
+1-URGENT	4
+2-HIGH	4
+3-MEDIUM	2
+
+# Test TPC-H Q17-style correlated subquery with aggregates in both outer and inner queries
+# This tests the case where lineitem (FK-linked table) appears in both outer aggregate and inner aggregate
+# Both aggregates should be transformed to PAC functions
+
+# Create part table for Q17-style query
+statement ok
+CREATE TABLE part (
+    p_partkey INTEGER PRIMARY KEY,
+    p_name VARCHAR,
+    p_mfgr VARCHAR,
+    p_brand VARCHAR,
+    p_type VARCHAR,
+    p_size INTEGER,
+    p_container VARCHAR,
+    p_retailprice DECIMAL(15,2),
+    p_comment VARCHAR
+);
+
+statement ok
+INSERT INTO part VALUES
+    (1, 'Part#1', 'Manufacturer#1', 'Brand#23', 'PROMO BURNISHED COPPER', 7, 'MED BOX', 10.00, 'comment1'),
+    (2, 'Part#2', 'Manufacturer#2', 'Brand#13', 'SMALL PLATED BRASS', 1, 'SM CASE', 20.00, 'comment2'),
+    (3, 'Part#3', 'Manufacturer#3', 'Brand#23', 'MEDIUM POLISHED TIN', 15, 'MED BOX', 15.00, 'comment3'),
+    (4, 'Part#4', 'Manufacturer#4', 'Brand#34', 'STANDARD BURNISHED STEEL', 14, 'LG CASE', 25.00, 'comment4'),
+    (5, 'Part#5', 'Manufacturer#5', 'Brand#23', 'ECONOMY ANODIZED STEEL', 40, 'MED BOX', 30.00, 'comment5'),
+    (6, 'Part#6', 'Manufacturer#1', 'Brand#23', 'PROMO BURNISHED TIN', 3, 'MED BOX', 12.00, 'comment6');
+
+# TPC-H Q17-style query: Calculate average yearly revenue for a specific brand/container
+# where quantity is less than 20% of the average quantity for that part
+# This has:
+# - Outer aggregate: SUM(l_extendedprice) on lineitem
+# - Inner aggregate: AVG(l_quantity) on lineitem with correlation on l_partkey
+# Both aggregates operate on FK-linked table, so BOTH get PAC transformation
+query I
+SELECT
+    CAST(sum(l_extendedprice) / 7.0 AS INTEGER) AS avg_yearly
+FROM
+    lineitem,
+    part
+WHERE
+    p_partkey = l_partkey
+    AND p_brand = 'Brand#23'
+    AND p_container = 'MED BOX'
+    AND l_quantity < (
+        SELECT
+            0.2 * avg(l_quantity)
+        FROM
+            lineitem
+        WHERE
+            l_partkey = p_partkey
+    );
+----
+NULL
+
+# Test correlated subqueries on FK-linked tables with PU table scanned
+# This tests the fix where aggregates in correlated subqueries that scan FK-linked tables
+# (like orders) should ALSO be transformed to PAC aggregates, not just the outer aggregate
+# Query: For each customer segment, compute statistics using correlated subqueries on orders
+query III
+SELECT
+    COUNT(*) as customer_count,
+    AVG((SELECT COUNT(*)
+         FROM orders
+         WHERE o_custkey = c_custkey
+           AND o_totalprice > 10000)) AS avg_high_value_orders,
+    AVG((SELECT SUM(o_totalprice)
+         FROM orders
+         WHERE o_custkey = c_custkey
+           AND YEAR(o_orderdate) = 1995)) AS avg_1995_total
+FROM
+    customer
+WHERE
+    c_mktsegment = 'BUILDING';
+----
+2	0.0	NULL
+
+# Test outer aggregate + inner aggregate with IN clause - both need joins to PU
+# This tests that when BOTH outer and inner queries scan FK-linked tables (not PU directly),
+# the compiler correctly adds joins to the PU for BOTH contexts and transforms all aggregates
+# Outer query: aggregate on lineitem (needs join to orders -> customer)
+# Inner query: aggregate on lineitem with IN clause (also needs join to orders -> customer)
+# Note: we have to join with orders twice here (once for outer, once for inner)
+query I
+SELECT
+    SUM(l_extendedprice) AS total_revenue
+FROM
+    lineitem
+WHERE
+    l_orderkey IN (
+        SELECT
+            l_orderkey
+        FROM
+            lineitem
+        GROUP BY
+            l_orderkey
+        HAVING
+            SUM(l_quantity) > 25
+    )
+    AND l_discount > 0.04;
+----
+2499.52
+
+# Test correlated subquery where outer and inner both need separate joins to PU
+# This is a CORRELATED subquery (references outer table via l_partkey), unlike the IN clause which is uncorrelated
+# Even though it's correlated, we STILL need two separate joins because:
+# 1. The correlation is on l_partkey (product), not on the customer FK path
+# 2. Each aggregate operates in its own execution context (DELIM_JOIN semantics)
+# 3. Each aggregate needs its own hash expression from its local orders join
+#
+# Outer query: aggregate on lineitem (needs join to orders -> customer)
+# Inner query: correlated subquery on lineitem (also needs join to orders -> customer)
+#
+# The inner subquery evaluates independently for each outer row's l_partkey,
+# aggregating across ALL customers who have that part, so it needs its own
+# connection to the customer PU via orders.
+#
+# This test returns NULL (no rows match l_quantity < 0.2 * avg)
+# The inner AVG for each partkey gives 10, 20, 15, 25, 30, 35
+# 0.2 * avg = 2, 4, 3, 5, 6, 7
+# No l_quantity values (10, 20, 15, 25, 30, 35) are less than these thresholds
+query I
+SELECT
+    SUM(l_extendedprice) AS total_revenue
+FROM
+    lineitem
+WHERE
+    l_quantity < (
+        SELECT
+            0.2 * AVG(l_quantity)
+        FROM
+            lineitem AS inner_lineitem
+        WHERE
+            inner_lineitem.l_partkey = lineitem.l_partkey
+    );
+----
+NULL
+
+# Test correlated subquery where outer query scans FK table (orders) directly
+# and inner subquery aggregates on a deeper FK table (lineitem)
+# This tests the AddColumnToDelimJoin fix where:
+# - Outer query scans orders (has FK to customer via o_custkey)
+# - Inner subquery scans lineitem (has FK to orders via l_orderkey)
+# - The o_custkey column needs to be added to DELIM_JOIN correlation
+# - Inner aggregate hashes by o_custkey (accessed via DELIM_GET)
+# This pattern appears in queries like:
+#   "For each order of customer X, what's the total line item price?"
+# Note: Result values vary due to PAC noise, just verify query executes
+query I
+SELECT COUNT(*) FROM (
+    SELECT
+        o_orderkey,
+        o_totalprice,
+        (SELECT SUM(l_extendedprice)
+         FROM lineitem
+         WHERE l_orderkey = o_orderkey) AS order_total
+    FROM orders
+    WHERE o_custkey = 1
+);
+----
+4
+
+# Test TPC-H Q21-style query: Suppliers Who Kept Orders Waiting
+# This tests complex correlated subqueries with:
+# - EXISTS (semi-join) to find orders with multiple suppliers
+# - NOT EXISTS (anti-join) to exclude orders where other suppliers also failed to deliver on time
+# - Self-joins on lineitem with different aliases (l1, l2, l3)
+# - Multiple FK-linked tables: supplier, lineitem, orders, nation
+
+# Create supplier table
+statement ok
+CREATE TABLE supplier (
+    s_suppkey INTEGER PRIMARY KEY,
+    s_name VARCHAR,
+    s_address VARCHAR,
+    s_nationkey INTEGER,
+    s_phone VARCHAR,
+    s_acctbal DECIMAL(15,2),
+    s_comment VARCHAR
+);
+
+# Create nation table
+statement ok
+CREATE TABLE nation (
+    n_nationkey INTEGER PRIMARY KEY,
+    n_name VARCHAR,
+    n_regionkey INTEGER,
+    n_comment VARCHAR
+);
+
+# Insert nation data
+statement ok
+INSERT INTO nation VALUES
+    (1, 'SAUDI ARABIA', 4, 'comment1'),
+    (2, 'UNITED STATES', 1, 'comment2'),
+    (3, 'GERMANY', 3, 'comment3');
+
+# Insert supplier data - suppliers from different nations
+statement ok
+INSERT INTO supplier VALUES
+    (1, 'Supplier#001', 'Address1', 1, '111-111-1111', 1000.00, 'comment1'),
+    (2, 'Supplier#002', 'Address2', 1, '222-222-2222', 2000.00, 'comment2'),
+    (3, 'Supplier#003', 'Address3', 2, '333-333-3333', 3000.00, 'comment3'),
+    (4, 'Supplier#004', 'Address4', 1, '444-444-4444', 4000.00, 'comment4'),
+    (5, 'Supplier#005', 'Address5', 3, '555-555-5555', 5000.00, 'comment5'),
+    (6, 'Supplier#006', 'Address6', 1, '666-666-6666', 6000.00, 'comment6');
+
+# Update orders to have 'F' status for Q21 (which filters on o_orderstatus = 'F')
+statement ok
+UPDATE orders SET o_orderstatus = 'F' WHERE o_orderkey IN (1, 2, 3);
+
+# Update lineitem to have varying suppliers and receipt/commit dates for Q21 pattern
+# We need lineitems where:
+# - l_receiptdate > l_commitdate (late delivery)
+# - Multiple suppliers per order (for EXISTS condition)
+# - Some late deliveries by other suppliers, some not (for NOT EXISTS condition)
+statement ok
+DELETE FROM lineitem;
+
+statement ok
+INSERT INTO lineitem VALUES
+    -- Order 1: Supplier 1 late, Supplier 2 on time -> Supplier 1 should count (EXISTS satisfied, NOT EXISTS satisfied)
+    (1, 1, 1, 1, 10, 100.00, 0.05, 0.01, 'R', 'F', '1993-08-01', '1993-07-20', '1993-08-05', 'DELIVER IN PERSON', 'TRUCK', 'comment1'),
+    (1, 2, 2, 2, 15, 150.00, 0.05, 0.01, 'R', 'F', '1993-07-25', '1993-07-30', '1993-07-28', 'NONE', 'MAIL', 'comment2'),
+    -- Order 2: Supplier 1 late, Supplier 4 also late -> Supplier 1 should NOT count (NOT EXISTS fails)
+    (2, 3, 1, 1, 20, 200.00, 0.05, 0.01, 'R', 'F', '1993-08-10', '1993-08-01', '1993-08-15', 'TAKE BACK RETURN', 'RAIL', 'comment3'),
+    (2, 4, 4, 2, 25, 250.00, 0.05, 0.01, 'R', 'F', '1993-08-12', '1993-08-05', '1993-08-18', 'COLLECT COD', 'SHIP', 'comment4'),
+    -- Order 3: Supplier 2 late, Supplier 6 on time -> Supplier 2 should count
+    (3, 5, 2, 1, 30, 300.00, 0.05, 0.01, 'R', 'F', '1993-08-20', '1993-08-10', '1993-08-25', 'DELIVER IN PERSON', 'FOB', 'comment5'),
+    (3, 6, 6, 2, 35, 350.00, 0.05, 0.01, 'R', 'F', '1993-08-15', '1993-08-20', '1993-08-18', 'NONE', 'TRUCK', 'comment6'),
+    -- Order 4: Only Supplier 5 (not from SAUDI ARABIA), and on time -> should not count
+    (4, 1, 5, 1, 40, 400.00, 0.05, 0.01, 'R', 'F', '1993-09-01', '1993-09-05', '1993-09-03', 'TAKE BACK RETURN', 'RAIL', 'comment7');
+
+# TPC-H Q21-style query: Find suppliers from SAUDI ARABIA who kept orders waiting
+# An order is "kept waiting" when:
+# 1. The order status is 'F' (fulfilled)
+# 2. The supplier's lineitem was received after commit date (late)
+# 3. EXISTS another supplier on the same order (multi-supplier order)
+# 4. NOT EXISTS another supplier who was ALSO late on the same order
+query II
+SELECT
+    s_name,
+    count(*) AS numwait
+FROM
+    supplier,
+    lineitem l1,
+    orders,
+    nation
+WHERE
+    s_suppkey = l1.l_suppkey
+    AND o_orderkey = l1.l_orderkey
+    AND o_orderstatus = 'F'
+    AND l1.l_receiptdate > l1.l_commitdate
+    AND EXISTS (
+        SELECT
+            *
+        FROM
+            lineitem l2
+        WHERE
+            l2.l_orderkey = l1.l_orderkey
+            AND l2.l_suppkey <> l1.l_suppkey)
+    AND NOT EXISTS (
+        SELECT
+            *
+        FROM
+            lineitem l3
+        WHERE
+            l3.l_orderkey = l1.l_orderkey
+            AND l3.l_suppkey <> l1.l_suppkey
+            AND l3.l_receiptdate > l3.l_commitdate)
+    AND s_nationkey = n_nationkey
+    AND n_name = 'SAUDI ARABIA'
+GROUP BY
+    s_name
+ORDER BY
+    numwait DESC,
+    s_name;
+----
+Supplier#001	2
+Supplier#002	2

@@ -1,0 +1,102 @@
+# name: test/sql/pac_aggregate.test
+# description: tests for pac_aggregate scalar function
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 12345;
+
+statement ok
+SET pac_deterministic_noise = true;
+
+statement ok
+SET pac_noise = false;
+
+statement ok
+SET enforce_m_values = false;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET pac_mi = 0;
+
+# deterministic: identical per-sample values -> variance 0 -> delta 0 -> no noise -> returns element value
+query I
+SELECT pac_aggregate(ARRAY[42.0, 42.0, 42.0, 42.0], ARRAY[3,3,3,3], 1.0/128, 3);
+----
+42
+
+# strict null refusal: any NULL in values -> return NULL
+query I
+SELECT pac_aggregate(ARRAY[1.0, NULL, 3.0], ARRAY[3,3,3], 1.0/128, 3);
+----
+NULL
+
+# cardinality refusal: max(counts) < k -> NULL
+query I
+SELECT pac_aggregate(ARRAY[1.0,2.0,3.0], ARRAY[1,1,1], 1.0/128, 3);
+----
+NULL
+
+# Per-sample CTE style tests inspired by the docs single-query pattern (we assume per_sample contains aggregated per-sample data)
+statement ok
+DROP TABLE IF EXISTS per_sample;
+
+# Replace manual 4-row inserts with a proper per-sample materialization with m=128
+statement ok
+CREATE TABLE per_sample AS
+SELECT src.group_key,
+       s.sample_id,
+       CASE
+         WHEN src.group_key = 'A' THEN 10.0
+         WHEN src.group_key = 'B' THEN 20.0
+         WHEN src.group_key = 'C' AND s.sample_id = 2 THEN NULL
+         WHEN src.group_key = 'C' THEN 5.0
+         WHEN src.group_key = 'D' THEN 7.0
+       END AS val,
+       CASE WHEN src.group_key = 'D' THEN 1 ELSE 3 END AS cnt
+FROM (VALUES ('A'), ('B'), ('C'), ('D')) AS src(group_key)
+CROSS JOIN generate_series(1,128) AS s(sample_id);
+
+query II
+SELECT group_key, pac_aggregate(array_agg(val ORDER BY sample_id), array_agg(cnt ORDER BY sample_id), 1.0/128, 3) AS pac_val
+FROM per_sample
+GROUP BY group_key
+ORDER BY group_key;
+----
+A	10
+B	20
+C	NULL
+D	NULL
+
+# Positive test: materialize a correct per-sample table using generate_series(1,128)
+statement ok
+DROP TABLE IF EXISTS per_sample_m128;
+
+statement ok
+CREATE TABLE per_sample_m128 AS
+SELECT src.group_key,
+       s.sample_id,
+       CASE WHEN src.group_key = 'A' THEN 10.0 + (s.sample_id % 7) * 0.1
+            ELSE 20.0 + (s.sample_id % 11) * 0.2 END AS val,
+       3 AS cnt
+FROM (VALUES ('A'), ('B')) AS src(group_key)
+CROSS JOIN generate_series(1,128) AS s(sample_id);
+
+query II
+SELECT group_key, pac_aggregate(array_agg(val ORDER BY sample_id), array_agg(cnt ORDER BY sample_id), 1.0/128, 3) AS pac_val
+FROM per_sample_m128
+GROUP BY group_key
+ORDER BY group_key;
+----
+A	9.16774448813788
+B	24.797028957514097
+
+# Cleanup PAC metadata at end of test
+statement ok
+PRAGMA clear_pac_metadata;

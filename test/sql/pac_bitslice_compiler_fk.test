@@ -1,0 +1,302 @@
+# name: test/sql/pac_bitslice_compiler_fk.test
+# description: Test GROUP BY aggregation on a non-privacy-unit table that references a PU table via PK-FK
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# Create PU table (primary key) and a non-PU table referencing it via FK
+statement ok
+CREATE TABLE bitslice_fk_pu(
+    id INTEGER PRIMARY KEY,
+    meta INTEGER
+);
+
+statement ok
+CREATE TABLE bitslice_fk_child(
+    id INTEGER PRIMARY KEY,
+    pu_id INTEGER REFERENCES bitslice_fk_pu(id),
+    grp INTEGER,
+    val INTEGER
+);
+
+# Insert 25 rows into PU (ids 0..4 repeated relations)
+statement ok
+INSERT INTO bitslice_fk_pu
+SELECT i AS id, (i % 7) AS meta
+FROM range(5) t(i);
+
+statement ok
+INSERT INTO bitslice_fk_child
+SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
+statement ok
+ALTER TABLE bitslice_fk_pu SET PAC;
+
+# Basic FK query with MIN/MAX on non-join key
+# Note: Grouping by PRIMARY KEY means single-row groups, PAC returns NULL for privacy
+query III
+SELECT id, MIN(val), MAX(val)
+FROM bitslice_fk_child
+GROUP BY id
+ORDER BY id
+LIMIT 1
+----
+0	0	0
+
+# Create a deep chain (child -> deep1 -> deep2 -> deepleaf)
+statement ok
+CREATE TABLE bitslice_deep1(
+    id INTEGER PRIMARY KEY,
+    child_id INTEGER REFERENCES bitslice_fk_child(id)
+);
+
+statement ok
+CREATE TABLE bitslice_deep2(
+    id INTEGER PRIMARY KEY,
+    d1_id INTEGER REFERENCES bitslice_deep1(id)
+);
+
+statement ok
+CREATE TABLE bitslice_deepleaf(
+    id INTEGER PRIMARY KEY,
+    d2_id INTEGER REFERENCES bitslice_deep2(id),
+    grp INTEGER,
+    val INTEGER
+);
+
+statement ok
+INSERT INTO bitslice_deep1
+SELECT i AS id, (i % 5) AS child_id
+FROM range(5) t(i);
+
+statement ok
+INSERT INTO bitslice_deep2
+SELECT i AS id, (i % 5) AS d1_id
+FROM range(5) t(i);
+
+statement ok
+INSERT INTO bitslice_deepleaf
+SELECT i AS id, (i % 5) AS d2_id, (i % 5) AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
+# Deep FK chain with MIN on non-join key
+# Note: id=0 leads to hash(0)=0, popcount=0 -> NULL (known issue when mi=0)
+query II
+SELECT id, MIN(val)
+FROM bitslice_deepleaf
+GROUP BY id
+ORDER BY id
+LIMIT 1
+----
+0	0
+
+# Test with multiple INNER JOINs in the FK chain with MAX - project non-join key
+# Note: id=0 leads to hash(0)=0, popcount=0 -> NULL (known issue when mi=0)
+query II
+SELECT d1.id, MAX(d1.val)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 1
+----
+0	0
+
+# Test with full FK chain explicit joins - project non-join key
+query II
+SELECT d1.id, COUNT(*)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+INNER JOIN bitslice_fk_child c ON d3.child_id = c.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 1
+----
+0	2
+
+# Test reverse join order with AVG - project non-join key from leaf table
+query II
+SELECT d1.id, AVG(d1.val)::DECIMAL(5, 2)
+FROM bitslice_deep2 d2
+INNER JOIN bitslice_deepleaf d1 ON d1.d2_id = d2.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 3
+----
+0	0.00
+1	2.00
+2	4.00
+
+# Test with multiple aggregates on joined tables (SUM and MAX) - project non-join key
+query III
+SELECT d1.id, SUM(d1.val), MAX(d2.id)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 1
+----
+0	0	0
+
+# Create side table for testing multiple FK paths to same PU
+statement ok
+CREATE TABLE bitslice_fk_side(
+    id INTEGER PRIMARY KEY,
+    pu_id INTEGER REFERENCES bitslice_fk_pu(id),
+    grp2 INTEGER,
+    val2 INTEGER
+);
+
+statement ok
+INSERT INTO bitslice_fk_side
+SELECT i AS id, (i % 5) AS pu_id, (i % 5) AS grp2, (i % 10) AS val2
+FROM range(25) t(i);
+
+# Test with self-referential join pattern - project non-join key (c.id)
+query III
+SELECT c.id, COUNT(*), MIN(s.val2)
+FROM bitslice_fk_child c
+INNER JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+INNER JOIN bitslice_fk_pu p ON c.pu_id = p.id
+GROUP BY c.id
+ORDER BY c.id
+LIMIT 1
+----
+0	10	0
+
+# Test with HAVING clause on joined aggregates - project non-join key
+query II
+SELECT d1.id, SUM(d1.val)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.id
+HAVING SUM(d1.val) >= 0
+ORDER BY d1.id
+LIMIT 1
+----
+0	0
+
+# ========== LEFT JOIN TEST CASES ==========
+
+# Test LEFT JOIN with NULL handling - project non-join key
+statement ok
+INSERT INTO bitslice_deepleaf VALUES (100, NULL, 0, 99);
+
+query II
+SELECT d1.id, MAX(val)
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 1
+----
+0	0
+
+statement ok
+DELETE FROM bitslice_deepleaf WHERE id = 100;
+
+# Test LEFT JOIN with aggregate on right table - project non-join key
+query III
+SELECT d1.id, MIN(d1.val), COUNT(d2.id)
+FROM bitslice_deepleaf d1 LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 1
+----
+0	0	2
+
+# Test multiple LEFT JOINs in the FK chain - project non-join key
+query II
+SELECT d1.id, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+LEFT JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 1
+----
+0	0
+
+# Test LEFT JOIN from child to side table - project non-join key (c.id)
+query III
+SELECT c.id, COUNT(*), MAX(s.val2)
+FROM bitslice_fk_child c
+LEFT JOIN bitslice_fk_side s ON c.pu_id = s.pu_id
+GROUP BY c.id
+ORDER BY c.id
+LIMIT 1
+----
+0	10	5
+
+# Test LEFT JOIN with HAVING clause - project non-join key
+query II
+SELECT d1.id, SUM(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+GROUP BY d1.id
+HAVING SUM(d1.val) >= 0
+ORDER BY d1.id
+LIMIT 1
+----
+0	0
+
+# Test mixed INNER and LEFT JOINs with MIN - project non-join key
+query II
+SELECT d1.id, MIN(d1.val)
+FROM bitslice_deepleaf d1
+LEFT JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+INNER JOIN bitslice_deep1 d3 ON d2.d1_id = d3.id
+GROUP BY d1.id
+ORDER BY d1.id
+LIMIT 1
+----
+0	0
+
+# ========== UNION / UNION ALL TEST CASES ==========
+
+# Test UNION ALL with FK chain aggregates
+query I
+SELECT SUM(d1.val)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+UNION ALL
+SELECT SUM(c.val)
+FROM bitslice_fk_child c
+INNER JOIN bitslice_fk_pu p ON c.pu_id = p.id
+----
+100
+100
+
+# Test UNION (with deduplication) with FK chain aggregates
+query I
+SELECT COUNT(*)
+FROM bitslice_deepleaf d1
+INNER JOIN bitslice_deep2 d2 ON d1.d2_id = d2.id
+UNION
+SELECT COUNT(*)
+FROM bitslice_fk_child c
+INNER JOIN bitslice_fk_pu p ON c.pu_id = p.id
+----
+25
+
+# Cleanup
+statement ok
+PRAGMA clear_pac_metadata;

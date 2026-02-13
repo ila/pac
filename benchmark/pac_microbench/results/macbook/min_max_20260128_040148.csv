@@ -1,0 +1,277 @@
+test,aggregate,variant,rows_m,groups,dtype,wall_sec,agg_sec,wall_times,agg_times
+ungrouped_type,max,standard,10,1,int8,0.099,0.005,0.366 0.104 0.099,0.006 0.005 0.005
+ungrouped_type,max,default,10,1,int8,0.153,0.047,0.153 0.168 0.179,0.047 0.048 0.069
+ungrouped_type,max,noboundopt,10,1,int8,0.140,0.037,0.416 0.140 0.145,0.038 0.037 0.037
+ungrouped_type,max,nobuffering,10,1,int8,0.136,0.021,0.436 0.161 0.136,0.060 0.059 0.021
+ungrouped_type,max,nosimd,10,1,int8,0.362,0.244,0.573 0.362 0.581,0.253 0.244 0.461
+ungrouped_type,max,standard,10,1,int16,0.109,0.004,0.111 0.115 0.109,0.004 0.004 0.004
+ungrouped_type,max,default,10,1,int16,0.140,0.024,0.149 0.145 0.140,0.024 0.026 0.025
+ungrouped_type,max,noboundopt,10,1,int16,0.186,0.065,0.189 0.186 0.189,0.065 0.067 0.065
+ungrouped_type,max,nobuffering,10,1,int16,0.139,0.021,0.146 0.145 0.139,0.022 0.021 0.021
+ungrouped_type,max,nosimd,10,1,int16,0.137,0.021,0.147 0.141 0.137,0.021 0.021 0.021
+ungrouped_type,max,standard,10,1,int32,0.091,0.004,0.102 0.091 0.099,0.004 0.004 0.004
+ungrouped_type,max,default,10,1,int32,0.127,0.020,0.134 0.127 0.129,0.020 0.020 0.020
+ungrouped_type,max,noboundopt,10,1,int32,0.212,0.111,0.216 0.212 0.219,0.111 0.113 0.116
+ungrouped_type,max,nobuffering,10,1,int32,0.116,0.016,0.116 0.127 0.123,0.016 0.016 0.016
+ungrouped_type,max,nosimd,10,1,int32,0.122,0.021,0.122 0.134 0.126,0.021 0.021 0.021
+ungrouped_type,max,standard,10,1,int64,0.072,0.003,0.072 0.080 0.081,0.003 0.003 0.003
+ungrouped_type,max,default,10,1,int64,0.100,0.020,0.117 0.100 0.112,0.020 0.020 0.020
+ungrouped_type,max,noboundopt,10,1,int64,0.343,0.252,0.348 0.349 0.343,0.252 0.254 0.254
+ungrouped_type,max,nobuffering,10,1,int64,0.108,0.019,0.116 0.115 0.108,0.019 0.020 0.019
+ungrouped_type,max,nosimd,10,1,int64,0.104,0.021,0.118 0.107 0.104,0.021 0.021 0.021
+ungrouped_type,max,standard,10,1,hugeint,0.115,0.013,0.125 0.127 0.115,0.013 0.013 0.014
+ungrouped_type,max,default,10,1,hugeint,1.168,1.029,1.207 1.168 1.171,1.029 1.050 1.042
+ungrouped_type,max,noboundopt,10,1,hugeint,1.144,1.006,1.144 1.149 1.180,1.006 1.020 1.020
+ungrouped_type,max,nobuffering,10,1,hugeint,1.159,1.024,1.163 1.159 1.164,1.027 1.024 1.034
+ungrouped_type,max,nosimd,10,1,hugeint,2.145,2.017,2.189 2.177 2.145,2.047 2.044 2.017
+ungrouped_type,max,standard,10,1,float,0.236,0.036,0.245 0.236 0.239,0.036 0.036 0.036
+ungrouped_type,max,default,10,1,float,0.221,0.020,0.247 0.221 0.235,0.020 0.020 0.020
+ungrouped_type,max,noboundopt,10,1,float,0.301,0.089,0.309 0.301 0.305,0.089 0.089 0.090
+ungrouped_type,max,nobuffering,10,1,float,0.220,0.016,0.246 0.225 0.220,0.016 0.016 0.016
+ungrouped_type,max,nosimd,10,1,float,0.235,0.021,0.239 0.235 0.239,0.021 0.021 0.021
+ungrouped_type,max,standard,10,1,double,0.238,0.036,0.254 0.238 0.245,0.036 0.036 0.036
+ungrouped_type,max,default,10,1,double,0.254,0.037,0.266 0.254 0.257,0.038 0.037 0.037
+ungrouped_type,max,noboundopt,10,1,double,0.398,0.183,0.404 0.398 0.409,0.183 0.186 0.183
+ungrouped_type,max,nobuffering,10,1,double,0.245,0.033,0.260 0.245 0.245,0.033 0.034 0.034
+ungrouped_type,max,nosimd,10,1,double,0.408,0.201,0.426 0.424 0.408,0.201 0.201 0.201
+ungrouped_type,max,standard,100,1,int8,0.417,0.053,0.417 0.424 0.419,0.053 0.054 0.054
+ungrouped_type,max,default,100,1,int8,0.720,0.245,0.722 0.720 0.726,0.245 0.246 0.249
+ungrouped_type,max,noboundopt,100,1,int8,0.830,0.363,0.830 0.830 0.832,0.368 0.365 0.363
+ungrouped_type,max,nobuffering,100,1,int8,0.621,0.154,0.628 0.621 0.634,0.154 0.157 0.158
+ungrouped_type,max,nosimd,100,1,int8,0.686,0.198,0.699 0.695 0.686,0.200 0.198 0.198
+ungrouped_type,max,standard,100,1,int16,0.327,0.044,0.333 0.327 0.329,0.044 0.044 0.044
+ungrouped_type,max,default,100,1,int16,0.627,0.243,0.644 0.627 0.633,0.246 0.243 0.246
+ungrouped_type,max,noboundopt,100,1,int16,1.040,0.646,1.043 1.055 1.040,0.646 0.657 0.648
+ungrouped_type,max,nobuffering,100,1,int16,0.602,0.213,0.606 0.605 0.602,0.213 0.214 0.216
+ungrouped_type,max,nosimd,100,1,int16,0.617,0.198,0.621 0.626 0.617,0.199 0.201 0.198
+ungrouped_type,max,standard,100,1,int32,0.313,0.035,0.328 0.313 0.313,0.035 0.035 0.035
+ungrouped_type,max,default,100,1,int32,0.588,0.201,0.602 0.588 0.622,0.204 0.201 0.202
+ungrouped_type,max,noboundopt,100,1,int32,1.495,1.111,1.508 1.498 1.495,1.111 1.113 1.121
+ungrouped_type,max,nobuffering,100,1,int32,0.540,0.157,0.553 0.544 0.540,0.159 0.157 0.159
+ungrouped_type,max,nosimd,100,1,int32,0.666,0.244,0.673 0.672 0.666,0.247 0.249 0.244
+ungrouped_type,max,standard,100,1,int64,0.282,0.037,0.286 0.283 0.282,0.038 0.037 0.038
+ungrouped_type,max,default,100,1,int64,2.931,2.576,2.931 2.959 2.962,2.576 2.603 2.606
+ungrouped_type,max,noboundopt,100,1,int64,2.858,2.507,2.859 2.858 2.893,2.507 2.507 2.541
+ungrouped_type,max,nobuffering,100,1,int64,2.921,2.567,2.921 2.949 2.948,2.567 2.602 2.608
+ungrouped_type,max,nosimd,100,1,int64,17.948,17.567,18.405 18.058 17.948,18.009 17.686 17.567
+ungrouped_type,max,standard,100,1,hugeint,0.766,0.129,0.788 0.772 0.766,0.131 0.129 0.129
+ungrouped_type,max,default,100,1,hugeint,2.173,1.378,2.204 2.173 2.176,1.402 1.380 1.378
+ungrouped_type,max,noboundopt,100,1,hugeint,10.848,10.060,10.894 10.848 11.044,10.104 10.060 10.209
+ungrouped_type,max,nobuffering,100,1,hugeint,2.108,1.321,2.144 2.113 2.108,1.342 1.324 1.321
+ungrouped_type,max,nosimd,100,1,hugeint,3.622,2.825,3.637 3.626 3.622,2.834 2.839 2.825
+ungrouped_type,max,standard,100,1,float,1.889,0.357,1.918 1.892 1.889,0.362 0.359 0.357
+ungrouped_type,max,default,100,1,float,1.852,0.202,1.860 1.884 1.852,0.202 0.205 0.202
+ungrouped_type,max,noboundopt,100,1,float,2.539,0.890,2.539 2.576 2.574,0.890 0.904 0.904
+ungrouped_type,max,nobuffering,100,1,float,1.795,0.155,1.795 1.798 1.823,0.155 0.156 0.158
+ungrouped_type,max,nosimd,100,1,float,1.868,0.201,1.868 1.887 1.881,0.201 0.204 0.204
+ungrouped_type,max,standard,100,1,double,1.973,0.356,1.977 1.973 1.980,0.356 0.357 0.357
+ungrouped_type,max,default,100,1,double,1.941,0.218,1.947 1.979 1.941,0.218 0.221 0.219
+ungrouped_type,max,noboundopt,100,1,double,3.537,1.802,3.592 3.572 3.537,1.830 1.802 1.803
+ungrouped_type,max,nobuffering,100,1,double,1.896,0.173,1.896 1.902 1.930,0.173 0.173 0.175
+ungrouped_type,max,nosimd,100,1,double,2.033,0.377,2.074 2.033 2.041,0.383 0.377 0.377
+ungrouped_type,max,standard,1000,1,int8,3.691,0.532,3.693 3.696 3.691,0.533 0.540 0.532
+ungrouped_type,max,default,1000,1,int8,6.560,2.426,6.560 6.681 6.609,2.426 2.466 2.426
+ungrouped_type,max,noboundopt,1000,1,int8,7.752,3.606,7.752 7.865 7.752,3.606 3.656 3.611
+ungrouped_type,max,nobuffering,1000,1,int8,5.734,1.558,5.776 5.734 5.767,1.565 1.558 1.568
+ungrouped_type,max,nosimd,1000,1,int8,6.544,2.007,6.544 6.544 6.555,2.007 2.016 2.013
+ungrouped_type,max,standard,1000,1,int16,2.827,0.437,2.827 2.873 2.835,0.437 0.443 0.437
+ungrouped_type,max,default,1000,1,int16,5.823,2.429,5.887 5.883 5.823,2.463 2.463 2.429
+ungrouped_type,max,noboundopt,1000,1,int16,9.853,6.454,9.864 9.853 10.000,6.464 6.454 6.544
+ungrouped_type,max,nobuffering,1000,1,int16,5.514,2.133,5.525 5.514 5.585,2.134 2.133 2.162
+ungrouped_type,max,nosimd,1000,1,int16,5.665,1.983,5.699 5.665 5.820,1.985 1.983 2.026
+ungrouped_type,max,standard,1000,1,int32,2.728,0.348,2.812 2.728 2.740,0.356 0.348 0.349
+ungrouped_type,max,default,1000,1,int32,5.443,2.016,5.476 5.478 5.443,2.020 2.022 2.016
+ungrouped_type,max,noboundopt,1000,1,int32,14.524,11.110,14.691 14.524 14.743,11.264 11.110 11.277
+ungrouped_type,max,nobuffering,1000,1,int32,4.922,1.545,4.922 4.938 4.928,1.547 1.548 1.545
+ungrouped_type,max,nosimd,1000,1,int32,5.795,2.056,5.821 5.795 5.848,2.059 2.056 2.066
+ungrouped_type,max,standard,1000,1,int64,2.335,0.375,2.337 2.335 2.335,0.375 0.375 0.375
+ungrouped_type,max,default,1000,1,int64,28.618,25.667,28.618,25.667
+ungrouped_type,max,noboundopt,1000,1,int64,28.438,25.417,28.438,25.417
+ungrouped_type,max,nobuffering,1000,1,int64,28.629,25.676,28.629,25.676
+ungrouped_type,max,nosimd,1000,1,int64,176.059,172.831,176.059,172.831
+ungrouped_type,max,standard,1000,1,hugeint,7.133,1.271,7.133 7.135 7.216,1.271 1.277 1.287
+ungrouped_type,max,default,1000,1,hugeint,12.301,4.897,12.365 12.301 12.461,4.971 4.897 4.970
+ungrouped_type,max,noboundopt,1000,1,hugeint,108.019,100.677,108.019,100.677
+ungrouped_type,max,nobuffering,1000,1,hugeint,11.713,4.320,11.713 11.877 11.761,4.321 4.391 4.320
+ungrouped_type,max,nosimd,1000,1,hugeint,18.096,10.680,18.096 18.257 18.138,10.680 10.732 10.746
+ungrouped_type,max,standard,1000,1,float,18.346,3.563,18.356 18.616 18.346,3.566 3.615 3.563
+ungrouped_type,max,default,1000,1,float,17.889,2.008,17.889 18.123 17.907,2.008 2.028 2.009
+ungrouped_type,max,noboundopt,1000,1,float,24.798,8.901,24.798 24.824 24.812,8.912 8.908 8.901
+ungrouped_type,max,nobuffering,1000,1,float,17.565,1.567,17.565 18.292 22.063,1.567 1.625 1.682
+ungrouped_type,max,nosimd,1000,1,float,18.117,2.009,21.759 18.117 18.357,2.362 2.009 2.043
+ungrouped_type,max,standard,1000,1,double,19.239,3.562,19.239 19.258 19.389,3.565 3.562 3.589
+ungrouped_type,max,default,1000,1,double,18.838,2.040,18.856 18.838 19.235,2.043 2.040 2.076
+ungrouped_type,max,noboundopt,1000,1,double,34.790,18.033,34.790,18.033
+ungrouped_type,max,nobuffering,1000,1,double,18.633,1.593,18.633 578.357,1.593 1.608
+ungrouped_type,max,nosimd,1000,1,double,18.637,2.234,18.637 918.467,2.234 902.485
+dist_test,max,standard,10,1,random,0.060,0.004,0.063 0.062 0.060,0.004 0.004 0.004
+dist_test,max,default,10,1,random,0.087,0.020,0.092 0.087 0.090,0.021 0.020 0.021
+dist_test,max,noboundopt,10,1,random,0.245,0.165,0.250 0.245 0.246,0.165 0.165 0.165
+dist_test,max,nobuffering,10,1,random,0.089,0.019,0.089 0.089 0.111,0.019 0.020 0.020
+dist_test,max,nosimd,10,1,random,0.090,0.021,0.097 0.090 0.100,0.021 0.021 0.022
+dist_test,max,standard,10,1,monotonic_inc,0.052,0.004,0.054 0.052 0.053,0.004 0.004 0.004
+dist_test,max,default,10,1,monotonic_inc,0.235,0.173,0.254 0.236 0.235,0.176 0.175 0.173
+dist_test,max,noboundopt,10,1,monotonic_inc,0.230,0.165,0.242 0.235 0.230,0.165 0.165 0.166
+dist_test,max,nobuffering,10,1,monotonic_inc,0.238,0.176,0.240 0.238 0.253,0.177 0.176 0.179
+dist_test,max,nosimd,10,1,monotonic_inc,1.873,1.799,1.926 1.873 1.876,1.848 1.799 1.806
+dist_test,max,standard,10,1,monotonic_dec,0.061,0.004,0.064 0.061 0.062,0.004 0.004 0.004
+dist_test,max,default,10,1,monotonic_dec,0.092,0.020,0.092 0.101 0.100,0.021 0.020 0.020
+dist_test,max,noboundopt,10,1,monotonic_dec,0.246,0.165,0.258 0.246 0.253,0.169 0.165 0.169
+dist_test,max,nobuffering,10,1,monotonic_dec,0.096,0.019,0.100 0.097 0.096,0.019 0.019 0.019
+dist_test,max,nosimd,10,1,monotonic_dec,0.097,0.020,0.097 0.105 0.106,0.020 0.021 0.021
+dist_test,max,standard,100,1,random,0.259,0.035,0.272 0.259 0.268,0.035 0.035 0.035
+dist_test,max,default,100,1,random,0.538,0.201,0.540 0.544 0.538,0.201 0.208 0.201
+dist_test,max,noboundopt,100,1,random,1.983,1.649,1.983 2.042 1.989,1.651 1.696 1.649
+dist_test,max,nobuffering,100,1,random,0.526,0.188,0.526 0.535 0.529,0.188 0.197 0.193
+dist_test,max,nosimd,100,1,random,0.565,0.202,0.565 0.581 0.580,0.202 0.208 0.209
+dist_test,max,standard,100,1,monotonic_inc,0.187,0.038,0.193 0.187 0.193,0.038 0.038 0.038
+dist_test,max,default,100,1,monotonic_inc,1.993,1.733,1.993 2.057 2.009,1.733 1.761 1.756
+dist_test,max,noboundopt,100,1,monotonic_inc,1.923,1.670,1.923 1.924 1.974,1.670 1.673 1.701
+dist_test,max,nobuffering,100,1,monotonic_inc,1.967,1.712,1.967 1.980 1.978,1.712 1.724 1.720
+dist_test,max,nosimd,100,1,monotonic_inc,36.746,36.420,36.746,36.420
+dist_test,max,standard,100,1,monotonic_dec,0.269,0.034,0.278 0.269 0.275,0.034 0.034 0.035
+dist_test,max,default,100,1,monotonic_dec,0.529,0.193,0.542 0.548 0.529,0.194 0.202 0.193
+dist_test,max,noboundopt,100,1,monotonic_dec,1.929,1.584,1.929 1.992 2.004,1.584 1.649 1.653
+dist_test,max,nobuffering,100,1,monotonic_dec,0.537,0.188,0.553 0.537 0.541,0.195 0.189 0.188
+dist_test,max,nosimd,100,1,monotonic_dec,0.559,0.194,0.588 0.559 0.581,0.202 0.194 0.202
+dist_test,max,standard,1000,1,random,2.106,0.338,2.112 2.106 2.197,0.338 0.338 0.352
+dist_test,max,default,1000,1,random,5.443,2.016,5.476 5.478 5.443,2.020 2.022 2.016
+dist_test,max,noboundopt,1000,1,random,18.674,15.893,18.674 210.313,15.893 207.473
+dist_test,max,nobuffering,1000,1,random,4.553,1.815,4.860 4.580 4.553,1.961 1.822 1.815
+dist_test,max,nosimd,1000,1,random,4.998,1.935,5.259 5.217 4.998,2.030 2.027 1.935
+dist_test,max,standard,1000,1,monotonic_inc,1.384,0.366,1.435 1.384 1.390,0.382 0.366 0.370
+dist_test,max,default,1000,1,monotonic_inc,18.377,16.396,18.377 18.397 18.441,16.396 16.417 16.445
+dist_test,max,noboundopt,1000,1,monotonic_inc,17.814,15.844,17.852 17.829 17.814,15.869 15.854 15.844
+dist_test,max,nobuffering,1000,1,monotonic_inc,18.682,16.694,18.693 18.682 19.525,16.723 16.694 17.442
+dist_test,max,nosimd,1000,1,monotonic_inc,217.191,214.769,217.191,214.769
+dist_test,max,standard,1000,1,monotonic_dec,2.193,0.338,2.203 2.201 2.193,0.339 0.340 0.338
+dist_test,max,default,1000,1,monotonic_dec,4.800,1.940,4.986 4.800 4.998,2.022 1.940 2.032
+dist_test,max,noboundopt,1000,1,monotonic_dec,18.781,15.922,18.781 19.513 19.502,15.922 16.518 16.520
+dist_test,max,nobuffering,1000,1,monotonic_dec,4.664,1.813,4.681 4.682 4.664,1.827 1.825 1.813
+dist_test,max,nosimd,1000,1,monotonic_dec,5.054,1.934,5.310 5.054 5.303,2.023 1.934 2.026
+grouped_seq,max,standard,10,10,random,0.144,0.049,0.415 0.144 0.150,0.052 0.049 0.050
+grouped_seq,max,default,10,10,random,0.185,0.066,0.190 0.187 0.185,0.066 0.066 0.066
+grouped_seq,max,noboundopt,10,10,random,0.421,0.296,0.421 0.426 0.422,0.296 0.302 0.297
+grouped_seq,max,nobuffering,10,10,random,0.185,0.064,0.190 0.185 0.187,0.064 0.064 0.064
+grouped_seq,max,standard,10,1000,random,0.161,0.049,0.163 0.161 0.162,0.049 0.049 0.049
+grouped_seq,max,default,10,1000,random,0.333,0.214,0.345 0.334 0.333,0.215 0.214 0.215
+grouped_seq,max,noboundopt,10,1000,random,0.420,0.297,0.420 0.422 0.421,0.301 0.299 0.297
+grouped_seq,max,nobuffering,10,1000,random,0.235,0.112,0.243 0.236 0.235,0.113 0.114 0.112
+grouped_seq,max,standard,10,100000,random,0.167,0.058,0.171 0.167 0.169,0.058 0.058 0.058
+grouped_seq,max,default,10,100000,random,0.449,0.349,0.482 0.457 0.449,0.370 0.355 0.349
+grouped_seq,max,noboundopt,10,100000,random,0.443,0.336,0.444 0.443 0.446,0.338 0.336 0.341
+grouped_seq,max,nobuffering,10,100000,random,0.447,0.328,0.449 0.449 0.447,0.329 0.329 0.328
+grouped_seq,max,standard,10,10000000,random,0.320,0.356,0.326 0.320 0.323,0.364 0.356 0.358
+grouped_seq,max,default,10,10000000,random,0.803,1.627,0.833 0.811 0.803,1.644 1.667 1.627
+grouped_seq,max,noboundopt,10,10000000,random,0.817,1.618,0.817 0.831 0.845,1.618 1.639 1.630
+grouped_seq,max,nobuffering,10,10000000,random,2.162,3.325,2.256 2.188 2.162,3.421 3.335 3.325
+grouped_seq,max,standard,100,10,random,1.042,0.467,1.051 1.046 1.042,0.467 0.469 0.474
+grouped_seq,max,default,100,10,random,1.376,0.663,1.393 1.376 1.415,0.673 0.663 0.683
+grouped_seq,max,noboundopt,100,10,random,3.852,3.123,4.025 4.122 3.852,3.281 3.337 3.123
+grouped_seq,max,nobuffering,100,10,random,1.349,0.642,1.369 1.349 1.492,0.649 0.642 0.711
+grouped_seq,max,standard,100,1000,random,1.107,0.504,1.167 1.157 1.107,0.523 0.528 0.504
+grouped_seq,max,default,100,1000,random,1.500,0.801,1.523 1.502 1.500,0.819 0.805 0.801
+grouped_seq,max,noboundopt,100,1000,random,3.754,3.037,3.789 3.767 3.754,3.041 3.045 3.037
+grouped_seq,max,nobuffering,100,1000,random,1.391,0.682,1.391 1.392 1.396,0.682 0.683 0.683
+grouped_seq,max,standard,100,100000,random,1.107,0.516,1.107 1.107 1.119,0.522 0.516 0.519
+grouped_seq,max,default,100,100000,random,3.991,3.300,4.011 3.991 4.007,3.319 3.300 3.318
+grouped_seq,max,noboundopt,100,100000,random,3.913,3.203,4.469 3.940 3.913,3.364 3.221 3.203
+grouped_seq,max,nobuffering,100,100000,random,3.965,3.200,3.965 5.957 4.115,3.200 4.257 3.342
+grouped_seq,max,standard,100,10000000,random,1.562,1.093,1.562 1.586 1.605,1.093 1.107 1.131
+grouped_seq,max,default,100,10000000,random,5.924,7.810,5.924 6.119 6.351,7.810 8.420 9.144
+grouped_seq,max,noboundopt,100,10000000,random,5.577,7.324,5.629 5.577 5.696,7.640 7.324 7.398
+grouped_seq,max,nobuffering,100,10000000,random,6.177,6.744,6.177 6.211 6.190,6.811 6.744 6.889
+grouped_seq,max,standard,1000,10,random,10.166,4.765,10.223 10.166 10.193,4.806 4.765 4.784
+grouped_seq,max,default,1000,10,random,12.800,6.393,12.803 12.800 18.360,6.393 6.404 6.485
+grouped_seq,max,noboundopt,1000,10,random,36.767,30.165,36.767,30.165
+grouped_seq,max,nobuffering,1000,10,random,12.835,6.291,12.869 12.835 12.851,6.303 6.291 6.295
+grouped_seq,max,standard,1000,1000,random,10.172,4.791,10.172 10.172 10.211,4.792 4.791 4.804
+grouped_seq,max,default,1000,1000,random,12.912,6.547,12.944 12.912 12.925,6.547 6.548 6.554
+grouped_seq,max,noboundopt,1000,1000,random,40.095,32.670,40.095,32.670
+grouped_seq,max,nobuffering,1000,1000,random,12.896,6.349,12.896 12.935 12.927,6.349 6.368 6.362
+grouped_seq,max,standard,1000,100000,random,10.445,4.958,10.446 10.452 10.445,4.963 4.966 4.958
+grouped_seq,max,default,1000,100000,random,28.401,21.981,28.401,21.981
+grouped_seq,max,noboundopt,1000,100000,random,36.964,30.412,36.964,30.412
+grouped_seq,max,nobuffering,1000,100000,random,17.898,11.345,18.194 17.898 17.905,11.545 11.350 11.345
+grouped_seq,max,standard,1000,10000000,random,10.859,5.593,10.894 10.859 10.919,5.637 5.593 5.646
+grouped_seq,max,default,1000,10000000,random,40.226,36.713,40.226,36.713
+grouped_seq,max,noboundopt,1000,10000000,random,39.966,35.897,39.966,35.897
+grouped_seq,max,nobuffering,1000,10000000,random,39.482,33.900,39.482,33.900
+grouped_scat,max,standard,10,10,random,0.154,0.049,0.168 0.163 0.154,0.049 0.049 0.049
+grouped_scat,max,default,10,10,random,0.185,0.066,0.192 0.192 0.185,0.067 0.067 0.066
+grouped_scat,max,noboundopt,10,10,random,0.427,0.307,0.434 0.427 0.428,0.308 0.307 0.307
+grouped_scat,max,nobuffering,10,10,random,0.186,0.063,0.189 0.186 0.186,0.063 0.063 0.063
+grouped_scat,max,standard,10,1000,random,0.168,0.055,0.174 0.170 0.168,0.058 0.055 0.055
+grouped_scat,max,default,10,1000,random,0.350,0.231,0.360 0.359 0.350,0.233 0.232 0.231
+grouped_scat,max,noboundopt,10,1000,random,0.421,0.313,0.441 0.421 0.440,0.313 0.314 0.313
+grouped_scat,max,nobuffering,10,1000,random,0.240,0.122,0.249 0.240 0.248,0.123 0.123 0.122
+grouped_scat,max,standard,10,100000,random,0.218,0.115,0.226 0.219 0.218,0.118 0.120 0.115
+grouped_scat,max,default,10,100000,random,0.536,0.452,0.543 0.568 0.536,0.456 0.452 0.458
+grouped_scat,max,noboundopt,10,100000,random,0.482,0.404,0.492 0.489 0.482,0.408 0.410 0.404
+grouped_scat,max,nobuffering,10,100000,random,0.670,0.613,0.673 0.687 0.670,0.619 0.642 0.613
+grouped_scat,max,standard,10,10000000,random,0.333,0.357,0.335 0.333 0.339,0.358 0.357 0.363
+grouped_scat,max,default,10,10000000,random,0.812,1.586,0.812 0.820 0.812,1.586 1.615 1.595
+grouped_scat,max,noboundopt,10,10000000,random,0.819,1.620,0.824 0.819 0.820,1.631 1.620 1.621
+grouped_scat,max,nobuffering,10,10000000,random,2.141,3.353,2.260 2.141 2.165,3.399 3.405 3.353
+grouped_scat,max,standard,100,10,random,1.084,0.479,1.098 1.088 1.084,0.484 0.479 0.480
+grouped_scat,max,default,100,10,random,1.348,0.643,1.357 1.348 1.350,0.645 0.643 0.644
+grouped_scat,max,noboundopt,100,10,random,3.781,3.066,3.804 3.787 3.781,3.086 3.069 3.066
+grouped_scat,max,nobuffering,100,10,random,1.319,0.614,1.324 1.319 1.322,0.614 0.614 0.614
+grouped_scat,max,standard,100,1000,random,1.149,0.539,1.179 1.151 1.149,0.570 0.546 0.539
+grouped_scat,max,default,100,1000,random,1.634,0.925,1.655 1.634 1.635,0.939 0.925 0.930
+grouped_scat,max,noboundopt,100,1000,random,3.822,3.106,3.831 3.822 3.832,3.119 3.106 3.118
+grouped_scat,max,nobuffering,100,1000,random,1.478,0.768,1.478 1.479 1.517,0.768 0.771 0.808
+grouped_scat,max,standard,100,100000,random,1.423,0.817,1.454 1.423 1.438,0.843 0.817 0.838
+grouped_scat,max,default,100,100000,random,4.671,3.992,4.725 4.692 4.671,4.042 4.014 3.992
+grouped_scat,max,noboundopt,100,100000,random,4.142,3.471,4.142 4.187 4.266,3.471 3.515 3.579
+grouped_scat,max,nobuffering,100,100000,random,5.274,4.613,5.465 5.404 5.274,4.804 4.745 4.613
+grouped_scat,max,standard,100,10000000,random,2.489,2.998,2.543 2.489 2.501,3.033 2.998 3.012
+grouped_scat,max,default,100,10000000,random,5.206,8.328,5.285 5.206 5.285,8.453 8.328 8.515
+grouped_scat,max,noboundopt,100,10000000,random,5.269,8.427,5.269 5.303 5.298,8.427 8.498 8.469
+grouped_scat,max,nobuffering,100,10000000,random,50.138,87.607,50.138,87.607
+grouped_scat,max,standard,1000,10,random,10.368,4.798,10.395 10.368 10.427,4.809 4.798 4.841
+grouped_scat,max,default,1000,10,random,12.994,6.426,12.994 13.004 13.002,6.426 6.433 6.427
+grouped_scat,max,noboundopt,1000,10,random,38.251,31.430,38.251,31.430
+grouped_scat,max,nobuffering,1000,10,random,12.641,6.105,12.707 12.641 12.689,6.121 6.105 6.130
+grouped_scat,max,standard,1000,1000,random,10.925,5.379,10.925 11.239 10.953,5.379 5.625 5.404
+grouped_scat,max,default,1000,1000,random,14.375,7.838,14.375 14.527 14.439,7.838 7.988 7.887
+grouped_scat,max,noboundopt,1000,1000,random,37.764,31.159,37.764,31.159
+grouped_scat,max,nobuffering,1000,1000,random,13.726,7.183,13.726 13.816 13.850,7.183 7.232 7.261
+grouped_scat,max,standard,1000,100000,random,13.337,7.778,13.697 13.532 13.337,7.974 7.895 7.778
+grouped_scat,max,default,1000,100000,random,36.943,30.294,36.943,30.294
+grouped_scat,max,noboundopt,1000,100000,random,40.139,33.590,40.139,33.590
+grouped_scat,max,nobuffering,1000,100000,random,26.704,20.130,26.704,20.130
+grouped_scat,max,standard,1000,10000000,random,35.516,57.238,35.516,57.238
+grouped_scat,max,default,1000,10000000,random,72.103,134.660,72.103,134.660
+grouped_scat,max,noboundopt,1000,10000000,random,71.119,133.105,71.119,133.105
+grouped_scat,max,nobuffering,1000,10000000,random,-1,-1,-1,-1
+float_test,max,standard,10,1,float,0.238,0.036,0.517 0.238 0.244,0.038 0.036 0.036
+float_test,max,default,10,1,float,0.238,0.020,0.241 0.238 0.253,0.020 0.020 0.020
+float_test,max,noboundopt,10,1,float,0.306,0.089,0.583 0.306 0.310,0.092 0.089 0.090
+float_test,max,nobuffering,10,1,float,0.234,0.016,0.237 0.234 0.235,0.016 0.016 0.016
+float_test,max,nosimd,10,1,float,0.239,0.021,0.514 0.243 0.239,0.022 0.021 0.021
+float_test,max,standard,10,1,double,0.248,0.036,0.256 0.251 0.248,0.036 0.036 0.036
+float_test,max,default,10,1,double,0.261,0.037,0.271 0.264 0.261,0.038 0.037 0.037
+float_test,max,noboundopt,10,1,double,0.399,0.180,0.409 0.406 0.399,0.180 0.180 0.180
+float_test,max,nobuffering,10,1,double,0.247,0.033,0.250 0.247 0.260,0.033 0.034 0.033
+float_test,max,nosimd,10,1,double,0.399,0.195,0.420 0.399 0.412,0.196 0.195 0.197
+float_test,max,standard,100,1,float,1.887,0.356,1.897 1.887 1.890,0.356 0.356 0.356
+float_test,max,default,100,1,float,1.838,0.200,1.876 1.838 1.873,0.204 0.200 0.205
+float_test,max,noboundopt,100,1,float,2.536,0.891,2.536 2.540 2.574,0.891 0.893 0.903
+float_test,max,nobuffering,100,1,float,1.799,0.155,1.861 1.799 1.821,0.158 0.155 0.157
+float_test,max,nosimd,100,1,float,1.862,0.201,1.867 1.862 1.949,0.201 0.202 0.210
+float_test,max,standard,100,1,double,1.976,0.356,1.998 1.976 2.008,0.358 0.356 0.361
+float_test,max,default,100,1,double,1.938,0.218,1.978 1.938 1.978,0.221 0.218 0.221
+float_test,max,noboundopt,100,1,double,3.546,1.808,3.551 3.546 3.601,1.808 1.810 1.834
+float_test,max,nobuffering,100,1,double,1.920,0.174,1.921 1.920 1.928,0.174 0.175 0.175
+float_test,max,nosimd,100,1,double,2.046,0.382,2.048 2.046 2.063,0.382 0.383 0.382
+float_test,max,standard,1000,1,float,18.371,3.566,18.684 18.375 18.371,3.627 3.572 3.566
+float_test,max,default,1000,1,float,17.941,2.012,18.192 18.150 17.941,2.037 2.031 2.012
+float_test,max,noboundopt,1000,1,float,25.219,9.035,25.219,9.035
+float_test,max,nobuffering,1000,1,float,17.465,1.555,17.474 17.480 17.465,1.555 1.556 1.556
+float_test,max,nosimd,1000,1,float,18.082,2.010,18.086 18.090 18.082,2.010 2.010 2.015
+float_test,max,standard,1000,1,double,19.239,3.564,19.275 19.239 19.244,3.570 3.565 3.564
+float_test,max,default,1000,1,double,19.067,2.057,19.084 19.067 19.069,2.058 2.067 2.057
+float_test,max,noboundopt,1000,1,double,34.793,18.042,34.793,18.042
+float_test,max,nobuffering,1000,1,double,18.328,1.575,18.593 18.543 18.328,1.594 1.593 1.575
+float_test,max,nosimd,1000,1,double,18.288,2.193,18.288 18.341 18.583,2.195 2.193 2.226

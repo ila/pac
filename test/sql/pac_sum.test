@@ -1,0 +1,287 @@
+# name: test/sql/pac_sum.test
+# description: Test pac_sum aggregate function
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+PRAGMA enable_verification
+
+# Set deterministic seed for cross-CPU reproducibility
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# Create test data with 4000 rows
+statement ok
+CREATE TABLE test_data AS
+SELECT i AS rowid, i % 3 AS grp, (i % 100) AS value
+FROM range(4000) t(i)
+
+# Ungrouped pac_sum with INTEGER
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+----
+true
+
+# Verify returns HUGEINT for signed integers
+query I
+SELECT typeof(pac_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
+----
+HUGEINT
+
+# Test with non-zero mi parameter (deterministic results due to pac_seed)
+statement ok
+SET pac_mi = 128
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+----
+true
+
+statement ok
+SET pac_mi = 0
+
+# Test with explicit mi parameter (0.0 for no noise)
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+----
+true
+
+# Grouped pac_sum
+query II
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL AS has_result
+FROM test_data
+GROUP BY grp
+ORDER BY grp
+----
+0	true
+1	true
+2	true
+
+# Test with different numeric types
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::BIGINT) IS NOT NULL FROM test_data
+----
+true
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::DOUBLE) IS NOT NULL FROM test_data
+----
+true
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::FLOAT) IS NOT NULL FROM test_data
+----
+true
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::SMALLINT) IS NOT NULL FROM test_data
+----
+true
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, (value % 127)::TINYINT) IS NOT NULL FROM test_data
+----
+true
+
+# ===========================================================
+# NULL handling tests - pac_sum ignores NULLs (safe behavior, like DuckDB's SUM)
+# ===========================================================
+
+# Test ungrouped: NULL in value is ignored, result is NOT NULL
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, CASE WHEN rowid = 100 THEN NULL ELSE value END::INTEGER) IS NOT NULL FROM test_data
+----
+true
+
+# Test ungrouped: NULL in key_hash is ignored, result is NOT NULL
+query I
+SELECT pac_sum(CASE WHEN rowid = 50 THEN NULL ELSE hash(rowid)::UBIGINT END, value::INTEGER) IS NOT NULL FROM test_data
+----
+true
+
+# Test grouped: NULLs are ignored, all groups have non-NULL results
+statement ok
+CREATE TABLE test_null_groups AS
+SELECT i AS rowid, i % 3 AS grp,
+       CASE WHEN i = 0 THEN NULL ELSE (i % 100)::INTEGER END AS value
+FROM range(30) t(i)
+
+# All groups should have non-NULL results (NULLs are just ignored)
+query II
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value) IS NULL AS is_null
+FROM test_null_groups
+GROUP BY grp
+ORDER BY grp
+----
+0	false
+1	false
+2	false
+
+statement ok
+DROP TABLE test_null_groups
+
+# Test: all non-NULL values gives non-NULL result
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value::INTEGER) IS NOT NULL FROM test_data
+----
+true
+
+# ===========================================================
+# Local/global summing tests - test flush threshold behavior
+# ===========================================================
+
+# For TINYINT, flush threshold is 8 (1 << 3)
+# Create exactly 8 rows to test boundary
+statement ok
+CREATE TABLE test_tinyint_flush AS
+SELECT i AS rowid, 10::TINYINT AS value FROM range(8) t(i)
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_tinyint_flush
+----
+true
+
+statement ok
+DROP TABLE test_tinyint_flush
+
+# For SMALLINT, flush threshold is 32 (1 << 5)
+# Create data that exercises local->global summing
+statement ok
+CREATE TABLE test_smallint_flush AS
+SELECT i AS rowid, (i % 100)::SMALLINT AS value FROM range(100) t(i)
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_smallint_flush
+----
+true
+
+statement ok
+DROP TABLE test_smallint_flush
+
+# For INTEGER, flush threshold is 256 (1 << 8)
+# Create data larger than threshold to ensure multiple flushes
+statement ok
+CREATE TABLE test_integer_flush AS
+SELECT i AS rowid, (i % 1000)::INTEGER AS value FROM range(1000) t(i)
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_integer_flush
+----
+true
+
+statement ok
+DROP TABLE test_integer_flush
+
+# For BIGINT, flush threshold is 65536 (1 << 16)
+# Create data to exercise the accumulator (smaller dataset since threshold is huge)
+statement ok
+CREATE TABLE test_bigint_flush AS
+SELECT i AS rowid, (i * 1000000)::BIGINT AS value FROM range(1000) t(i)
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_bigint_flush
+----
+true
+
+statement ok
+DROP TABLE test_bigint_flush
+
+# Test large values that trigger immediate flush (top B bits set)
+# For TINYINT (8 bits), top 3 bits set means value >= 32 or <= -32
+statement ok
+CREATE TABLE test_large_tinyint AS
+SELECT i AS rowid,
+       CASE WHEN i % 2 = 0 THEN 100::TINYINT ELSE 5::TINYINT END AS value
+FROM range(20) t(i)
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_large_tinyint
+----
+true
+
+statement ok
+DROP TABLE test_large_tinyint
+
+# Test with float - should accumulate correctly
+statement ok
+CREATE TABLE test_float_sum AS
+SELECT i AS rowid, (i * 0.5)::FLOAT AS value FROM range(1000) t(i)
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_float_sum
+----
+true
+
+statement ok
+DROP TABLE test_float_sum
+
+# Test with double - should accumulate correctly
+statement ok
+CREATE TABLE test_double_sum AS
+SELECT i AS rowid, (i * 0.123456789)::DOUBLE AS value FROM range(1000) t(i)
+
+query I
+SELECT pac_sum(hash(rowid)::UBIGINT, value) IS NOT NULL FROM test_double_sum
+----
+true
+
+statement ok
+DROP TABLE test_double_sum
+
+# ===========================================================
+# Grouped NULL tests - verify per-group NULL tracking
+# ===========================================================
+
+# Create table where group 1 has a NULL, groups 0 and 2 don't
+# With safe NULL handling, NULLs are ignored, so all groups have results
+statement ok
+CREATE TABLE test_grouped_nulls AS
+SELECT i AS rowid, i % 3 AS grp,
+       CASE WHEN i = 1 THEN NULL ELSE (i % 50)::INTEGER END AS value
+FROM range(300) t(i)
+
+query II
+SELECT grp, pac_sum(hash(rowid)::UBIGINT, value) IS NULL AS is_null
+FROM test_grouped_nulls
+GROUP BY grp
+ORDER BY grp
+----
+0	false
+1	false
+2	false
+
+statement ok
+DROP TABLE test_grouped_nulls
+
+# ============================================================================
+# Sample diversity check tests
+# ============================================================================
+
+# Ungrouped: all rows hash to the same privacy unit → should trigger diversity error
+statement error
+SELECT pac_sum(hash(5)::UBIGINT, 1.0) FROM range(200) t(i)
+----
+detected absence of sample diversity
+
+# Grouped: each group has rows from the same privacy unit → should trigger diversity error
+statement error
+SELECT key, pac_sum(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(600) t(i)) sub GROUP BY key
+----
+detected absence of sample diversity
+
+# Cleanup
+statement ok
+DROP TABLE test_data

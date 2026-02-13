@@ -1,0 +1,522 @@
+# name: test/sql/pac_bitslice_compiler_uncorrelated_subqueries.test
+# description: Test bitslice compiler with complex queries involving subqueries, joins, and projections (TPC-H Q7 and Q13 patterns)
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# Create TPC-H-like schema with proper PK-FK relationships
+# This tests the compiler's ability to handle:
+# - Multiple joins across several tables
+# - Projections with date functions and arithmetic
+# - Filters on multiple conditions including OR
+# - Group by with multiple columns
+# - Subqueries with LEFT JOIN (Q13 pattern)
+
+# Nation table
+statement ok
+CREATE TABLE nation(
+    n_nationkey INTEGER PRIMARY KEY,
+    n_name VARCHAR,
+    n_regionkey INTEGER
+);
+
+statement ok
+INSERT INTO nation VALUES
+    (0, 'FRANCE', 0),
+    (1, 'GERMANY', 0),
+    (2, 'JAPAN', 1),
+    (3, 'CHINA', 1),
+    (4, 'USA', 2);
+
+# Customer table (Privacy Unit)
+statement ok
+CREATE TABLE customer(
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_nationkey INTEGER,
+    FOREIGN KEY (c_nationkey) REFERENCES nation(n_nationkey)
+);
+
+statement ok
+INSERT INTO customer VALUES
+    (1, 'Customer#001', 0),
+    (2, 'Customer#002', 1),
+    (3, 'Customer#003', 0),
+    (4, 'Customer#004', 1),
+    (5, 'Customer#005', 2),
+    (6, 'Customer#006', 0),
+    (7, 'Customer#007', 1),
+    (8, 'Customer#008', 2);
+
+# Supplier table
+statement ok
+CREATE TABLE supplier(
+    s_suppkey INTEGER PRIMARY KEY,
+    s_name VARCHAR,
+    s_nationkey INTEGER,
+    FOREIGN KEY (s_nationkey) REFERENCES nation(n_nationkey)
+);
+
+statement ok
+INSERT INTO supplier VALUES
+    (1, 'Supplier#001', 0),
+    (2, 'Supplier#002', 1),
+    (3, 'Supplier#003', 0),
+    (4, 'Supplier#004', 1);
+
+# Orders table
+statement ok
+CREATE TABLE orders(
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderdate DATE,
+    o_comment VARCHAR,
+    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+);
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, '1995-03-15', 'regular'),
+    (2, 2, '1995-06-20', 'urgent'),
+    (3, 3, '1995-09-10', 'regular'),
+    (4, 4, '1996-01-05', 'regular'),
+    (5, 5, '1996-04-12', 'urgent'),
+    (6, 1, '1996-07-18', 'regular'),
+    (7, 2, '1995-11-22', 'regular'),
+    (8, 3, '1996-03-30', 'urgent'),
+    (9, 6, '1995-05-14', 'regular'),
+    (10, 7, '1996-08-25', 'regular'),
+    (11, 1, '1995-12-01', 'urgent'),
+    (12, 8, '1996-02-17', 'regular');
+
+# Lineitem table
+statement ok
+CREATE TABLE lineitem(
+    l_orderkey INTEGER,
+    l_linenumber INTEGER,
+    l_suppkey INTEGER,
+    l_quantity DECIMAL(15,2),
+    l_extendedprice DECIMAL(15,2),
+    l_discount DECIMAL(15,2),
+    l_shipdate DATE,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey),
+    FOREIGN KEY (l_suppkey) REFERENCES supplier(s_suppkey)
+);
+
+statement ok
+INSERT INTO lineitem VALUES
+    (1, 1, 1, 10.00, 1000.00, 0.05, '1995-03-20'),
+    (1, 2, 2, 15.00, 1500.00, 0.10, '1995-03-22'),
+    (2, 1, 2, 20.00, 2000.00, 0.05, '1995-06-25'),
+    (3, 1, 1, 25.00, 2500.00, 0.00, '1995-09-15'),
+    (4, 1, 3, 30.00, 3000.00, 0.10, '1996-01-10'),
+    (5, 1, 4, 12.00, 1200.00, 0.05, '1996-04-15'),
+    (6, 1, 1, 18.00, 1800.00, 0.00, '1996-07-20'),
+    (7, 1, 2, 22.00, 2200.00, 0.05, '1995-11-25'),
+    (8, 1, 3, 16.00, 1600.00, 0.10, '1996-04-05'),
+    (9, 1, 1, 14.00, 1400.00, 0.05, '1995-05-18'),
+    (10, 1, 4, 20.00, 2000.00, 0.00, '1996-08-28'),
+    (11, 1, 2, 25.00, 2500.00, 0.10, '1995-12-05'),
+    (12, 1, 3, 30.00, 3000.00, 0.05, '1996-02-20');
+
+statement ok
+ALTER TABLE customer SET PAC;
+
+# Test 1: TPC-H Q7-style query
+# Tests: Multiple joins, date filtering, projections with date_part, arithmetic expressions, GROUP BY, ORDER BY
+# This query computes revenue between pairs of nations for a given date range
+query IIII
+SELECT
+    supp_nation,
+    cust_nation,
+    l_year,
+    SUM(volume) AS revenue
+FROM (
+    SELECT
+        n1.n_name AS supp_nation,
+        n2.n_name AS cust_nation,
+        CAST(date_part('year', l_shipdate) AS INTEGER) AS l_year,
+        l_extendedprice * (1 - l_discount) AS volume
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation n1,
+        nation n2
+    WHERE
+        s_suppkey = l_suppkey
+        AND o_orderkey = l_orderkey
+        AND c_custkey = o_custkey
+        AND s_nationkey = n1.n_nationkey
+        AND c_nationkey = n2.n_nationkey
+        AND ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY')
+            OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE'))
+        AND l_shipdate BETWEEN CAST('1995-01-01' AS DATE) AND CAST('1996-12-31' AS DATE)
+) AS shipping
+GROUP BY
+    supp_nation,
+    cust_nation,
+    l_year
+ORDER BY
+    supp_nation,
+    cust_nation,
+    l_year;
+----
+FRANCE	GERMANY	1996	5387.0592
+GERMANY	FRANCE	1995	7182.7456
+
+# Test 2: TPC-H Q13-style query
+# Tests: Subquery with LEFT JOIN, COUNT with optional match, GROUP BY on outer query, nested aggregates
+# This query counts orders per customer, including customers with no orders
+query II
+SELECT
+    c_count,
+    COUNT(*) AS custdist
+FROM (
+    SELECT
+        c_custkey,
+        COUNT(o_orderkey) AS c_count
+    FROM
+        customer
+    LEFT OUTER JOIN orders ON
+        c_custkey = o_custkey
+        AND o_comment NOT LIKE '%urgent%'
+    GROUP BY
+        c_custkey
+) AS c_orders
+GROUP BY
+    c_count
+ORDER BY
+    custdist DESC,
+    c_count DESC;
+----
+1	8
+2	2
+0	2
+
+# Test 2b: Q13-style query with inner aggregate grouping by NON-PK column
+# Tests: When inner aggregate groups by a regular column (not PU key), the INNER aggregate should be PAC-transformed
+# This is different from Test 2 where inner groups by c_custkey (PU key) and outer gets PAC-transformed
+# Here we group by c_nationkey (not a PU key), so inner aggregate gets pac_count, not outer
+query II
+SELECT
+    nation_order_count,
+    COUNT(*) AS nation_dist
+FROM (
+    SELECT
+        c_nationkey,
+        COUNT(o_orderkey) AS nation_order_count
+    FROM
+        customer
+    LEFT OUTER JOIN orders ON
+        c_custkey = o_custkey
+        AND o_comment NOT LIKE '%urgent%'
+    GROUP BY
+        c_nationkey
+) AS nation_orders
+GROUP BY
+    nation_order_count
+ORDER BY
+    nation_dist DESC,
+    nation_order_count DESC;
+----
+6	2
+2	1
+
+# Test 2c: Q13-style query with inner aggregate grouping by FK column (o_custkey)
+# Tests: When inner aggregate groups by FK to PU (o_custkey references c_custkey),
+# the OUTER aggregate should be PAC-transformed (same as grouping by PU key)
+# o_custkey is an FK to customer(c_custkey), so it uniquely identifies privacy units
+query II
+SELECT
+    cust_order_count,
+    COUNT(*) AS custdist
+FROM (
+    SELECT
+        o_custkey,
+        COUNT(o_orderkey) AS cust_order_count
+    FROM
+        orders
+    WHERE
+        o_comment NOT LIKE '%urgent%'
+    GROUP BY
+        o_custkey
+) AS cust_orders
+GROUP BY
+    cust_order_count
+ORDER BY
+    custdist DESC,
+    cust_order_count DESC;
+----
+1	6
+2	1
+
+# Test 3: TPC-H Q8-style query with CASE expression in outer aggregate
+# Tests: Nested query with subquery projection, CASE expression, division of aggregates
+# This query computes market share for a specific nation
+query II
+SELECT
+    o_year,
+    CAST(SUM(CASE WHEN nation = 'FRANCE' THEN volume ELSE 0 END) / SUM(volume) AS DECIMAL(5, 2)) AS mkt_share
+FROM (
+    SELECT
+        CAST(date_part('year', o_orderdate) AS INTEGER) AS o_year,
+        l_extendedprice * (1 - l_discount) AS volume,
+        n2.n_name AS nation
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation n1,
+        nation n2
+    WHERE
+        s_suppkey = l_suppkey
+        AND l_orderkey = o_orderkey
+        AND o_custkey = c_custkey
+        AND c_nationkey = n1.n_nationkey
+        AND s_nationkey = n2.n_nationkey
+        AND n1.n_name IN ('FRANCE', 'GERMANY')
+        AND o_orderdate BETWEEN CAST('1995-01-01' AS DATE) AND CAST('1996-12-31' AS DATE)
+) AS all_nations
+GROUP BY
+    o_year
+ORDER BY
+    o_year;
+----
+1995	0.31
+1996	0.75
+
+
+# Test 8: Q8 variation with different CASE condition
+query II
+SELECT
+    o_year,
+    SUM(CASE WHEN nation = 'GERMANY' THEN volume ELSE 0 END) AS germany_volume
+FROM (
+    SELECT
+        CAST(date_part('year', o_orderdate) AS INTEGER) AS o_year,
+        l_extendedprice * (1 - l_discount) AS volume,
+        n2.n_name AS nation
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation n1,
+        nation n2
+    WHERE
+        s_suppkey = l_suppkey
+        AND l_orderkey = o_orderkey
+        AND o_custkey = c_custkey
+        AND c_nationkey = n1.n_nationkey
+        AND s_nationkey = n2.n_nationkey
+        AND o_orderdate >= CAST('1995-01-01' AS DATE)
+        AND o_orderdate <= CAST('1996-12-31' AS DATE)
+) AS all_nations
+GROUP BY
+    o_year
+ORDER BY
+    o_year;
+----
+1995	15138.8160
+1996	6265.2416
+
+# Test 4: TPC-H Q9-style query with complex arithmetic in subquery
+# Tests: Subquery with multiple joins, complex arithmetic expression (subtraction of products), GROUP BY multiple columns
+# This query computes profit by nation and year
+query III
+SELECT
+    nation,
+    o_year,
+    SUM(amount) AS sum_profit
+FROM (
+    SELECT
+        n_name AS nation,
+        CAST(date_part('year', o_orderdate) AS INTEGER) AS o_year,
+        l_extendedprice * (1 - l_discount) - l_quantity * 100 AS amount
+    FROM
+        supplier,
+        lineitem,
+        orders,
+        customer,
+        nation
+    WHERE
+        s_suppkey = l_suppkey
+        AND o_orderkey = l_orderkey
+        AND o_custkey = c_custkey
+        AND s_nationkey = n_nationkey
+        AND o_orderdate BETWEEN CAST('1995-01-01' AS DATE) AND CAST('1996-12-31' AS DATE)
+) AS profit
+GROUP BY
+    nation,
+    o_year
+ORDER BY
+    nation,
+    o_year DESC;
+----
+FRANCE	1996	-919.1424
+FRANCE	1995	-99.9936
+GERMANY	1996	-119.9616
+GERMANY	1995	NULL
+
+# Test 5: TPC-H Q15-style query with CTE and subquery computing max from CTE
+# Tests: CTE with aggregate, subquery that computes max() from CTE (no base tables in subquery's scope)
+# This is the pattern that was causing binding errors - aggregate in subquery should NOT be converted to pac_max
+# because it operates on already-aggregated CTE data, not on base tables with privacy units
+query IIII
+WITH revenue AS (
+    SELECT
+        l_suppkey AS supplier_no,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM
+        lineitem
+            JOIN orders ON lineitem.l_orderkey = orders.o_orderkey
+    WHERE
+        l_shipdate >= CAST('1996-01-01' AS DATE)
+        AND l_shipdate < CAST('1996-04-01' AS DATE)
+    GROUP BY
+        l_suppkey
+)
+SELECT
+    s_suppkey,
+    s_name,
+    total_revenue,
+    NULL as placeholder
+FROM
+    supplier
+        JOIN revenue ON s_suppkey = supplier_no
+WHERE
+    total_revenue = (
+        SELECT max(total_revenue)
+        FROM revenue
+    )
+ORDER BY
+    s_suppkey;
+----
+3	Supplier#003	5387.0592	NULL
+
+# Clean up
+statement ok
+DROP TABLE lineitem;
+
+statement ok
+DROP TABLE orders;
+
+statement ok
+DROP TABLE supplier;
+
+statement ok
+DROP TABLE customer;
+
+statement ok
+DROP TABLE nation;
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# ============================================================
+# Test 6: Q13-style query on tables WITHOUT PRIMARY KEY constraints
+# Reproduces the sf30 / dbgen setup where tables have no SQL PK/FK
+# and PU key must be inferred from PAC_LINK referenced_columns.
+# ============================================================
+
+# Create tables without any PK or FK constraints (like dbgen output)
+statement ok
+CREATE TABLE customer_nopk(
+    c_custkey INTEGER,
+    c_name VARCHAR,
+    c_nationkey INTEGER
+);
+
+statement ok
+INSERT INTO customer_nopk VALUES
+    (1, 'Customer#001', 0),
+    (2, 'Customer#002', 1),
+    (3, 'Customer#003', 0),
+    (4, 'Customer#004', 1),
+    (5, 'Customer#005', 2),
+    (6, 'Customer#006', 0),
+    (7, 'Customer#007', 1),
+    (8, 'Customer#008', 2);
+
+statement ok
+CREATE TABLE orders_nopk(
+    o_orderkey INTEGER,
+    o_custkey INTEGER,
+    o_orderdate DATE,
+    o_comment VARCHAR
+);
+
+statement ok
+INSERT INTO orders_nopk VALUES
+    (1, 1, '1995-03-15', 'regular'),
+    (2, 2, '1995-06-20', 'urgent'),
+    (3, 3, '1995-09-10', 'regular'),
+    (4, 4, '1996-01-05', 'regular'),
+    (5, 5, '1996-04-12', 'urgent'),
+    (6, 1, '1996-07-18', 'regular'),
+    (7, 2, '1995-11-22', 'regular'),
+    (8, 3, '1996-03-30', 'urgent'),
+    (9, 6, '1995-05-14', 'regular'),
+    (10, 7, '1996-08-25', 'regular'),
+    (11, 1, '1995-12-01', 'urgent'),
+    (12, 8, '1996-02-17', 'regular');
+
+# Set PAC on customer (no PAC_KEY — PU key must be inferred from PAC_LINK)
+statement ok
+ALTER TABLE customer_nopk SET PAC;
+
+# Link orders to customer via PAC_LINK (this is how sf30 metadata works)
+statement ok
+ALTER PAC TABLE orders_nopk ADD PAC_LINK (o_custkey) REFERENCES customer_nopk(c_custkey);
+
+# Q13-style nested aggregate: inner groups by PU key, outer should get noised
+query II
+SELECT
+    c_count,
+    COUNT(*) AS custdist
+FROM (
+    SELECT
+        c_custkey,
+        COUNT(o_orderkey) AS c_count
+    FROM
+        customer_nopk
+    LEFT OUTER JOIN orders_nopk ON
+        c_custkey = o_custkey
+        AND o_comment NOT LIKE '%urgent%'
+    GROUP BY
+        c_custkey
+) AS c_orders
+GROUP BY
+    c_count
+ORDER BY
+    custdist DESC,
+    c_count DESC;
+----
+1	8
+2	2
+0	2
+
+statement ok
+DROP TABLE orders_nopk;
+
+statement ok
+DROP TABLE customer_nopk;

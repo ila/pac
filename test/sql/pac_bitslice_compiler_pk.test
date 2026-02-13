@@ -1,0 +1,112 @@
+# name: test/sql/pac_bitslice_compiler_pk.test
+# description: Test bitslice compiler queries when privacy-unit tables have primary keys (single & composite)
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+statement ok
+SET pac_deterministic_noise = true
+
+# Create two tables with 25 rows each and 5 groups (grp = i % 5)
+# Single-column primary key
+statement ok
+CREATE TABLE bitslice_pk_single(
+    id INTEGER PRIMARY KEY,
+    grp INTEGER,
+    val INTEGER,
+    grp2 INTEGER
+);
+
+statement ok
+INSERT INTO bitslice_pk_single
+SELECT i AS id, i % 5 AS grp, (i % 10) AS val, (i % 3) AS grp2
+FROM range(25) t(i);
+
+# Composite primary key (three columns)
+statement ok
+CREATE TABLE bitslice_pk_many(
+    pk1 INTEGER,
+    pk2 INTEGER,
+    pk3 INTEGER,
+    grp INTEGER,
+    val INTEGER,
+    PRIMARY KEY(pk1, pk2, pk3)
+);
+
+statement ok
+INSERT INTO bitslice_pk_many
+SELECT i AS pk1, (i % 7) AS pk2, (i % 11) AS pk3, i % 5 AS grp, (i % 10) AS val
+FROM range(25) t(i);
+
+statement ok
+ALTER TABLE bitslice_pk_single SET PAC;
+
+# Ungrouped SUM on single-PK table (should match distribution from no-pk test)
+query I
+SELECT SUM(val) FROM bitslice_pk_single
+----
+84
+
+# JOIN aggregation (no GROUP BY)
+query I
+SELECT SUM(a.val)
+FROM bitslice_pk_single a JOIN bitslice_pk_many b ON a.grp = b.grp
+----
+420
+
+# ========== LEFT JOIN TEST CASES ==========
+
+# Test LEFT JOIN with composite PK table on left
+query II
+SELECT b.pk1, SUM(COALESCE(a.val, 0))
+FROM bitslice_pk_many b
+LEFT JOIN bitslice_pk_single a ON b.grp = a.grp
+GROUP BY b.pk1
+ORDER BY b.pk1
+LIMIT 1
+----
+0	10
+
+# Test LEFT JOIN with aggregate on right table (composite PK)
+query III
+SELECT b.val, SUM(a.val), COUNT(b.pk1)
+FROM bitslice_pk_single a
+LEFT JOIN bitslice_pk_many b ON a.grp = b.grp AND b.grp > 2
+GROUP BY b.val
+ORDER BY b.val
+LIMIT 3
+----
+3	36	12
+4	126	24
+8	24	8
+
+# Test RIGHT JOIN with composite PK table on right, aggregating with condition
+query III
+SELECT b.pk1, COUNT(*), SUM(COALESCE(a.val, 0))
+FROM bitslice_pk_single a
+RIGHT JOIN bitslice_pk_many b ON a.grp = b.grp AND a.val > 3
+GROUP BY b.pk1
+ORDER BY b.pk1
+LIMIT 2
+----
+0	2	10
+1	2	12
+
+# Cleanup
+statement ok
+DROP TABLE bitslice_pk_single
+
+statement ok
+DROP TABLE bitslice_pk_many

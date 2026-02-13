@@ -1,0 +1,214 @@
+# name: test/sql/pac_count.test
+# description: Test pac_count aggregate function
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+statement ok
+PRAGMA enable_verification
+
+# Set deterministic seed for cross-CPU reproducibility
+statement ok
+SET pac_seed = 42
+
+statement ok
+SET pac_deterministic_noise = true
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0
+
+# Create test data with 4000 rows
+# rowid from 0-3999, value is rowid % 3 (so values 0, 1, 2)
+statement ok
+CREATE TABLE test_data AS
+SELECT i AS rowid, i % 3 AS value
+FROM range(4000) t(i)
+
+# Ungrouped pac_count - should return variance of 64 bit counters
+query I
+SELECT pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL FROM test_data
+----
+true
+
+# Verify ungrouped pac_count returns a bigint
+query I
+SELECT typeof(pac_count(hash(rowid)::UBIGINT, 1)) FROM test_data
+----
+BIGINT
+
+# Test with non-zero mi parameter (deterministic results due to pac_seed)
+statement ok
+SET pac_mi = 128
+
+query I
+SELECT pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL FROM test_data
+----
+true
+
+statement ok
+SET pac_mi = 0
+
+# Test with explicit mi parameter (0.0 for no noise)
+query I
+SELECT pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL FROM test_data
+----
+true
+
+# Grouped pac_count by value (0, 1, 2)
+# Each group has ~1333 rows
+query II
+SELECT value, pac_count(hash(rowid)::UBIGINT, 1) IS NOT NULL AS has_result
+FROM test_data
+GROUP BY value
+ORDER BY value
+----
+0	true
+1	true
+2	true
+
+# Verify grouped results return bigints
+query II
+SELECT value, typeof(pac_count(hash(rowid)::UBIGINT, 1)) AS result_type
+FROM test_data
+GROUP BY value
+ORDER BY value
+----
+0	BIGINT
+1	BIGINT
+2	BIGINT
+
+# Test with NULL values - should be handled correctly
+statement ok
+CREATE TABLE test_with_nulls AS
+SELECT i AS rowid, i % 3 AS value,
+       CASE WHEN i % 10 = 0 THEN NULL ELSE hash(i)::UBIGINT END AS key_hash
+FROM range(4000) t(i)
+
+query I
+SELECT pac_count(key_hash, 1) IS NOT NULL FROM test_with_nulls
+----
+true
+
+# Grouped with NULLs
+query II
+SELECT value, pac_count(key_hash, 1) IS NOT NULL AS has_result
+FROM test_with_nulls
+GROUP BY value
+ORDER BY value
+----
+0	true
+1	true
+2	true
+
+# ============================================================
+# Test pac_count(hash, column, mi) - counts non-null values in column
+# ============================================================
+
+# Create table with nullable column (every 3rd row is NULL)
+statement ok
+CREATE TABLE test_nullable AS
+SELECT i AS rowid,
+       CASE WHEN i % 3 = 0 THEN NULL ELSE i END AS nullable_col,
+       i * 2 AS non_null_col,
+       i % 4 AS grp
+FROM range(120) t(i)
+
+# Basic column count - should count non-null values only
+# 120 rows total, 40 NULLs (every 3rd), so ~80 non-null
+query I
+SELECT pac_count(hash(rowid)::UBIGINT, nullable_col) IS NOT NULL FROM test_nullable
+----
+true
+
+# Verify return type
+query I
+SELECT typeof(pac_count(hash(rowid)::UBIGINT, nullable_col)) FROM test_nullable
+----
+BIGINT
+
+# pac_count with column should return approximately COUNT(column)
+# COUNT(nullable_col) = 80, pac_count should be close
+query I
+SELECT abs(pac_count(hash(rowid)::UBIGINT, nullable_col) - COUNT(nullable_col)) < 20 FROM test_nullable
+----
+true
+
+# Column with no nulls (fast path) - should count all rows
+query I
+SELECT abs(pac_count(hash(rowid)::UBIGINT, non_null_col) - COUNT(non_null_col)) < 20 FROM test_nullable
+----
+true
+
+# Test with mi parameter: pac_count(hash, column, mi)
+query I
+SELECT pac_count(hash(rowid)::UBIGINT, nullable_col) IS NOT NULL FROM test_nullable
+----
+true
+
+# Grouped pac_count with column
+query II
+SELECT grp, pac_count(hash(rowid)::UBIGINT, nullable_col) IS NOT NULL AS has_result
+FROM test_nullable
+GROUP BY grp
+ORDER BY grp
+----
+0	true
+1	true
+2	true
+3	true
+
+# Grouped count comparison - each group has 30 rows, ~20 non-null
+query I
+SELECT COUNT(*) = 4 FROM (
+    SELECT grp, pac_count(hash(rowid)::UBIGINT, nullable_col) AS pc, COUNT(nullable_col) AS c
+    FROM test_nullable
+    GROUP BY grp
+    HAVING abs(pc - c) < 15
+)
+----
+true
+
+# Test all NULLs column - should return NULL (no valid rows counted)
+statement ok
+CREATE TABLE test_all_nulls AS
+SELECT i AS rowid, NULL::INTEGER AS all_null_col FROM range(100) t(i)
+
+query I
+SELECT pac_count(hash(rowid)::UBIGINT, all_null_col) IS NULL FROM test_all_nulls
+----
+true
+
+# ============================================================================
+# Sample diversity check tests
+# ============================================================================
+
+# Ungrouped: all rows hash to the same privacy unit → should trigger diversity error
+statement error
+SELECT pac_count(hash(5)::UBIGINT) FROM range(200) t(i)
+----
+detected absence of sample diversity
+
+# Grouped: each group has rows from the same privacy unit → should trigger diversity error
+statement error
+SELECT key, pac_count(hash(5)::UBIGINT) FROM (SELECT i % 3 AS key FROM range(600) t(i)) sub GROUP BY key
+----
+detected absence of sample diversity
+
+# Cleanup
+statement ok
+DROP TABLE test_data
+
+statement ok
+DROP TABLE test_with_nulls
+
+statement ok
+DROP TABLE test_nullable
+
+statement ok
+DROP TABLE test_all_nulls

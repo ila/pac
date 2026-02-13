@@ -1,0 +1,303 @@
+# name: test/sql/pac_projection_lambda.test
+# description: Test PAC lambda rewriting for SELECT list projections with multiple aggregates
+# group: [sql]
+
+# This tests the projection-based categorical pattern detection, which handles
+# queries like TPC-H Q08 where multiple PAC aggregates are combined in the SELECT list:
+#   SELECT sum(CASE...) / sum(volume) AS mkt_share
+#
+# Unlike filter-based categorical patterns (WHERE clause comparisons), these patterns
+# require lambda expressions to compute element-wise operations over LIST<DOUBLE> results.
+
+require pac
+
+# ============================================================================
+# Schema Setup - simplified TPC-H-like schema
+# ============================================================================
+
+statement ok
+CREATE TABLE customers (
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_nationkey INTEGER
+);
+
+statement ok
+CREATE TABLE orders (
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderdate DATE,
+    FOREIGN KEY (o_custkey) REFERENCES customers(c_custkey)
+);
+
+statement ok
+CREATE TABLE lineitem (
+    l_orderkey INTEGER,
+    l_linenumber INTEGER,
+    l_suppkey INTEGER,
+    l_extendedprice DOUBLE,
+    l_discount DOUBLE,
+    l_quantity INTEGER,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey)
+);
+
+statement ok
+CREATE TABLE suppliers (
+    s_suppkey INTEGER PRIMARY KEY,
+    s_name VARCHAR,
+    s_nationkey INTEGER
+);
+
+statement ok
+CREATE TABLE nations (
+    n_nationkey INTEGER PRIMARY KEY,
+    n_name VARCHAR
+);
+
+# ============================================================================
+# Test Data
+# ============================================================================
+
+statement ok
+INSERT INTO nations VALUES
+    (1, 'BRAZIL'),
+    (2, 'ARGENTINA'),
+    (3, 'PERU');
+
+statement ok
+INSERT INTO customers VALUES
+    (1, 'Customer A', 1),
+    (2, 'Customer B', 2),
+    (3, 'Customer C', 1),
+    (4, 'Customer D', 3);
+
+statement ok
+INSERT INTO suppliers VALUES
+    (1, 'Supplier X', 1),
+    (2, 'Supplier Y', 2),
+    (3, 'Supplier Z', 3);
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, '2024-01-15'),
+    (2, 1, '2024-02-20'),
+    (3, 2, '2024-01-10'),
+    (4, 3, '2024-03-05'),
+    (5, 4, '2024-02-28');
+
+statement ok
+INSERT INTO lineitem VALUES
+    -- Order 1: Customer A (Brazil), Supplier X (Brazil)
+    (1, 1, 1, 100.0, 0.10, 10),
+    (1, 2, 2, 200.0, 0.05, 20),
+    -- Order 2: Customer A (Brazil), Supplier Y (Argentina)
+    (2, 1, 2, 150.0, 0.00, 15),
+    -- Order 3: Customer B (Argentina), Supplier X (Brazil)
+    (3, 1, 1, 300.0, 0.10, 30),
+    (3, 2, 3, 50.0, 0.00, 5),
+    -- Order 4: Customer C (Brazil), Supplier Z (Peru)
+    (4, 1, 3, 200.0, 0.20, 20),
+    -- Order 5: Customer D (Peru), Supplier X (Brazil)
+    (5, 1, 1, 400.0, 0.15, 40);
+
+# ============================================================================
+# PAC Configuration
+# ============================================================================
+
+statement ok
+ALTER TABLE customers SET PAC;
+
+statement ok
+SET pac_seed = 42;
+
+statement ok
+SET pac_deterministic_noise = true;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET pac_mi = 0;
+
+# ============================================================================
+# Test 1: Simple ratio of two sums (Q08-like pattern)
+# sum(CASE WHEN nation='BRAZIL' THEN volume ELSE 0 END) / sum(volume)
+# Verify the rewriter uses pac_sum_counters, list_zip, list_transform, and pac_noised
+# ============================================================================
+
+query I nosort explain_test1
+EXPLAIN SELECT
+    s.s_nationkey,
+    sum(CASE WHEN n.n_name = 'BRAZIL' THEN l.l_extendedprice * (1 - l.l_discount) ELSE 0 END) /
+    sum(l.l_extendedprice * (1 - l.l_discount)) AS brazil_ratio
+FROM lineitem l, orders o, customers c, suppliers s, nations n
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+  AND l.l_suppkey = s.s_suppkey
+  AND s.s_nationkey = n.n_nationkey
+GROUP BY s.s_nationkey
+ORDER BY s.s_nationkey;
+----
+pac_sum_counters
+list_zip
+list_transform
+pac_noised
+
+# Test 1 query execution - verify it runs without error
+statement ok
+SELECT
+    s.s_nationkey,
+    sum(CASE WHEN n.n_name = 'BRAZIL' THEN l.l_extendedprice * (1 - l.l_discount) ELSE 0 END) /
+    sum(l.l_extendedprice * (1 - l.l_discount)) AS brazil_ratio
+FROM lineitem l, orders o, customers c, suppliers s, nations n
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+  AND l.l_suppkey = s.s_suppkey
+  AND s.s_nationkey = n.n_nationkey
+GROUP BY s.s_nationkey
+ORDER BY s.s_nationkey;
+
+# ============================================================================
+# Test 2: Difference of two sums
+# sum(high_value) - sum(low_value)
+# ============================================================================
+
+query I nosort explain_test2
+EXPLAIN SELECT
+    extract(month FROM o.o_orderdate) AS order_month,
+    sum(CASE WHEN l.l_extendedprice > 150 THEN l.l_extendedprice ELSE 0 END) -
+    sum(CASE WHEN l.l_extendedprice <= 150 THEN l.l_extendedprice ELSE 0 END) AS price_diff
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY order_month
+ORDER BY order_month;
+----
+pac_sum_counters
+list_zip
+list_transform
+pac_noised
+
+# Test 2 query execution
+statement ok
+SELECT
+    extract(month FROM o.o_orderdate) AS order_month,
+    sum(CASE WHEN l.l_extendedprice > 150 THEN l.l_extendedprice ELSE 0 END) -
+    sum(CASE WHEN l.l_extendedprice <= 150 THEN l.l_extendedprice ELSE 0 END) AS price_diff
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY order_month
+ORDER BY order_month;
+
+# ============================================================================
+# Test 3: Product of sums
+# sum(qty) * sum(price)
+# ============================================================================
+
+query I nosort explain_test3
+EXPLAIN SELECT
+    l.l_suppkey,
+    sum(l.l_quantity) * sum(l.l_extendedprice) AS qty_times_price
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY l.l_suppkey
+ORDER BY l.l_suppkey;
+----
+pac_sum_counters
+list_zip
+list_transform
+pac_noised
+
+# Test 3 query execution
+statement ok
+SELECT
+    l.l_suppkey,
+    sum(l.l_quantity) * sum(l.l_extendedprice) AS qty_times_price
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY l.l_suppkey
+ORDER BY l.l_suppkey;
+
+# ============================================================================
+# Test 4: Single aggregate with scalar arithmetic
+# sum(value) * 2 + 100
+# ============================================================================
+
+query I nosort explain_test4
+EXPLAIN SELECT
+    l.l_suppkey,
+    sum(l.l_extendedprice) * 2 + 100 AS scaled_sum
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY l.l_suppkey
+ORDER BY l.l_suppkey;
+----
+pac_sum_counters
+list_transform
+pac_noised
+
+# Test 4 query execution
+statement ok
+SELECT
+    l.l_suppkey,
+    sum(l.l_extendedprice) * 2 + 100 AS scaled_sum
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY l.l_suppkey
+ORDER BY l.l_suppkey;
+
+# ============================================================================
+# Test 5: Addition of two sums (simpler than division)
+# sum(a) + sum(b)
+# ============================================================================
+
+query I nosort explain_test5
+EXPLAIN SELECT
+    l.l_suppkey,
+    sum(l.l_extendedprice) + sum(l.l_quantity) AS total
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY l.l_suppkey
+ORDER BY l.l_suppkey;
+----
+pac_sum_counters
+list_zip
+list_transform
+pac_noised
+
+# Test 5 query execution
+statement ok
+SELECT
+    l.l_suppkey,
+    sum(l.l_extendedprice) + sum(l.l_quantity) AS total
+FROM lineitem l, orders o, customers c
+WHERE l.l_orderkey = o.o_orderkey
+  AND o.o_custkey = c.c_custkey
+GROUP BY l.l_suppkey
+ORDER BY l.l_suppkey;
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+statement ok
+DROP TABLE lineitem;
+
+statement ok
+DROP TABLE orders;
+
+statement ok
+DROP TABLE customers;
+
+statement ok
+DROP TABLE suppliers;
+
+statement ok
+DROP TABLE nations;

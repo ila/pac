@@ -1,0 +1,643 @@
+# name: test/sql/pac_categorical_subqueries.test
+# description: Test PAC categorical queries - outer queries that compare against inner PAC aggregates
+# group: [sql]
+
+require pac
+
+statement ok
+PRAGMA clear_pac_metadata;
+
+# Categorical queries are queries where:
+# - An inner subquery contains a PAC aggregate (e.g., pac_sum, pac_count)
+# - The outer query compares the aggregate result without its own aggregate
+# - Example: WHERE value > (SELECT 0.5 * pac_sum(...) FROM ...)
+#
+# These require special handling:
+# - Inner PAC aggregate returns all 64 counters (pac_*_counters variant)
+# - Comparison becomes pac_gt/pac_lt/etc. returning a 64-bit mask
+# - Final selection uses pac_filter() for probabilistic filtering
+
+# ============================================================================
+# Schema Setup - TPC-H style schema with customer as privacy unit
+# ============================================================================
+
+statement ok
+CREATE TABLE customer (
+    c_custkey INTEGER PRIMARY KEY,
+    c_name VARCHAR,
+    c_nationkey INTEGER,
+    c_acctbal DECIMAL(15,2)
+);
+
+statement ok
+CREATE TABLE nation (
+    n_nationkey INTEGER PRIMARY KEY,
+    n_name VARCHAR
+);
+
+statement ok
+CREATE TABLE supplier (
+    s_suppkey INTEGER PRIMARY KEY,
+    s_name VARCHAR,
+    s_address VARCHAR,
+    s_nationkey INTEGER,
+    FOREIGN KEY (s_nationkey) REFERENCES nation(n_nationkey)
+);
+
+statement ok
+CREATE TABLE part (
+    p_partkey INTEGER PRIMARY KEY,
+    p_name VARCHAR,
+    p_type VARCHAR
+);
+
+statement ok
+CREATE TABLE partsupp (
+    ps_partkey INTEGER,
+    ps_suppkey INTEGER,
+    ps_availqty INTEGER,
+    ps_supplycost DECIMAL(15,2),
+    PRIMARY KEY (ps_partkey, ps_suppkey),
+    FOREIGN KEY (ps_partkey) REFERENCES part(p_partkey),
+    FOREIGN KEY (ps_suppkey) REFERENCES supplier(s_suppkey)
+);
+
+statement ok
+CREATE TABLE orders (
+    o_orderkey INTEGER PRIMARY KEY,
+    o_custkey INTEGER,
+    o_orderstatus VARCHAR,
+    o_totalprice DECIMAL(15,2),
+    o_orderdate DATE,
+    FOREIGN KEY (o_custkey) REFERENCES customer(c_custkey)
+);
+
+statement ok
+CREATE TABLE lineitem (
+    l_orderkey INTEGER,
+    l_partkey INTEGER,
+    l_suppkey INTEGER,
+    l_linenumber INTEGER,
+    l_quantity DECIMAL(15,2),
+    l_extendedprice DECIMAL(15,2),
+    l_discount DECIMAL(15,2),
+    l_shipdate DATE,
+    PRIMARY KEY (l_orderkey, l_linenumber),
+    FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey),
+    FOREIGN KEY (l_partkey) REFERENCES part(p_partkey),
+    FOREIGN KEY (l_suppkey) REFERENCES supplier(s_suppkey)
+);
+
+# ============================================================================
+# Test Data - Insert sample data for testing
+# ============================================================================
+
+statement ok
+INSERT INTO nation VALUES
+    (1, 'CANADA'),
+    (2, 'UNITED STATES'),
+    (3, 'GERMANY');
+
+statement ok
+INSERT INTO customer VALUES
+    (1, 'Customer#1', 1, 1000.00),
+    (2, 'Customer#2', 1, 2000.00),
+    (3, 'Customer#3', 2, 3000.00),
+    (4, 'Customer#4', 2, 4000.00),
+    (5, 'Customer#5', 3, 5000.00);
+
+statement ok
+INSERT INTO supplier VALUES
+    (1, 'Supplier#1', 'Address1', 1),
+    (2, 'Supplier#2', 'Address2', 1),
+    (3, 'Supplier#3', 'Address3', 2),
+    (4, 'Supplier#4', 'Address4', 3);
+
+statement ok
+INSERT INTO part VALUES
+    (1, 'forest green', 'TYPE1'),
+    (2, 'forest blue', 'TYPE2'),
+    (3, 'ocean red', 'TYPE1'),
+    (4, 'forest yellow', 'TYPE3');
+
+statement ok
+INSERT INTO partsupp VALUES
+    (1, 1, 100, 10.00),
+    (1, 2, 50, 15.00),
+    (2, 1, 200, 20.00),
+    (2, 3, 75, 25.00),
+    (3, 2, 150, 12.00),
+    (4, 4, 300, 30.00);
+
+statement ok
+INSERT INTO orders VALUES
+    (1, 1, 'O', 1000.00, '1994-03-15'),
+    (2, 1, 'O', 2000.00, '1994-06-01'),
+    (3, 2, 'O', 1500.00, '1994-04-20'),
+    (4, 3, 'F', 3000.00, '1994-08-15'),
+    (5, 4, 'O', 2500.00, '1994-02-01'),
+    (6, 5, 'O', 4000.00, '1993-12-15');
+
+statement ok
+INSERT INTO lineitem VALUES
+    -- Part 1 data (forest green) - need avg(price/qty) > 10 (supplycost for partsupp 1,1)
+    -- Part 1, Supplier 1: availqty=100, supplycost=10.00
+    (1, 1, 1, 1, 10, 500.00, 0.05, '1994-04-01'),   -- price/qty = 50
+    (2, 1, 1, 1, 10, 500.00, 0.10, '1994-07-01'),   -- price/qty = 50
+    (5, 1, 1, 1, 10, 500.00, 0.05, '1994-03-01'),   -- price/qty = 50
+    -- Part 1, Supplier 2: availqty=50, supplycost=15.00
+    (1, 1, 2, 2, 5, 400.00, 0.05, '1994-04-15'),    -- price/qty = 80
+    (3, 1, 2, 1, 5, 400.00, 0.08, '1994-05-10'),    -- price/qty = 80
+    (2, 2, 1, 2, 10, 600.00, 0.05, '1994-06-20'),   -- price/qty = 60
+    (4, 2, 1, 1, 10, 600.00, 0.10, '1994-09-01'),   -- price/qty = 60
+    -- Part 2, Supplier 3: availqty=75, supplycost=25.00
+    (3, 2, 3, 2, 5, 300.00, 0.05, '1994-05-15'),    -- price/qty = 60
+    (5, 2, 3, 2, 5, 300.00, 0.10, '1994-02-15'),    -- price/qty = 60
+    (3, 3, 2, 3, 20, 1000.00, 0.05, '1994-05-20'),  -- price/qty = 50
+    (4, 3, 2, 2, 20, 1000.00, 0.05, '1994-08-25'),  -- price/qty = 50
+    (4, 4, 4, 3, 15, 600.00, 0.05, '1994-08-20'),   -- price/qty = 40
+    (6, 4, 4, 1, 15, 600.00, 0.05, '1993-12-20'),   -- price/qty = 40
+    (1, 1, 1, 3, 8, 400.00, 0.05, '1994-04-03'),
+    (1, 2, 1, 4, 8, 480.00, 0.05, '1994-04-04'),
+    (2, 1, 1, 3, 8, 400.00, 0.05, '1994-07-03'),
+    (2, 2, 1, 4, 8, 480.00, 0.05, '1994-07-04'),
+    (3, 1, 2, 4, 8, 400.00, 0.05, '1994-05-12'),
+    (3, 2, 3, 5, 8, 480.00, 0.05, '1994-05-17'),
+    (4, 2, 1, 4, 8, 400.00, 0.05, '1994-09-03'),
+    (4, 3, 2, 5, 8, 400.00, 0.05, '1994-08-27'),
+    (5, 1, 1, 3, 8, 400.00, 0.05, '1994-03-03'),
+    (5, 2, 3, 4, 8, 480.00, 0.05, '1994-02-17'),
+    (6, 4, 4, 2, 8, 400.00, 0.05, '1993-12-22');
+
+# ============================================================================
+# PAC Configuration
+# ============================================================================
+
+statement ok
+ALTER TABLE customer SET PAC;
+
+statement ok
+SET pac_seed = 42;
+
+statement ok
+SET pac_deterministic_noise = true;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET pac_mi = 0;
+
+
+# ============================================================================
+# Test 1: Basic categorical query - Q20 style (greater than comparison)
+# Find suppliers where partsupp availability exceeds threshold based on lineitem quantity
+# ============================================================================
+
+# This is a simplified Q20-style query:
+# WHERE ps_availqty > (SELECT 0.5 * sum(l_quantity) FROM lineitem WHERE ...)
+query II
+SELECT
+    s_name,
+    s_address
+FROM
+    supplier
+    JOIN nation ON s_nationkey = n_nationkey
+WHERE
+    s_suppkey IN (
+        SELECT
+            ps_suppkey
+        FROM
+            partsupp
+        WHERE
+            ps_partkey IN (
+                SELECT p_partkey FROM part WHERE p_name LIKE 'forest%'
+            )
+            AND ps_availqty > (
+                SELECT
+                    0.5 * sum(l_quantity)
+                FROM
+                    lineitem
+                    JOIN orders ON l_orderkey = o_orderkey
+                WHERE
+                    l_partkey = ps_partkey
+                    AND l_suppkey = ps_suppkey
+                    AND l_shipdate >= DATE '1994-01-01'
+                    AND l_shipdate < DATE '1995-01-01'
+            )
+    )
+    AND n_name = 'CANADA'
+ORDER BY
+    s_name;
+----
+Supplier#1	Address1
+Supplier#2	Address2
+
+# ============================================================================
+# Test 2: Less than comparison in categorical query
+# Find parts where average order quantity is less than a threshold
+# ============================================================================
+
+query II
+SELECT
+    p_partkey,
+    p_name
+FROM
+    part
+WHERE
+    p_partkey IN (
+        SELECT
+            l_partkey
+        FROM
+            lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+        WHERE
+            l_quantity < (
+                SELECT
+                    avg(l2.l_quantity)
+                FROM
+                    lineitem l2
+                    JOIN orders o2 ON l2.l_orderkey = o2.o_orderkey
+                WHERE
+                    l2.l_partkey = lineitem.l_partkey
+            )
+        GROUP BY l_partkey
+    )
+ORDER BY
+    p_partkey;
+----
+1	forest green
+2	forest blue
+3	ocean red
+4	forest yellow
+
+# ============================================================================
+# Test 3: Greater than or equal comparison
+# Find suppliers with high-value lineitems
+# The query involves HAVING with a scalar subquery containing PAC aggregates.
+# ============================================================================
+
+query I
+SELECT
+    s_suppkey
+FROM
+    supplier
+WHERE
+    s_suppkey IN (
+        SELECT
+            l_suppkey
+        FROM
+            lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+        GROUP BY l_suppkey
+        HAVING sum(l_extendedprice) >= (
+            SELECT
+                0.2 * sum(l2.l_extendedprice)
+            FROM
+                lineitem l2
+                JOIN orders o2 ON l2.l_orderkey = o2.o_orderkey
+        )
+    )
+ORDER BY
+    s_suppkey;
+----
+1
+2
+
+# ============================================================================
+# Test 4: Less than or equal comparison
+# Find suppliers whose total lineitem value is at or below average
+# (Replaced customer-based query which violated PAC rules - can't access privacy unit directly)
+# NOTE: Result is 2 with PAC's counter-based aggregation due to boundary effects
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        s_suppkey
+    FROM
+        supplier
+    WHERE
+        (
+            SELECT sum(l_extendedprice)
+            FROM lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+            WHERE l_suppkey = s_suppkey
+        ) <= (
+            SELECT avg(total) FROM (
+                SELECT sum(l_extendedprice) as total
+                FROM lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+                GROUP BY l_suppkey
+            )
+        )
+);
+----
+2
+
+# ============================================================================
+# Test 5: Equal comparison (rare but should work)
+# This is unlikely to match due to floating point, but tests the path
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        ps_partkey
+    FROM
+        partsupp
+    WHERE
+        ps_availqty = (
+            SELECT
+                sum(l_quantity)::INTEGER
+            FROM
+                lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+            WHERE
+                l_partkey = ps_partkey
+                AND l_suppkey = ps_suppkey
+        )
+);
+----
+0
+
+# ============================================================================
+# Test 6: Not equal comparison
+# Find partsupps where availability differs from sum of quantities
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        ps_partkey,
+        ps_suppkey
+    FROM
+        partsupp
+    WHERE
+        ps_availqty <> (
+            SELECT
+                coalesce(sum(l_quantity), 0)::INTEGER
+            FROM
+                lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+            WHERE
+                l_partkey = ps_partkey
+                AND l_suppkey = ps_suppkey
+        )
+);
+----
+6
+
+# ============================================================================
+# Test 7: Multiple categorical comparisons in same query
+# Combines > and < comparisons
+# ============================================================================
+
+query II
+SELECT
+    p_partkey,
+    p_name
+FROM
+    part
+WHERE
+    p_partkey IN (
+        SELECT ps_partkey
+        FROM partsupp
+        WHERE
+            ps_availqty > (
+                SELECT 0.3 * sum(l_quantity)
+                FROM lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+                WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey
+            )
+            AND ps_supplycost < (
+                SELECT avg(l_extendedprice / l_quantity)
+                FROM lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+                WHERE l_partkey = ps_partkey
+            )
+    )
+ORDER BY
+    p_partkey;
+----
+1	forest green
+2	forest blue
+3	ocean red
+4	forest yellow
+
+# Note: Part 4 (forest yellow) is included because with corrected pac_avg
+# (2x compensation for 50% sampling), the avg(l_extendedprice/l_quantity)
+# values are correct, and ps_supplycost=30 < avg ~= 43.33 evaluates to TRUE.
+
+# ============================================================================
+# Test 8: Nested subqueries with categorical comparison
+# Similar to Q20 with nested IN clauses
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        s_suppkey
+    FROM
+        supplier
+    WHERE
+        s_suppkey IN (
+            SELECT ps_suppkey
+            FROM partsupp
+            WHERE
+                ps_partkey IN (
+                    SELECT p_partkey
+                    FROM part
+                    WHERE p_type = 'TYPE1'
+                )
+                AND ps_availqty > (
+                    SELECT 0.5 * sum(l_quantity)
+                    FROM lineitem
+                    JOIN orders ON l_orderkey = o_orderkey
+                    WHERE l_partkey = ps_partkey
+                      AND l_suppkey = ps_suppkey
+                )
+        )
+);
+----
+2
+
+# ============================================================================
+# Test 9: Categorical with arithmetic on aggregate result
+# WHERE value > (SELECT factor * aggregate FROM ...)
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        ps_partkey,
+        ps_suppkey
+    FROM
+        partsupp
+    WHERE
+        ps_availqty * 0.5 > (
+            SELECT
+                0.25 * sum(l_quantity)
+            FROM
+                lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+            WHERE
+                l_partkey = ps_partkey
+                AND l_suppkey = ps_suppkey
+        )
+);
+----
+6
+
+# ============================================================================
+# Test 10: Categorical with COUNT aggregate
+# NOTE: Result is 1 because only supplier 1 (count=11) exceeds avg count (6)
+# The counter-based comparison uses pac_filter to determine pass/fail
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        s_suppkey
+    FROM
+        supplier
+    WHERE
+        (
+            SELECT count(*)
+            FROM lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+            WHERE l_suppkey = s_suppkey
+        ) > (
+            SELECT avg(cnt) FROM (
+                SELECT count(*) as cnt
+                FROM lineitem
+                JOIN orders ON l_orderkey = o_orderkey
+                GROUP BY l_suppkey
+            )
+        )
+);
+----
+1
+
+# ============================================================================
+# Test 11: Categorical with AVG aggregate
+# Find parts where avg quantity exceeds threshold
+# NOTE: Result is 3 with PAC's counter-based aggregation due to noise
+# affecting the borderline case (part 2: avg 7.78 vs threshold 7.6)
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        p_partkey
+    FROM
+        part
+    WHERE
+        (
+            SELECT avg(l_quantity)
+            FROM lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+            WHERE l_partkey = p_partkey
+        ) > (
+            SELECT 0.8 * avg(l_quantity)
+            FROM lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+        )
+);
+----
+4
+
+# ============================================================================
+# Test 12: Correlated categorical subquery with multiple tables
+# Full Q20-style query with all components
+# ============================================================================
+
+query II
+SELECT
+    s_name,
+    s_address
+FROM
+    supplier
+    JOIN nation ON s_nationkey = n_nationkey
+WHERE
+    s_suppkey IN (
+        SELECT
+            ps_suppkey
+        FROM
+            partsupp
+            JOIN part ON ps_partkey = p_partkey
+        WHERE
+            p_name LIKE 'forest%'
+            AND ps_availqty > (
+                SELECT
+                    0.5 * sum(l_quantity)
+                FROM
+                    lineitem
+                    JOIN orders ON l_orderkey = o_orderkey
+                WHERE
+                    l_partkey = ps_partkey
+                    AND l_suppkey = ps_suppkey
+                    AND l_shipdate >= DATE '1994-01-01'
+                    AND l_shipdate < DATE '1995-01-01'
+            )
+    )
+    AND n_name = 'CANADA'
+ORDER BY
+    s_name;
+----
+Supplier#1	Address1
+Supplier#2	Address2
+
+# ============================================================================
+# Test 13: Categorical with NULL handling 
+# The pattern `coalesce((SELECT pac_agg(...)), default_value)` at the filter
+# level doesn't work correctly because after PAC transformation, the subquery
+# returns LIST<DOUBLE> and coalesce(LIST, scalar) isn't valid.
+# For proper NULL handling, use COALESCE inside the subquery instead:
+#   SELECT coalesce(sum(...), 0) FROM ...
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+    SELECT
+        ps_partkey
+    FROM
+        partsupp
+    WHERE
+        ps_availqty > coalesce((
+            SELECT sum(l_quantity)
+            FROM lineitem
+            JOIN orders ON l_orderkey = o_orderkey
+            WHERE l_partkey = ps_partkey
+              AND l_suppkey = ps_suppkey
+              AND l_shipdate > DATE '2000-01-01'  -- No matching rows
+        ), 0)
+);
+----
+6
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+statement ok
+DROP TABLE lineitem;
+
+statement ok
+DROP TABLE orders;
+
+statement ok
+DROP TABLE partsupp;
+
+statement ok
+DROP TABLE part;
+
+statement ok
+DROP TABLE supplier;
+
+statement ok
+DROP TABLE nation;
+
+statement ok
+DROP TABLE customer;
+
