@@ -18,22 +18,7 @@
 #include <random>
 #include <cmath>
 
-#ifdef _MSC_VER
-#include <intrin.h>
-#endif
-
 namespace duckdb {
-
-// ============================================================================
-// Cross-platform popcount helper
-// ============================================================================
-static inline int Popcount64(uint64_t x) {
-#ifdef _MSC_VER
-	return static_cast<int>(__popcnt64(x));
-#else
-	return __builtin_popcountll(x);
-#endif
-}
 
 // ============================================================================
 // Bind data for PAC categorical functions
@@ -89,372 +74,9 @@ PacCategoricalInitLocal(ExpressionState &state, const BoundFunctionExpression &e
 	return make_uniq<PacCategoricalLocalState>(seed);
 }
 
-// ============================================================================
-// Helper: Convert list<bool> to UBIGINT mask
-// ============================================================================
-// NULL and false both result in bit=0, true results in bit=1
-static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVectorFormat &child_data,
-                                      const bool *child_values, idx_t list_idx) {
-	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-	auto &entry = list_entries[list_idx];
-
-	uint64_t mask = 0;
-	idx_t len = entry.length > 64 ? 64 : entry.length; // cap at 64
-	for (idx_t j = 0; j < len; j++) {
-		auto child_idx = child_data.sel->get_index(entry.offset + j);
-		// Only set bit if valid AND true; NULL is treated as false
-		if (child_data.validity.RowIsValid(child_idx) && child_values[child_idx]) {
-			mask |= (1ULL << j);
-		}
-	}
-	return mask;
-}
-
-// ============================================================================
-// Helper: Common filter logic for mask-based filtering
-// ============================================================================
-// Returns true with probability proportional to popcount(mask)/64
-// mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
-// correction: considers correction times more non-nulls (increases true probability)
-// When mi <= 0: deterministic, true when popcount(mask) * correction >= 32
-// When mi > 0: probabilistic, P(true) = popcount(mask) * correction / 64
-static inline bool FilterFromMask(uint64_t mask, double mi, double correction, std::mt19937_64 &gen) {
-	int popcount = Popcount64(mask);
-	double effective_popcount = popcount * correction;
-
-	if (mi <= 0.0) {
-		// Deterministic mode: true when effective_popcount >= 32
-		return effective_popcount >= 32.0;
-	} else {
-		// Probabilistic mode: P(true) = effective_popcount / 64
-		// Equivalently: true if popcount > threshold, where threshold is in [0, 64/correction)
-		uint64_t range = static_cast<uint64_t>(64.0 / correction);
-		if (range == 0) {
-			return true; // correction is very large, always return true
-		}
-		int threshold = static_cast<int>(gen() % range);
-		return popcount > threshold;
-	}
-}
-
-// ============================================================================
-// PAC_SELECT: Convert list<bool> to UBIGINT mask
-// ============================================================================
-// pac_select(list<bool>) -> UBIGINT
-// Converts a list of booleans to a bitmask where true=1, false/NULL=0
-static void PacSelectFromBoolListFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &list_vec = args.data[0];
-	idx_t count = args.size();
-
-	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	auto &child_vec = ListVector::GetEntry(list_vec);
-	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
-	auto child_values = UnifiedVectorFormat::GetData<bool>(child_data);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto list_idx = list_data.sel->get_index(i);
-
-		if (!list_data.validity.RowIsValid(list_idx)) {
-			// NULL list -> NULL mask
-			result_validity.SetInvalid(i);
-			continue;
-		}
-
-		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-		auto &entry = list_entries[list_idx];
-
-		// Empty list -> mask of 0
-		if (entry.length == 0) {
-			result_data[i] = 0;
-			continue;
-		}
-
-		result_data[i] = BoolListToMask(list_data, child_data, child_values, list_idx);
-	}
-}
-
-// ============================================================================
-// PAC_FILTER: Probabilistically filter based on mask
-// ============================================================================
-struct PacFilterParams {
-	double mi;
-	double correction;
-	std::mt19937_64 &gen;
-};
-
-static PacFilterParams GetPacFilterParams(ExpressionState &state) {
-	auto &local_state = ExecuteFunctionState::GetFunctionState(state)->Cast<PacCategoricalLocalState>();
-	double mi = 0.0;
-	double correction = 1.0;
-	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (function.bind_info) {
-		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
-		mi = bind_data.mi;
-		correction = bind_data.correction;
-	}
-	return {mi, correction, local_state.gen};
-}
-
-// pac_filter(UBIGINT mask) -> BOOLEAN
-// pac_filter(UBIGINT mask, DOUBLE correction) -> BOOLEAN (explicit correction parameter)
-template <bool HAS_CORRECTION_ARG>
-static void PacFilterFromMaskImpl(DataChunk &args, ExpressionState &state, Vector &result) {
-	idx_t count = args.size();
-	auto params = GetPacFilterParams(state);
-
-	UnifiedVectorFormat mask_data;
-	args.data[0].ToUnifiedFormat(count, mask_data);
-	auto masks = UnifiedVectorFormat::GetData<uint64_t>(mask_data);
-
-	UnifiedVectorFormat correction_data;
-	const double *corrections = nullptr;
-	if (HAS_CORRECTION_ARG) {
-		args.data[1].ToUnifiedFormat(count, correction_data);
-		corrections = UnifiedVectorFormat::GetData<double>(correction_data);
-	}
-
-	auto result_data = FlatVector::GetData<bool>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto mask_idx = mask_data.sel->get_index(i);
-
-		if (!mask_data.validity.RowIsValid(mask_idx)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
-
-		double correction = params.correction;
-		if (HAS_CORRECTION_ARG) {
-			auto corr_idx = correction_data.sel->get_index(i);
-			correction = correction_data.validity.RowIsValid(corr_idx) ? corrections[corr_idx] : 1.0;
-		}
-		result_data[i] = FilterFromMask(masks[mask_idx], params.mi, correction, params.gen);
-	}
-}
-
-// pac_filter(list<bool>) -> BOOLEAN
-// Converts list to mask, then applies filter logic
-static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &list_vec = args.data[0];
-	idx_t count = args.size();
-	auto params = GetPacFilterParams(state);
-
-	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-
-	auto result_data = FlatVector::GetData<bool>(result);
-
-	auto &child_vec = ListVector::GetEntry(list_vec);
-	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
-	auto child_values = UnifiedVectorFormat::GetData<bool>(child_data);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto list_idx = list_data.sel->get_index(i);
-
-		if (!list_data.validity.RowIsValid(list_idx)) {
-			// NULL list -> return false
-			result_data[i] = false;
-			continue;
-		}
-
-		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-		auto &entry = list_entries[list_idx];
-
-		// Empty list -> return false
-		if (entry.length == 0) {
-			result_data[i] = false;
-			continue;
-		}
-
-		uint64_t mask = BoolListToMask(list_data, child_data, child_values, list_idx);
-		result_data[i] = FilterFromMask(mask, params.mi, params.correction, params.gen);
-	}
-}
-
-// Forward declarations for functions used by pac_filter_<cmp> registration
+// Forward declaration
 static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
                                                    vector<unique_ptr<Expression>> &args);
-
-// ============================================================================
-// PAC_FILTER_<CMP>: Compare scalar against counter list and filter in one pass
-// ============================================================================
-// pac_filter_gt(val, counters) -> BOOLEAN : true if majority of counters satisfy val > counter
-// pac_filter_gte, pac_filter_lt, pac_filter_lte, pac_filter_eq, pac_filter_neq similarly
-// Optional 3rd arg: correction factor
-
-enum class PacFilterCmpOp { GT, GTE, LT, LTE, EQ, NEQ };
-
-template <PacFilterCmpOp CMP>
-static inline bool ComparePacFloat(PAC_FLOAT val, PAC_FLOAT counter) {
-	switch (CMP) {
-	case PacFilterCmpOp::GT:
-		return val > counter;
-	case PacFilterCmpOp::GTE:
-		return val >= counter;
-	case PacFilterCmpOp::LT:
-		return val < counter;
-	case PacFilterCmpOp::LTE:
-		return val <= counter;
-	case PacFilterCmpOp::EQ:
-		return val == counter;
-	case PacFilterCmpOp::NEQ:
-		return val != counter;
-	default:
-		return false;
-	}
-}
-
-template <PacFilterCmpOp CMP, bool HAS_CORRECTION_ARG>
-static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	idx_t count = args.size();
-	auto params = GetPacFilterParams(state);
-
-	// arg0: PAC_FLOAT scalar value, arg1: LIST<PAC_FLOAT> counters, arg2 (optional): PAC_FLOAT correction
-	UnifiedVectorFormat val_data;
-	args.data[0].ToUnifiedFormat(count, val_data);
-	auto vals = UnifiedVectorFormat::GetData<PAC_FLOAT>(val_data);
-
-	auto &list_vec = args.data[1];
-	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-
-	auto &child_vec = ListVector::GetEntry(list_vec);
-	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
-	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
-
-	UnifiedVectorFormat correction_data;
-	const PAC_FLOAT *corrections = nullptr;
-	if (HAS_CORRECTION_ARG) {
-		args.data[2].ToUnifiedFormat(count, correction_data);
-		corrections = UnifiedVectorFormat::GetData<PAC_FLOAT>(correction_data);
-	}
-
-	auto result_data = FlatVector::GetData<bool>(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto val_idx = val_data.sel->get_index(i);
-		auto list_idx = list_data.sel->get_index(i);
-
-		// NULL list or NULL scalar → false
-		if (!list_data.validity.RowIsValid(list_idx) || !val_data.validity.RowIsValid(val_idx)) {
-			result_data[i] = false;
-			continue;
-		}
-
-		PAC_FLOAT val = vals[val_idx];
-		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-		auto &entry = list_entries[list_idx];
-
-		if (entry.length == 0) {
-			result_data[i] = false;
-			continue;
-		}
-
-		// Build mask: compare val against each counter element
-		uint64_t mask = 0;
-		idx_t len = entry.length > 64 ? 64 : entry.length;
-		for (idx_t j = 0; j < len; j++) {
-			auto child_idx = child_data.sel->get_index(entry.offset + j);
-			if (child_data.validity.RowIsValid(child_idx) && ComparePacFloat<CMP>(val, child_values[child_idx])) {
-				mask |= (1ULL << j);
-			}
-		}
-
-		double correction = params.correction;
-		if (HAS_CORRECTION_ARG) {
-			auto corr_idx = correction_data.sel->get_index(i);
-			correction =
-			    correction_data.validity.RowIsValid(corr_idx) ? static_cast<double>(corrections[corr_idx]) : 1.0;
-		}
-		result_data[i] = FilterFromMask(mask, params.mi, correction, params.gen);
-	}
-}
-
-template <PacFilterCmpOp CMP>
-static void RegisterPacFilterCmp(ExtensionLoader &loader, const string &name) {
-	auto pf = PacFloatLogicalType();
-	auto ldt = LogicalType::LIST(pf);
-	// 2-arg: (PAC_FLOAT val, LIST<PAC_FLOAT> counters) → BOOLEAN
-	ScalarFunction f2(name, {pf, ldt}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, false>, PacCategoricalBind,
-	                  nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(f2);
-	// 3-arg: (PAC_FLOAT val, LIST<PAC_FLOAT> counters, PAC_FLOAT correction) → BOOLEAN
-	ScalarFunction f3(name, {pf, ldt, pf}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, true>, PacCategoricalBind,
-	                  nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(f3);
-}
-
-// ============================================================================
-// PAC_MASK_AND / PAC_MASK_OR: Combine two masks with binary operation
-// ============================================================================
-enum class MaskBinaryOp { AND, OR };
-
-template <MaskBinaryOp OP>
-static void PacMaskBinaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &mask1_vec = args.data[0];
-	auto &mask2_vec = args.data[1];
-	idx_t count = args.size();
-
-	UnifiedVectorFormat mask1_data, mask2_data;
-	mask1_vec.ToUnifiedFormat(count, mask1_data);
-	mask2_vec.ToUnifiedFormat(count, mask2_data);
-	auto masks1 = UnifiedVectorFormat::GetData<uint64_t>(mask1_data);
-	auto masks2 = UnifiedVectorFormat::GetData<uint64_t>(mask2_data);
-
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto idx1 = mask1_data.sel->get_index(i);
-		auto idx2 = mask2_data.sel->get_index(i);
-
-		if (!mask1_data.validity.RowIsValid(idx1) || !mask2_data.validity.RowIsValid(idx2)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
-
-		if (OP == MaskBinaryOp::AND) {
-			result_data[i] = masks1[idx1] & masks2[idx2];
-		} else {
-			result_data[i] = masks1[idx1] | masks2[idx2];
-		}
-	}
-}
-
-// ============================================================================
-// PAC_MASK_NOT: Negate a mask
-// ============================================================================
-static void PacMaskNotFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &mask_vec = args.data[0];
-	idx_t count = args.size();
-
-	UnifiedVectorFormat mask_data;
-	mask_vec.ToUnifiedFormat(count, mask_data);
-	auto masks = UnifiedVectorFormat::GetData<uint64_t>(mask_data);
-
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto idx = mask_data.sel->get_index(i);
-
-		if (!mask_data.validity.RowIsValid(idx)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
-
-		result_data[i] = ~masks[idx];
-	}
-}
 
 // ============================================================================
 // PAC_NOISED: Apply noise to a list of 64 counter values
@@ -466,8 +88,8 @@ static void PacMaskNotFunction(DataChunk &args, ExpressionState &state, Vector &
 // pac_coalesce(LIST<DOUBLE>) -> LIST<DOUBLE>
 // If the input list is NULL, returns a list of 64 NULL doubles.
 // Otherwise returns the input unchanged. This is needed because COALESCE
-// with a constant fallback list would have only 1 element, but pac_filter
-// needs exactly 64 for majority voting.
+// with a constant fallback list would have only 1 element, but pac_noised
+// needs exactly 64 for noise sampling.
 static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &input = args.data[0];
 	idx_t count = args.size();
@@ -651,7 +273,7 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 }
 
 // ============================================================================
-// Bind function for pac_filter/pac_select (reads pac_seed and pac_mi settings)
+// Bind function for pac_noised (reads pac_seed and pac_mi settings)
 // ============================================================================
 static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
                                                    vector<unique_ptr<Expression>> &args) {
@@ -1032,42 +654,6 @@ static AggregateFunction CreatePacListAggregate(const string &name) {
 // Registration
 // ============================================================================
 void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
-	auto list_bool_type = LogicalType::LIST(LogicalType::BOOLEAN);
-
-	// pac_select(list<bool>) -> UBIGINT : Convert list of booleans to bitmask
-	ScalarFunction pac_select_list("pac_select", {list_bool_type}, LogicalType::UBIGINT, PacSelectFromBoolListFunction,
-	                               PacCategoricalBind);
-	loader.RegisterFunction(pac_select_list);
-
-	// pac_filter(UBIGINT mask) -> BOOLEAN : Probabilistic filter from mask
-	ScalarFunction pac_filter_mask("pac_filter", {LogicalType::UBIGINT}, LogicalType::BOOLEAN,
-	                               PacFilterFromMaskImpl<false>, PacCategoricalBind, nullptr, nullptr,
-	                               PacCategoricalInitLocal);
-	loader.RegisterFunction(pac_filter_mask);
-
-	// pac_filter(UBIGINT mask, DOUBLE correction) -> BOOLEAN : With explicit correction parameter
-	ScalarFunction pac_filter_mask_correction("pac_filter", {LogicalType::UBIGINT, LogicalType::DOUBLE},
-	                                          LogicalType::BOOLEAN, PacFilterFromMaskImpl<true>, PacCategoricalBind,
-	                                          nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(pac_filter_mask_correction);
-
-	// pac_filter(list<bool>) -> BOOLEAN : Probabilistic filter from list (convenience)
-	ScalarFunction pac_filter_list("pac_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
-	                               PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(pac_filter_list);
-
-	// Mask combination functions (kept for potential future use)
-	ScalarFunction pac_mask_and("pac_mask_and", {LogicalType::UBIGINT, LogicalType::UBIGINT}, LogicalType::UBIGINT,
-	                            PacMaskBinaryFunction<MaskBinaryOp::AND>);
-	loader.RegisterFunction(pac_mask_and);
-
-	ScalarFunction pac_mask_or("pac_mask_or", {LogicalType::UBIGINT, LogicalType::UBIGINT}, LogicalType::UBIGINT,
-	                           PacMaskBinaryFunction<MaskBinaryOp::OR>);
-	loader.RegisterFunction(pac_mask_or);
-
-	ScalarFunction pac_mask_not("pac_mask_not", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacMaskNotFunction);
-	loader.RegisterFunction(pac_mask_not);
-
 	// pac_coalesce(list<PAC_FLOAT>) -> list<PAC_FLOAT> : Replace NULL list with 64 NULLs
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunction pac_coalesce("pac_coalesce", {list_double_type}, list_double_type, PacCoalesceFunction);
@@ -1078,14 +664,6 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	ScalarFunction pac_noised("pac_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
 	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(pac_noised);
-
-	// pac_filter_<cmp>: optimized comparison + filter in a single pass (no lambdas)
-	RegisterPacFilterCmp<PacFilterCmpOp::GT>(loader, "pac_filter_gt");
-	RegisterPacFilterCmp<PacFilterCmpOp::GTE>(loader, "pac_filter_gte");
-	RegisterPacFilterCmp<PacFilterCmpOp::LT>(loader, "pac_filter_lt");
-	RegisterPacFilterCmp<PacFilterCmpOp::LTE>(loader, "pac_filter_lte");
-	RegisterPacFilterCmp<PacFilterCmpOp::EQ>(loader, "pac_filter_eq");
-	RegisterPacFilterCmp<PacFilterCmpOp::NEQ>(loader, "pac_filter_neq");
 
 	// List aggregates: aggregate over LIST<DOUBLE> inputs element-wise
 	// These handle cases where PAC _counters results are used as input to another aggregate

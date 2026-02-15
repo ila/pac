@@ -14,12 +14,12 @@
 //
 // Rewriting:
 // - Replaces pac_* aggregates with pac_*_counters variants (return LIST<DOUBLE>)
-// - Wraps comparisons with pac_gt/pac_lt/etc. functions (return UBIGINT mask)
-// - Adds pac_filter at the outermost filter to make final probabilistic decision
+// - For filters/joins: algebraically simplifies comparisons, then noises the PAC side with pac_noised
+// - For projections: builds list_transform over counters, then pac_noised for final scalar value
 //
 // Example transformation for TPC-H Q20:
 //   BEFORE: ps_availqty > (SELECT 0.5 * pac_sum(hash, l_quantity) FROM ...)
-//   AFTER:  pac_filter(pac_gt(ps_availqty, (SELECT 0.5 * pac_sum_counters(hash, l_quantity) FROM ...)))
+//   AFTER:  ps_availqty > pac_noised((SELECT pac_sum_counters(hash, l_quantity) FROM ...)) * 0.5
 //
 // Created by ila on 1/23/26.
 //
@@ -94,12 +94,6 @@ struct CategoricalPatternInfo {
 	    : parent_op(nullptr), expr_index(0), has_pac_binding(false), original_return_type(LogicalType::DOUBLE),
 	      scalar_wrapper_op(nullptr) {
 	}
-};
-
-// The kind of wrapping to apply after BuildCounterListTransform
-enum class PacWrapKind {
-	PAC_NOISED, // Projection: list_transform -> pac_noised -> optional cast
-	PAC_FILTER  // Filter/Join: list_transform -> pac_filter
 };
 
 // Detect and rewrite categorical query patterns to use counters and mask-based selection.
@@ -195,7 +189,7 @@ static inline string GetStructFieldName(idx_t index) {
 }
 
 // Check if an expression is already wrapped in a categorical rewrite terminal function
-// This includes pac_noised, pac_filter, list_transform, and list_zip
+// This includes pac_noised, list_transform, and list_zip
 // These functions indicate that the expression has already been processed by categorical rewriting
 static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 	if (!expr) {
@@ -204,9 +198,8 @@ static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 	if (expr->type == ExpressionType::BOUND_FUNCTION) {
 		auto &func = expr->Cast<BoundFunctionExpression>();
 		// Check for all categorical rewrite terminal functions
-		if (func.function.name == "pac_noised" || func.function.name == "pac_filter" ||
-		    func.function.name == "pac_coalesce" || func.function.name == "list_transform" ||
-		    func.function.name == "list_zip" || StringUtil::StartsWith(func.function.name, "pac_filter_")) {
+		if (func.function.name == "pac_noised" || func.function.name == "pac_coalesce" ||
+		    func.function.name == "list_transform" || func.function.name == "list_zip") {
 			return true;
 		}
 	}
@@ -360,31 +353,11 @@ static inline LogicalOperator *StripScalarWrapperInPlace(unique_ptr<LogicalOpera
 }
 
 // ============================================================================
-// Algebraic simplification: try to emit pac_filter_<cmp> instead of lambda
+// Algebraic simplification for filter comparisons
 // ============================================================================
 // Given a comparison expression with one PAC binding, try to algebraically
-// move arithmetic from the list side to the scalar side, then emit a single
-// pac_filter_<cmp>(scalar, counters) call instead of list_transform + pac_filter.
-
-// Map ExpressionType comparison to pac_filter_<cmp> function name
-static inline const char *GetPacFilterCmpName(ExpressionType cmp_type) {
-	switch (cmp_type) {
-	case ExpressionType::COMPARE_GREATERTHAN:
-		return "pac_filter_gt";
-	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		return "pac_filter_gte";
-	case ExpressionType::COMPARE_LESSTHAN:
-		return "pac_filter_lt";
-	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		return "pac_filter_lte";
-	case ExpressionType::COMPARE_EQUAL:
-		return "pac_filter_eq";
-	case ExpressionType::COMPARE_NOTEQUAL:
-		return "pac_filter_neq";
-	default:
-		return nullptr;
-	}
-}
+// move arithmetic from the list side to the scalar side, then return the
+// simplified comparison. The PAC side is then noised with pac_noised.
 
 // Flip a comparison when swapping sides (PAC was on left, move to right)
 static inline ExpressionType FlipComparison(ExpressionType cmp_type) {

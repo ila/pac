@@ -170,7 +170,7 @@ OperatorFinalResultType PhysicalPacUtilitySummary::OperatorFinalize(Pipeline &pi
 	}
 	// Print to stderr
 	string msg = "utility=" + std::to_string(utility) + " recall=" + std::to_string(recall);
-		Printer::Print(msg);
+	Printer::Print(msg);
 	return OperatorFinalResultType::FINISHED;
 }
 

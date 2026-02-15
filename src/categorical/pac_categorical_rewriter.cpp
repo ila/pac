@@ -188,6 +188,14 @@ static LogicalOperator *FindScalarWrapperForBinding(const ColumnBinding &binding
 	return RecognizeDuckDBScalarWrapper(source_op) ? source_op : nullptr;
 }
 
+// Strip casts from an expression to find the underlying expression
+static Expression *StripCasts(Expression *expr) {
+	while (expr->type == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundCastExpression>().child.get();
+	}
+	return expr;
+}
+
 // Recursively search the plan for categorical patterns (plan-aware version)
 // Now detects ANY filter expression containing a PAC aggregate, not just comparisons
 void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *plan_root,
@@ -298,38 +306,18 @@ void FindCategoricalPatternsInOperator(LogicalOperator *op, LogicalOperator *pla
 			if (pac_bindings.empty()) {
 				continue;
 			}
-			// Check if this expression has arithmetic with PAC aggregates
-			// - Multiple PAC bindings (e.g., pac_sum(...) / pac_sum(...))
-			// - Or single PAC binding with arithmetic (e.g., pac_sum(...) * 0.5)
-			bool is_arithmetic_with_pac = false;
-			if (pac_bindings.size() >= 2) { // Multiple PAC aggregates - definitely needs lambda rewrite
-				is_arithmetic_with_pac = true;
-			} else if (pac_bindings.size() == 1) {
-				// Single aggregate - check if it's in an arithmetic expression (not just a column ref or simple cast)
-				if (expr->type != ExpressionType::BOUND_COLUMN_REF && expr->type != ExpressionType::OPERATOR_CAST) {
-					is_arithmetic_with_pac = true;
-				} else if (expr->type == ExpressionType::OPERATOR_CAST) {
-					// Check if cast contains arithmetic
-					auto &cast_expr = expr->Cast<BoundCastExpression>();
-					if (cast_expr.child->type != ExpressionType::BOUND_COLUMN_REF) {
-						is_arithmetic_with_pac = true;
-					}
-				}
+			if (!IsNumericalType(expr->return_type)) {
+				continue; // Only create pattern if result is numerical (pac_noised only works on numbers)
 			}
-			if (is_arithmetic_with_pac) {
-				if (!IsNumericalType(expr->return_type)) {
-					continue; // Only create pattern if result is numerical (pac_noised only works on numbers)
-				}
-				CategoricalPatternInfo info;
-				info.parent_op = op;
-				info.expr_index = i;
-				info.pac_binding = pac_bindings[0].binding;
-				info.has_pac_binding = true;
-				info.aggregate_name = pac_bindings[0].aggregate_name;
-				info.original_return_type = expr->return_type;
-				info.pac_bindings = std::move(pac_bindings);
-				patterns.push_back(std::move(info));
-			}
+			CategoricalPatternInfo info;
+			info.parent_op = op;
+			info.expr_index = i;
+			info.pac_binding = pac_bindings[0].binding;
+			info.has_pac_binding = true;
+			info.aggregate_name = pac_bindings[0].aggregate_name;
+			info.original_return_type = expr->return_type;
+			info.pac_bindings = std::move(pac_bindings);
+			patterns.push_back(std::move(info));
 		}
 	}
 	for (auto &child : op->children) {
@@ -807,7 +795,7 @@ static bool ExpressionContainsNullHandling(Expression *expr) {
 //   CloneForLambdaBody (multi mode) handles per-field type casting internally.
 //
 // Returns the list_transform expression, or nullptr on failure.
-// The caller wraps with pac_noised or pac_filter as needed.
+// The caller wraps with pac_noised as needed.
 static unique_ptr<Expression> BuildCounterListTransform(OptimizerExtensionInput &input,
                                                         const vector<PacBindingInfo> &pac_bindings,
                                                         Expression *expr_to_transform, LogicalOperator *plan_root,
@@ -890,19 +878,11 @@ static int FindPacChildIndex(Expression *expr, LogicalOperator *plan_root) {
 	return -1; // both or neither
 }
 
-// Strip casts from an expression to find the underlying column ref
-static Expression *StripCasts(Expression *expr) {
-	while (expr->type == ExpressionType::OPERATOR_CAST) {
-		expr = expr->Cast<BoundCastExpression>().child.get();
-	}
-	return expr;
-}
-
-/// Try to rewrite a filter comparison into pac_filter_<cmp>(scalar, counters).
-// Always returns the (possibly simplified) expression. If successful, the result is a
-// pac_filter_<cmp> call; otherwise it's a comparison with algebraically simplified operands
-// that the lambda path can still benefit from. Returns nullptr only if the expression is
-// not a comparison or doesn't have exactly one PAC binding (i.e., no work was possible).
+/// Try to algebraically simplify a filter comparison involving a PAC aggregate.
+// Moves arithmetic from the PAC (list) side to the scalar side so the PAC side
+// becomes a bare column ref. Always returns a BoundComparisonExpression on success.
+// Returns nullptr only if the expression is not a comparison or doesn't have
+// exactly one PAC binding (i.e., no work was possible).
 static unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input,
                                                          const vector<PacBindingInfo> &pac_bindings, Expression *expr,
                                                          LogicalOperator *plan_root) {
@@ -963,78 +943,186 @@ static unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput
 		}
 		list_side = func.children[pac_child]->Copy();
 	}
-	// After simplification, list_side should be a bare column ref (possibly through casts)
-	Expression *stripped = StripCasts(list_side.get());
-	if (stripped->type != ExpressionType::BOUND_COLUMN_REF) {
-		// Can't emit pac_filter_<cmp>, but return the simplified comparison
-		// so the lambda path benefits from the algebraic rewriting
-		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
-	}
-	// Verify the column ref traces to a PAC aggregate
-	auto &col_ref = stripped->Cast<BoundColumnRefExpression>();
-	string pac_name = TracePacAggregateFromBinding(col_ref.binding, plan_root);
-	if (pac_name.empty()) {
-		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
-	}
-	// Build pac_filter_<cmp>(scalar_side, counters)
-	const char *func_name = GetPacFilterCmpName(cmp_type);
-	if (!func_name) {
-		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
-	} // Cast scalar_side to PAC_FLOAT if needed
-	if (scalar_side->return_type != PacFloatLogicalType()) {
-		scalar_side = BoundCastExpression::AddDefaultCastToType(std::move(scalar_side), PacFloatLogicalType());
-	}
-	// Build counter list reference
-	auto counters_ref =
-	    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()), col_ref.binding);
-
-	return input.optimizer.BindScalarFunction(func_name, std::move(scalar_side), std::move(counters_ref));
+	// Return the (possibly simplified) comparison
+	return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
 }
 
-// Unified expression rewrite: build list_transform over PAC counters and wrap.
-// pac_bindings: all PAC aggregate bindings in the expression
-// expr: the expression to transform (boolean for filter, numeric for projection)
-// wrap_kind: determines terminal function and type parameters
-// target_type: for PAC_NOISED, cast result to this type (ignored for PAC_FILTER)
+// Forward declarations for filter/join rewriting
+static unique_ptr<Expression> NoisePacNumericExpr(OptimizerExtensionInput &input,
+                                                  const vector<PacBindingInfo> &pac_bindings, Expression *expr,
+                                                  LogicalOperator *plan_root);
 static unique_ptr<Expression> RewriteExpressionWithCounters(OptimizerExtensionInput &input,
                                                             const vector<PacBindingInfo> &pac_bindings,
                                                             Expression *expr, LogicalOperator *plan_root,
-                                                            PacWrapKind wrap_kind,
-                                                            const LogicalType &target_type = PacFloatLogicalType()) {
+                                                            const LogicalType &target_type = PacFloatLogicalType());
+
+// Rewrite a filter expression tree to noise PAC sides, preserving normal comparison operators.
+// For comparisons: algebraically simplify, then noise the PAC side with pac_noised.
+// For numeric sub-expressions: noise directly via NoisePacNumericExpr.
+// For non-numeric (AND/OR/NOT): recurse into children.
+static unique_ptr<Expression> RewriteFilterWithNoised(OptimizerExtensionInput &input,
+                                                      const vector<PacBindingInfo> &pac_bindings, Expression *expr,
+                                                      LogicalOperator *plan_root) {
+	// Comparison: algebraic simplification then noise PAC side(s)
+	if (expr->GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
+		auto simplified = TryRewriteFilterComparison(input, pac_bindings, expr, plan_root);
+		if (!simplified) {
+			simplified = expr->Copy();
+		}
+		auto &comp = simplified->Cast<BoundComparisonExpression>();
+		// Noise each side that has PAC bindings independently
+		auto left_bindings = FindAllPacBindingsInExpression(comp.left.get(), plan_root);
+		auto right_bindings = FindAllPacBindingsInExpression(comp.right.get(), plan_root);
+		if (!left_bindings.empty()) {
+			auto noised = NoisePacNumericExpr(input, left_bindings, comp.left.get(), plan_root);
+			if (noised) {
+				comp.left = std::move(noised);
+			}
+		}
+		if (!right_bindings.empty()) {
+			auto noised = NoisePacNumericExpr(input, right_bindings, comp.right.get(), plan_root);
+			if (noised) {
+				comp.right = std::move(noised);
+			}
+		}
+		// Reconcile types: after noising, PAC sides are DOUBLE but other side may be DECIMAL/INTEGER.
+		// Cast both to DOUBLE for a valid comparison.
+		if (comp.left->return_type != comp.right->return_type) {
+			if (comp.left->return_type != PacFloatLogicalType()) {
+				comp.left = BoundCastExpression::AddDefaultCastToType(std::move(comp.left), PacFloatLogicalType());
+			}
+			if (comp.right->return_type != PacFloatLogicalType()) {
+				comp.right = BoundCastExpression::AddDefaultCastToType(std::move(comp.right), PacFloatLogicalType());
+			}
+		}
+		return simplified;
+	}
+	// Numeric: noise directly
+	if (IsNumericalType(expr->return_type)) {
+		return NoisePacNumericExpr(input, pac_bindings, expr, plan_root);
+	}
+	// Non-numeric (AND/OR/etc): recurse into children
+	auto clone = expr->Copy();
+	bool changed = false;
+	ExpressionIterator::EnumerateChildren(*clone, [&](unique_ptr<Expression> &child) {
+		auto cb = FindAllPacBindingsInExpression(child.get(), plan_root);
+		if (!cb.empty()) {
+			auto r = RewriteFilterWithNoised(input, cb, child.get(), plan_root);
+			if (r) {
+				child = std::move(r);
+				changed = true;
+			}
+		}
+	});
+	return changed ? std::move(clone) : nullptr;
+}
+
+// Convert a _counters aggregate back to its plain pac_* variant in-place.
+// Traces the binding through projections to the source aggregate, rebinds it,
+// and fixes types along the way. Returns the new scalar type on success.
+static bool UndoCountersConversion(const ColumnBinding &binding, LogicalOperator *plan_root, ClientContext &context,
+                                   LogicalType &out_type) {
+	auto *source = FindOperatorByTableIndex(plan_root, binding.table_index);
+	if (!source) {
+		return false;
+	}
+	if (source->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &proj = source->Cast<LogicalProjection>();
+		if (binding.column_index >= proj.expressions.size()) {
+			return false;
+		}
+		auto &expr = proj.expressions[binding.column_index];
+		if (expr->type != ExpressionType::BOUND_COLUMN_REF) {
+			return false;
+		}
+		auto &inner = expr->Cast<BoundColumnRefExpression>();
+		if (!UndoCountersConversion(inner.binding, plan_root, context, out_type)) {
+			return false;
+		}
+		inner.return_type = out_type;
+		return true;
+	}
+	if (source->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &agg = source->Cast<LogicalAggregate>();
+		if (binding.table_index != agg.aggregate_index) {
+			return false;
+		}
+		if (binding.column_index >= agg.expressions.size()) {
+			return false;
+		}
+		auto &agg_expr = agg.expressions[binding.column_index];
+		if (agg_expr->type != ExpressionType::BOUND_AGGREGATE) {
+			return false;
+		}
+		auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
+		if (!IsPacCountersAggregate(bound_agg.function.name)) {
+			return false;
+		}
+		string plain_name = GetBasePacAggregateName(bound_agg.function.name);
+		vector<unique_ptr<Expression>> children;
+		for (auto &child : bound_agg.children) {
+			children.push_back(child->Copy());
+		}
+		auto new_agg = RebindAggregate(context, plain_name, std::move(children), bound_agg.IsDistinct());
+		if (!new_agg) {
+			return false;
+		}
+		out_type = new_agg->return_type;
+		agg.expressions[binding.column_index] = std::move(new_agg);
+		return true;
+	}
+	return false;
+}
+
+// Noise a numeric expression containing PAC bindings.
+// Bare col_ref: undo the _counters conversion back to plain pac_* (equivalent to pac_noised but cheaper).
+// Arithmetic: list_transform + pac_noised via existing BuildCounterListTransform path.
+static unique_ptr<Expression> NoisePacNumericExpr(OptimizerExtensionInput &input,
+                                                  const vector<PacBindingInfo> &pac_bindings, Expression *expr,
+                                                  LogicalOperator *plan_root) {
+	Expression *stripped = StripCasts(expr);
+	if (pac_bindings.size() == 1 && stripped->type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = stripped->Cast<BoundColumnRefExpression>();
+		// Bare col_ref to counters: convert back to plain pac_* (no lambda needed)
+		LogicalType plain_type;
+		if (UndoCountersConversion(col_ref.binding, plan_root, input.context, plain_type)) {
+			auto result = make_uniq<BoundColumnRefExpression>(col_ref.alias, plain_type, col_ref.binding);
+			if (expr->return_type != plain_type && expr->return_type.id() != LogicalTypeId::LIST) {
+				return BoundCastExpression::AddDefaultCastToType(std::move(result), expr->return_type);
+			}
+			return result;
+		}
+		// Fallback: wrap with pac_noised
+		auto counters =
+		    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()), col_ref.binding);
+		auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters));
+		if (expr->return_type != PacFloatLogicalType() && expr->return_type.id() != LogicalTypeId::LIST) {
+			noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), expr->return_type);
+		}
+		return noised;
+	}
+	// Arithmetic: list_transform + pac_noised via existing path
+	return RewriteExpressionWithCounters(input, pac_bindings, expr, plan_root);
+}
+
+// Build list_transform over PAC counters and wrap with pac_noised.
+// pac_bindings: all PAC aggregate bindings in the expression
+// expr: the expression to transform (numeric for projection)
+// target_type: cast result to this type if different from PAC_FLOAT
+static unique_ptr<Expression> RewriteExpressionWithCounters(OptimizerExtensionInput &input,
+                                                            const vector<PacBindingInfo> &pac_bindings,
+                                                            Expression *expr, LogicalOperator *plan_root,
+                                                            const LogicalType &target_type) {
 	if (pac_bindings.empty()) {
 		return nullptr;
 	}
-	// Try optimized pac_filter_<cmp> for filter comparisons (single binding, simple comparison).
-	// TryRewriteFilterComparison always returns the (possibly simplified) expression when it can
-	// do any work. Check if the result is a pac_filter_<cmp> call (full optimization succeeded)
-	// or a simplified comparison (partial — pass to lambda path which benefits from the rewriting).
-	unique_ptr<Expression> simplified_expr;
-	if (wrap_kind == PacWrapKind::PAC_FILTER) {
-		auto cmp_result = TryRewriteFilterComparison(input, pac_bindings, expr, plan_root);
-		if (cmp_result) {
-			if (cmp_result->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-				auto &func = cmp_result->Cast<BoundFunctionExpression>();
-				if (func.function.name.rfind("pac_filter_", 0) == 0) {
-					return cmp_result; // Full optimization to pac_filter_<cmp>
-				}
-			}
-			simplified_expr = std::move(cmp_result); // Partial simplification — use for the lambda path
-		}
-	}
-	Expression *expr_for_lambda = simplified_expr ? simplified_expr.get() : expr;
-	LogicalType result_element_type =
-	    (wrap_kind == PacWrapKind::PAC_NOISED) ? PacFloatLogicalType() : LogicalType::BOOLEAN;
-	auto list_expr = BuildCounterListTransform(input, pac_bindings, expr_for_lambda, plan_root, result_element_type);
+	auto list_expr = BuildCounterListTransform(input, pac_bindings, expr, plan_root, PacFloatLogicalType());
 	if (list_expr) {
-		if (wrap_kind == PacWrapKind::PAC_NOISED) {
-			auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(list_expr));
-			if (target_type != PacFloatLogicalType()) {
-				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
-			}
-			return noised;
-		} else {
-			return input.optimizer.BindScalarFunction("pac_filter", std::move(list_expr));
+		auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(list_expr));
+		if (target_type != PacFloatLogicalType()) {
+			noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
 		}
+		return noised;
 	}
 	return nullptr;
 }
@@ -1132,8 +1220,7 @@ static void RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 			}
 		}
 	} else {
-		auto result = RewriteExpressionWithCounters(input, pac_bindings, expr_to_clone, plan_root,
-		                                            PacWrapKind::PAC_NOISED, expr->return_type);
+		auto result = RewriteExpressionWithCounters(input, pac_bindings, expr_to_clone, plan_root, expr->return_type);
 		if (result) {
 			proj.expressions[i] = std::move(result);
 			proj.types[i] = expr->return_type;
@@ -1163,8 +1250,8 @@ static void InlineSavedExpressionsIntoExpr(unique_ptr<Expression> &expr,
 // Processes children first, then current operator. Handles:
 // - AGGREGATE: convert pac_sum → pac_sum_counters, then aggregate-over-counters → _list
 // - PROJECTION: update simple col_ref types, build list_transform + pac_noised for arithmetic
-// - FILTER (in rewrite_map): build list_transform + pac_filter
-// - JOIN (in rewrite_map): rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
+// - FILTER (in rewrite_map): noise PAC sides of comparisons with pac_noised
+// - JOIN (in rewrite_map): noise PAC sides of join conditions with pac_noised
 static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtensionInput &input,
                             unique_ptr<LogicalOperator> &plan,
                             const unordered_map<LogicalOperator *, unordered_set<idx_t>> &pattern_lookup,
@@ -1241,7 +1328,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			RewriteProjectionExpression(input, proj, i, plan_root, is_filter_pattern, is_terminal,
 			                            saved_filter_pattern_exprs);
 		}
-	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER) { // === FILTER: rewrite expressions with pac_filter ===
+	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER) { // === FILTER: noise PAC sides of comparisons ===
 		// Inline saved projection arithmetic expressions into filter expressions.
 		// This fuses the projection's list_transform into the filter's lambda for a single pass.
 		if (!saved_filter_pattern_exprs.empty()) {
@@ -1262,15 +1349,14 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				if (pac_bindings.empty()) {
 					continue;
 				}
-				auto result = RewriteExpressionWithCounters(input, pac_bindings, filter_expr.get(), plan_root,
-				                                            PacWrapKind::PAC_FILTER);
+				auto result = RewriteFilterWithNoised(input, pac_bindings, filter_expr.get(), plan_root);
 				if (result) {
 					filter.expressions[expr_idx] = std::move(result);
 				}
 			}
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
-	           op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) { // === JOIN: rewrite comparison conditions ===
+	           op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) { // === JOIN: noise PAC sides of conditions ===
 		// Inline saved projection arithmetic into join conditions
 		if (!saved_filter_pattern_exprs.empty()) {
 			auto &join = op->Cast<LogicalComparisonJoin>();
@@ -1289,79 +1375,18 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				continue;
 			}
 			auto &cond = join.conditions[expr_idx];
-			auto left_bindings = FindAllPacBindingsInExpression(cond.left.get(), plan_root);
-			auto right_bindings = FindAllPacBindingsInExpression(cond.right.get(), plan_root);
-			bool left_is_list = !left_bindings.empty();
-			bool right_is_list = !right_bindings.empty();
-			if (!left_is_list && !right_is_list) {
-				continue;
+			auto lb = FindAllPacBindingsInExpression(cond.left.get(), plan_root);
+			auto rb = FindAllPacBindingsInExpression(cond.right.get(), plan_root);
+			if (!lb.empty()) {
+				auto r = NoisePacNumericExpr(input, lb, cond.left.get(), plan_root);
+				if (r) {
+					cond.left = std::move(r);
+				}
 			}
-			if (left_is_list && right_is_list) { // Both sides are lists: CROSS_PRODUCT + FILTER with list_zip
-				// Combine all PAC bindings, deduplicating by hash
-				vector<PacBindingInfo> all_bindings;
-				unordered_set<uint64_t> seen_hashes;
-				for (auto &b : left_bindings) {
-					uint64_t h = HashBinding(b.binding);
-					if (seen_hashes.insert(h).second) {
-						all_bindings.push_back(b);
-					}
-				}
-				for (auto &b : right_bindings) {
-					uint64_t h = HashBinding(b.binding);
-					if (seen_hashes.insert(h).second) {
-						all_bindings.push_back(b);
-					}
-				}
-				for (idx_t j = 0; j < all_bindings.size(); j++) {
-					all_bindings[j].index = j;
-				}
-				auto comparison = // Build comparison expression from the join condition
-				    make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
-				auto pac_filter_expr = RewriteExpressionWithCounters(input, all_bindings, comparison.get(), plan_root,
-				                                                     PacWrapKind::PAC_FILTER);
-				if (pac_filter_expr) {
-					auto cross_product = // Convert COMPARISON_JOIN to CROSS_PRODUCT + FILTER
-					    LogicalCrossProduct::Create(std::move(join.children[0]), std::move(join.children[1]));
-					auto filter_op = make_uniq<LogicalFilter>();
-					filter_op->expressions.push_back(std::move(pac_filter_expr));
-					filter_op->children.push_back(std::move(cross_product));
-
-					// Invalidate all patterns that pointed to the old join (now destroyed)
-					for (auto &p : patterns) {
-						if (p.parent_op == op) {
-							p.parent_op = nullptr;
-						}
-					}
-					op_ptr = std::move(filter_op);
-					break; // Replaced operator, can't process more conditions
-				}
-			} else {
-				// One side is list: CROSS_PRODUCT + FILTER with pac_filter.
-				// We must use CROSS_PRODUCT + FILTER (not cond.left/right rewrite) because the
-				// pac_filter expression references bindings from BOTH join children, and DuckDB's
-				// ColumnBindingResolver resolves cond.left against left bindings only.
-				auto &pac_bindings = left_is_list ? left_bindings : right_bindings;
-				if (pac_bindings.empty()) {
-					continue;
-				}
-				auto comparison =
-				    make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
-				auto pac_filter_expr = RewriteExpressionWithCounters(input, pac_bindings, comparison.get(), plan_root,
-				                                                     PacWrapKind::PAC_FILTER);
-				if (pac_filter_expr) {
-					auto cross_product =
-					    LogicalCrossProduct::Create(std::move(join.children[0]), std::move(join.children[1]));
-					auto filter_op = make_uniq<LogicalFilter>();
-					filter_op->expressions.push_back(std::move(pac_filter_expr));
-					filter_op->children.push_back(std::move(cross_product));
-
-					for (auto &p : patterns) {
-						if (p.parent_op == op) {
-							p.parent_op = nullptr;
-						}
-					}
-					op_ptr = std::move(filter_op);
-					break;
+			if (!rb.empty()) {
+				auto r = NoisePacNumericExpr(input, rb, cond.right.get(), plan_root);
+				if (r) {
+					cond.right = std::move(r);
 				}
 			}
 		}
@@ -1385,8 +1410,8 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	// Bottom-up rewrite pass
 	// - Aggregates: pac_sum → pac_sum_counters, then aggregate-over-counters → _list
 	// - Projections: update col_ref types, build list_transform + pac_noised/pass-through
-	// - Filters: build list_transform + pac_filter
-	// - Joins: rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
+	// - Filters: noise PAC sides of comparisons with pac_noised
+	// - Joins: noise PAC sides of join conditions with pac_noised
 	unordered_map<uint64_t, unique_ptr<Expression>> saved_filter_pattern_exprs;
 	RewriteBottomUp(plan, input, plan, pattern_lookup, patterns, saved_filter_pattern_exprs);
 	plan->ResolveOperatorTypes();
