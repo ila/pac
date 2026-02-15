@@ -1,9 +1,9 @@
-# q14: 64-possible-worlds-semantics with lambdas. 
-# we calculate the expression (100*x[1]/x[2]) in a list_transform-lambda for all 64 outcomes
-# the outcome of that expression is then reduced to a single noised value with pac_noised() and cast it to its expected type
-# since that expression contains two aggregates, we list_zip two counters into a list of two values first
-# the inner list-_transforms are just to cast the DOUBLE counter values back to their original type
-# the final computed expression is then reduced to a single noised double value using pac_noised and cast to the exptected type
+-- q14: 64-possible-worlds-semantics with lambdas. 
+-- we calculate the expression (100*x[1]/x[2]) in a list_transform-lambda for all 64 outcomes
+-- the outcome of that expression is then reduced to a single noised value with pac_noised() and cast it to its expected type
+-- since that expression contains two aggregates, we list_zip two counters into a list of two values first
+-- the inner list-_transforms are just to cast the DOUBLE counter values back to their original type
+-- the final computed expression is then reduced to a single noised double value using pac_noised and cast to the exptected type
 SELECT CAST(pac_noised(
               list_transform(
                 list_zip(list_transform(

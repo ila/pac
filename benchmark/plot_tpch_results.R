@@ -1,8 +1,9 @@
 #!/usr/bin/env Rscript
-# Compact TPC-H benchmark plotter
-# Keeps package installation/style and creates a single plot: x=query, y=time, legend=baseline/PAC
+# TPC-H benchmark plotter
+# Reads CSV with columns: query, mode, median_ms
+# When "simple hash PAC" data is present, splits PAC bars into core + PU-key join overhead
 
-# Configure user-local library path for package installation (keep original behavior)
+# Configure user-local library path for package installation
 user_lib <- Sys.getenv("R_LIBS_USER")
 if (user_lib == "") {
   user_lib <- file.path(Sys.getenv("HOME"), "R", "libs")
@@ -12,9 +13,7 @@ if (!dir.exists(user_lib)) {
 }
 .libPaths(c(user_lib, .libPaths()))
 
-required_packages <- c(
-  "ggplot2", "dplyr", "readr", "scales", "stringr", "extrafont", "gridExtra", "grid", "tidyr"
-)
+required_packages <- c("ggplot2", "dplyr", "readr", "scales", "stringr")
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 installed <- rownames(installed.packages())
 for (pkg in required_packages) {
@@ -25,16 +24,11 @@ for (pkg in required_packages) {
 }
 
 suppressPackageStartupMessages({
-  library(stringi)
   library(ggplot2)
   library(dplyr)
   library(readr)
   library(scales)
   library(stringr)
-  library(extrafont)
-  library(gridExtra)
-  library(grid)
-  library(tidyr)
 })
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -45,7 +39,7 @@ if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE, showWarnin
 
 input_basename <- basename(input_csv)
 
-# Try to extract scale factor from filename: look for 'sf' followed by digits and optional '.' or '_' then digits
+# Try to extract scale factor from filename
 sf_match <- regmatches(input_basename, regexec("sf([0-9]+(?:[._][0-9]+)?)", input_basename, perl = TRUE))[[1]]
 if (length(sf_match) > 1) {
   sf_str <- gsub('_', '.', sf_match[2])
@@ -53,195 +47,170 @@ if (length(sf_match) > 1) {
   sf_str <- NA_character_
 }
 
-# Read CSV
+# Read CSV (format: query, mode, median_ms)
 raw <- suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
 
-# Validate expected columns
-expected_cols <- c("query", "mode", "run", "time_ms")
+expected_cols <- c("query", "mode", "median_ms")
 missing_cols <- setdiff(expected_cols, colnames(raw))
 if (length(missing_cols) > 0) {
   stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
 }
 
-# Normalize query column to character
-raw <- raw %>% mutate(query = as.character(query))
+raw <- raw %>%
+  mutate(query = as.character(query), mode = as.character(mode)) %>%
+  filter(!is.na(median_ms) & !is.na(mode))
 
-# Ensure mode is a character and normalize values
-raw <- raw %>% mutate(mode = as.character(mode))
+if (nrow(raw) == 0) stop("No valid data to plot.")
 
-# Filter out any rows with missing time or missing mode
-raw <- raw %>% filter(!is.na(time_ms) & !is.na(mode))
-if (nrow(raw) == 0) stop("No valid time data to plot.")
+# Extract query number
+raw <- raw %>% mutate(qnum = as.integer(str_extract(query, "\\d+")))
 
-# Compute per-query per-mode summary (mean + sd)
-summary_df <- raw %>%
-  group_by(query, mode) %>%
-  summarize(mean_time = mean(time_ms, na.rm = TRUE), sd_time = sd(time_ms, na.rm = TRUE), runs = n(), .groups = "drop")
+# Omit queries that don't use PAC or are not allowed
+omit_queries <- c(2, 3, 10, 11, 16, 18)
+raw <- raw %>% filter(!(qnum %in% omit_queries))
 
-# Add numeric query number to help filtering (q01, Q1, etc.)
-summary_df <- summary_df %>% mutate(qnum = as.integer(str_extract(query, "\\d+")))
+# Keep only base queries (no variants like q08-nolambda)
+raw <- raw %>% filter(query == sprintf("q%02d", qnum))
 
-# Determine number of runs per query (expect same across queries)
-runs_per_query <- raw %>% group_by(query) %>% summarize(n_runs = n_distinct(run), .groups = "drop")
-if (nrow(runs_per_query) == 0) n_runs_text <- "unknown" else {
-  minr <- min(runs_per_query$n_runs, na.rm = TRUE)
-  maxr <- max(runs_per_query$n_runs, na.rm = TRUE)
-  if (minr == maxr) n_runs_text <- as.character(minr) else n_runs_text <- paste0(minr, "-", maxr)
-}
+if (nrow(raw) == 0) stop("No data left after filtering.")
 
-# Prepare ordering of queries by numeric value (support q01/q1 or just numeric)
-query_order <- summary_df %>%
-  mutate(qnum = as.integer(str_extract(query, "\\d+"))) %>%
-  arrange(qnum) %>%
-  pull(query) %>%
-  unique()
-if (length(query_order) == 0) query_order <- unique(summary_df$query)
+# Rename modes
+raw <- raw %>% mutate(mode = case_when(
+  mode == "baseline" ~ "DuckDB",
+  mode == "SIMD PAC" ~ "PAC",
+  TRUE ~ mode
+))
 
-summary_df$query <- factor(summary_df$query, levels = query_order)
+# Ordered query list
+query_order <- raw %>% distinct(query, qnum) %>% arrange(qnum) %>% pull(query)
 
-# Provide a plotting-safe mean time for log scale (replace non-positive values with a tiny positive number)
-summary_df <- summary_df %>% mutate(mean_time_plot = ifelse(mean_time <= 0 | is.na(mean_time), 1e-3, mean_time))
+# Slowdown report
+baseline_df <- raw %>% filter(mode == "DuckDB") %>% select(query, baseline_time = median_ms)
+other_modes <- raw %>% filter(mode != "DuckDB") %>% select(query, mode, median_ms)
+slowdown_df <- other_modes %>%
+  left_join(baseline_df, by = "query") %>%
+  filter(!is.na(baseline_time) & baseline_time > 0) %>%
+  mutate(slowdown = median_ms / baseline_time)
 
-# ============================================================================
-# Compute slowdown statistics for each mode compared to baseline
-# ============================================================================
-compute_slowdown_report <- function(df) {
-  # Get baseline times per query
-  baseline_df <- df %>% filter(mode == "baseline") %>% select(query, baseline_time = mean_time)
-
-  # Get all non-baseline modes
-  other_modes <- df %>% filter(mode != "baseline") %>% select(query, mode, mean_time)
-
-  # Join to compute slowdown ratio for each query/mode
-  slowdown_df <- other_modes %>%
-    left_join(baseline_df, by = "query") %>%
-    filter(!is.na(baseline_time) & baseline_time > 0) %>%
-    mutate(slowdown = mean_time / baseline_time)
-
-  # Compute per-mode statistics
+if (nrow(slowdown_df) > 0) {
   mode_stats <- slowdown_df %>%
     group_by(mode) %>%
     summarize(
-      worst_slowdown = max(slowdown, na.rm = TRUE),
-      worst_query = query[which.max(slowdown)],
-      avg_slowdown = mean(slowdown, na.rm = TRUE),
-      median_slowdown = median(slowdown, na.rm = TRUE),
-      best_slowdown = min(slowdown, na.rm = TRUE),
-      best_query = query[which.min(slowdown)],
-      n_queries = n(),
+      worst = max(slowdown), worst_q = query[which.max(slowdown)],
+      avg = mean(slowdown), median = median(slowdown),
+      best = min(slowdown), best_q = query[which.min(slowdown)],
       .groups = "drop"
     )
-
-  return(mode_stats)
-}
-
-# Generate text report
-generate_report_text <- function(mode_stats) {
-  report_lines <- c()
-
+  message("\n=== Slowdown Report (vs DuckDB) ===")
   for (i in seq_len(nrow(mode_stats))) {
-    row <- mode_stats[i, ]
-    mode_name <- row$mode
-
-    # Format the line
-    line <- sprintf(
-      "%s: worst %.1fx (%s), avg %.1fx, best %.1fx (%s)",
-      mode_name,
-      row$worst_slowdown,
-      row$worst_query,
-      row$avg_slowdown,
-      row$best_slowdown,
-      row$best_query
-    )
-    report_lines <- c(report_lines, line)
+    r <- mode_stats[i, ]
+    message(sprintf("%s: worst %.1fx (%s), avg %.1fx, median %.1fx, best %.1fx (%s)",
+                    r$mode, r$worst, r$worst_q, r$avg, r$median, r$best, r$best_q))
   }
-
-  return(paste(report_lines, collapse = "\n"))
+  message("===================================\n")
 }
 
-# Compute the stats
-mode_stats <- compute_slowdown_report(summary_df)
-report_text <- generate_report_text(mode_stats)
+# Check if simple hash PAC data is available for the split
+has_simple_hash <- "simple hash PAC" %in% raw$mode
 
-# Print report to console as well
-message("\n=== Slowdown Report (vs baseline) ===")
-message(report_text)
-message("=====================================\n")
+# Build plot data
+# Each row: query, x_pos (numeric), component (fill), time
+duckdb_df <- raw %>% filter(mode == "DuckDB") %>% select(query, median_ms)
+pac_df <- raw %>% filter(mode == "PAC") %>% select(query, pac_time = median_ms)
 
-# Choose palette for common modes; if unknown modes are present they'll get default ggplot colors
-method_colors <- c(
-  "baseline" = "#1f77b4",
-  "SIMD PAC" = "#ff7f0e",
-  "naive PAC" = "#2ca02c",
-  "simple hash PAC" = "#9467bd"
-)
-
-# Build a plotting function so we can save two variants (with/without Q01)
-build_plot <- function(df, out_file, plot_title, width = 18, height = 8, base_size = 40, base_family = "sans") {
-  p <- ggplot(df, aes(x = query, y = mean_time_plot, fill = mode)) +
-    geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-    scale_fill_manual(values = method_colors, name = "Mode") +
-    scale_y_log10(labels = scales::comma) +
-    labs(x = "Query", y = "Time (ms, log scale)", fill = "Mode") +
-    theme_bw(base_size = base_size, base_family = base_family) +
-    theme(
-      panel.grid.major = element_line(linewidth = 1.0),
-      panel.grid.minor = element_blank(),
-      legend.position = "top",
-      legend.title = element_text(size = base_size - 14),
-      legend.text = element_text(size = base_size - 16),
-      axis.text.x = element_text(angle = 45, hjust = 1, size = base_size - 16),
-      axis.text.y = element_text(size = base_size - 12),
-      axis.title = element_text(size = base_size - 10),
-      plot.title = element_text(size = base_size + 4, face = "bold", hjust = 0.5)
-    ) +
-    ggtitle(plot_title)
-
-  # Save with higher resolution and larger default dimensions
-  ggsave(filename = out_file, plot = p, width = width, height = height, dpi = 300)
-  message("Plot saved to: ", out_file)
-}
-
-build_plot_paper <- function(df, out_file, plot_title, width = 2000, height = 1000, res = 200, base_size = 40, base_family = "Linux Libertine") {
-  p <- ggplot(df, aes(x = query, y = mean_time_plot, fill = mode)) +
-    geom_col(position = position_dodge(width = 0.8), width = 0.7) +
-    scale_fill_manual(values = method_colors, name = "Mode") +
-    scale_y_log10(labels = scales::comma) +
-    labs(x = "Query", y = "Time (ms, log scale)", fill = "Mode") +
-    theme_bw(base_size = base_size, base_family = base_family) +
-    theme(
-      panel.grid.major = element_line(linewidth = 1.0),
-      panel.grid.minor = element_blank(),
-      legend.position = "top",
-      legend.margin = margin(0, 0, 0, 0),
-      legend.box.margin = margin(0, 0, -10, 0),
-      legend.title = element_text(size = base_size - 14),
-      legend.text = element_text(size = base_size - 16),
-      axis.text.x = element_text(angle = 45, hjust = 1, size = base_size - 16),
-      axis.text.y = element_text(size = base_size - 12),
-      axis.title = element_text(size = base_size - 10),
-      plot.margin = margin(5, 5, 5, 5)
+if (has_simple_hash) {
+  hash_df <- raw %>% filter(mode == "simple hash PAC") %>% select(query, hash_time = median_ms)
+  # Join all three
+  combined <- duckdb_df %>%
+    inner_join(pac_df, by = "query") %>%
+    inner_join(hash_df, by = "query") %>%
+    mutate(
+      join_overhead = pmax(0, pac_time - hash_time),
+      core_time = hash_time
     )
-
-  # Save as PNG with specified dimensions in pixels
-  png(filename = out_file, width = width, height = height, res = res)
-  print(p)
-  dev.off()
-  message("Plot saved to: ", out_file)
+  # Build long-format plot data
+  plot_data <- bind_rows(
+    combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
+    combined %>% transmute(query, bar = "PAC", component = "PAC", time = core_time),
+    combined %>% transmute(query, bar = "PAC", component = "PU-key join", time = join_overhead)
+  )
+} else {
+  # No split: simple DuckDB vs PAC
+  combined <- duckdb_df %>% inner_join(pac_df, by = "query")
+  plot_data <- bind_rows(
+    combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
+    combined %>% transmute(query, bar = "PAC", component = "PAC", time = pac_time)
+  )
 }
 
-# Title with sf and runs
-title_sf <- ifelse(is.na(sf_str), "sf=unknown", paste0("sf=", sf_str))
-plot_title_all <- paste0("TPC-H Benchmark, ", title_sf, ", runs=", n_runs_text)
+# Assign numeric x positions with manual dodge
+plot_data <- plot_data %>%
+  mutate(
+    qidx = match(query, query_order),
+    x_pos = qidx + ifelse(bar == "DuckDB", -0.2, 0.2)
+  )
 
-# Output file names
+# Component ordering: PU-key join on top, core on bottom, DuckDB separate
+if (has_simple_hash) {
+  comp_levels <- c("PU-key join", "PAC", "DuckDB")
+  comp_colors <- c("DuckDB" = "#1f77b4", "PAC" = "#ff7f0e", "PU-key join" = "#d62728")
+} else {
+  comp_levels <- c("DuckDB", "PAC")
+  comp_colors <- c("DuckDB" = "#1f77b4", "PAC" = "#ff7f0e")
+}
+plot_data$component <- factor(plot_data$component, levels = comp_levels)
+
+# Title
+title_sf <- ifelse(is.na(sf_str), "sf=unknown", paste0("SF=", sf_str))
+plot_title <- paste0("TPC-H Benchmark, ", title_sf)
+
+# Build plot
+# For log scale with split bars, use overlapping bars instead of stacking:
+# draw the full PAC bar (PU-key join color) first, then overlay the core bar on top.
+# The visible top portion of the PAC bar shows the join overhead.
+if (has_simple_hash) {
+  pac_total <- plot_data %>% filter(bar == "PAC") %>%
+    group_by(query, x_pos) %>%
+    summarize(total = sum(time), .groups = "drop")
+  pac_core <- plot_data %>% filter(component == "PAC")
+  duckdb_bars <- plot_data %>% filter(bar == "DuckDB")
+
+  p <- ggplot() +
+    geom_col(data = duckdb_bars, aes(x = x_pos, y = time, fill = component), width = 0.35) +
+    geom_col(data = pac_total, aes(x = x_pos, y = total, fill = "PU-key join"), width = 0.35) +
+    geom_col(data = pac_core, aes(x = x_pos, y = time, fill = component), width = 0.35) +
+    scale_fill_manual(values = comp_colors, name = NULL,
+                      breaks = c("DuckDB", "PAC", "PU-key join")) +
+    scale_x_continuous(breaks = seq_along(query_order), labels = query_order) +
+    scale_y_log10(labels = scales::comma) +
+    labs(x = "TPC-H Query", y = "Time (ms, log scale)")
+} else {
+  p <- ggplot(plot_data, aes(x = x_pos, y = time, fill = component, width = 0.35)) +
+    geom_col() +
+    scale_fill_manual(values = comp_colors, name = NULL) +
+    scale_x_continuous(breaks = seq_along(query_order), labels = query_order) +
+    scale_y_log10(labels = scales::comma) +
+    labs(x = "TPC-H Query", y = "Time (ms, log scale)")
+}
+
+p <- p +
+  theme_bw(base_size = 40) +
+  theme(
+    panel.grid.major = element_line(linewidth = 1.0),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 28),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
+    axis.text.y = element_text(size = 28),
+    axis.title.x = element_text(size = 32),
+    axis.title.y = element_text(size = 32),
+    plot.title = element_text(size = 44, face = "bold", hjust = 0.5)
+  ) +
+  ggtitle(plot_title)
+
 sf_for_name <- ifelse(is.na(sf_str), "unknown", gsub("\\.", "_", sf_str))
-out_file_all <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, ".png"))
-out_file_paper <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, "_paper.png"))
+out_file <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, ".png"))
 
-# 1) Full plot (all queries)
-build_plot(summary_df, out_file_all, plot_title_all)
-build_plot_paper(summary_df, out_file_paper, plot_title_all)
-
-
-# End of script
+ggsave(filename = out_file, plot = p, width = 18, height = 8, dpi = 300)
+message("Plot saved to: ", out_file)

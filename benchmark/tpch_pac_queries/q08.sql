@@ -1,8 +1,8 @@
-# q08: 64-possible-worlds-semantics using lambda expressions: 
-# we calculate the expression sum(nation=='BRAZIL'?volume:0)/SUM(volume) in a list_transform-lambda for all 64 outcomes
-# since that expression contains two aggregates, we list_zip two counters into a list of two values first
-# the inner list_transforms are just to cast the DOUBLE counter values back to their original type
-# the final computed expression is then reduced to a single noised double value using pac_noised and cast to the exptected type
+-- q08: 64-possible-worlds-semantics using lambda expressions: 
+-- we calculate the expression sum(nation=='BRAZIL'?volume:0)/SUM(volume) in a list_transform-lambda for all 64 outcomes
+-- since that expression contains two aggregates, we list_zip two counters into a list of two values first
+-- the inner list_transforms are just to cast the DOUBLE counter values back to their original type
+-- the final computed expression is then reduced to a single noised double value using pac_noised and cast to the exptected type
 SELECT o_year, 
        CAST(pac_noised(
               list_transform(

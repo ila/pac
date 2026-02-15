@@ -25,6 +25,8 @@
 #include <thread>
 #include <unistd.h>
 #include <limits.h>
+#include <dirent.h>
+#include <map>
 
 namespace duckdb {
 static string Timestamp() {
@@ -113,6 +115,15 @@ static string FormatNumber(double v) {
     return s;
 }
 
+static double Median(vector<double> v) {
+    std::sort(v.begin(), v.end());
+    size_t n = v.size();
+    if (n % 2 == 1) {
+        return v[n / 2];
+    }
+    return (v[n / 2 - 1] + v[n / 2]) / 2.0;
+}
+
 static void Log(const string &msg) {
     Printer::Print("[" + Timestamp() + "] " + msg);
 }
@@ -127,6 +138,53 @@ static string FindQueryFile(const string &dir, int qnum) {
 	char buf[1024];
 	snprintf(buf, sizeof(buf), "q%02d.sql", qnum);
 	return dir + "/" + string(buf);
+}
+
+// Info about a discovered query file
+struct QueryEntry {
+	string filename;     // e.g. "q08-nolambda.sql"
+	string label;        // e.g. "q08-nolambda" (for CSV output)
+	int query_number;    // e.g. 8 (for PRAGMA tpch baseline)
+};
+
+// Scan a directory for q*.sql files, parse query numbers, return sorted
+static vector<QueryEntry> DiscoverQueryFiles(const string &dir) {
+	vector<QueryEntry> entries;
+	DIR *d = opendir(dir.c_str());
+	if (!d) {
+		return entries;
+	}
+	struct dirent *ent;
+	while ((ent = readdir(d)) != nullptr) {
+		string name = ent->d_name;
+		if (name.size() < 5 || name[0] != 'q') {
+			continue;
+		}
+		if (name.substr(name.size() - 4) != ".sql") {
+			continue;
+		}
+		// Parse query number from digits after 'q'
+		int qnum = 0;
+		size_t i = 1;
+		while (i < name.size() && name[i] >= '0' && name[i] <= '9') {
+			qnum = qnum * 10 + (name[i] - '0');
+			i++;
+		}
+		if (qnum == 0) {
+			continue;
+		}
+		string label = name.substr(0, name.size() - 4);
+		entries.push_back({name, label, qnum});
+	}
+	closedir(d);
+	// Sort by query number, then by label length (shorter first, so q08 before q08-nolambda)
+	std::sort(entries.begin(), entries.end(), [](const QueryEntry &a, const QueryEntry &b) {
+		if (a.query_number != b.query_number) {
+			return a.query_number < b.query_number;
+		}
+		return a.label < b.label;
+	});
+	return entries;
 }
 
 static string ReadFileToString(const string &path) {
@@ -243,7 +301,7 @@ static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir
     return false;
 }
 
-int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash) {
+int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive, bool run_simple_hash, int threads) {
     try {
         Log(string("run_naive flag: ") + (run_naive ? string("true") : string("false")));
     	Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
@@ -264,16 +322,16 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
         }
         bool db_exists = FileExists(db_actual);
         if (db_exists) {
-            if (user_provided_db) {
-                Log(string("Warning: database file '") + db_actual + "' already exists; running CALL dbgen may recreate/overwrite existing tables in this database.");
-            } else {
-                Log(string("Connecting to existing DuckDB database: ") + db_actual + string(" (skipping data generation since no DB path was provided)."));
-            }
+            Log(string("Connecting to existing DuckDB database: ") + db_actual + string(" (skipping data generation)."));
         } else {
             Log(string("Will create/populate DuckDB database: ") + db_actual);
         }
         DuckDB db(db_actual.c_str());
         Connection con(db);
+
+        // Set thread count
+        Log("Setting threads to " + std::to_string(threads));
+        con.Query("SET threads TO " + std::to_string(threads) + ";");
 
         // Decide output filename if empty
         string actual_out = out_csv;
@@ -303,7 +361,7 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
         // - If the DB file doesn't exist -> create it by calling dbgen
         // - If the DB file exists and the user explicitly provided a path -> warn and re-run dbgen (may recreate tables)
         // - If the DB file exists and the DB was derived from sf (user didn't provide a path) -> skip dbgen
-        if (!db_exists || user_provided_db) {
+        if (!db_exists) {
             // First create schema with PK/FK constraints
             Log("Creating TPC-H schema with constraints...");
             string schema_file = FindSchemaFile("pac_tpch_schema.sql");
@@ -342,138 +400,125 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
         if (!csv.is_open()) {
             throw std::runtime_error("Failed to open output CSV: " + actual_out);
         }
-        // CSV columns: query,mode,run,time_ms
-        // For baseline rows, time_ms = TPCH warm-run time.
-        // For PAC rows (SIMD PAC / naive PAC), time_ms = measured PAC execution time.
-        csv << "query,mode,run,time_ms\n";
+        // CSV columns: query,mode,median_ms (median of 5 hot runs)
+        csv << "query,mode,median_ms\n";
 
-    	// Locate PAC query files (hardcoded directories)
-    	// The repository keeps PAC query variants under the 'benchmark' root. We hardcode
-    	// the three variant subdirectories here. The caller's `queries_dir` parameter
-    	// is treated as the root (default is "benchmark").
+    	// Locate PAC query directories
     	string bitslice_dir = queries_dir + string("/tpch_pac_queries");
     	string naive_dir = queries_dir + string("/tpch_pac_naive_queries");
     	string simple_hash_dir = queries_dir + string("/tpch_pac_simple_hash_queries");
 
-        for (int q = 1; q <= 22; ++q) {
-            // Skip Q2, Q10, Q11, Q16, Q18 for all variants
-            if (q == 2 || q == 10 || q == 11 || q == 16 || q == 18) {
-                Log("Skipping query Q" + std::to_string(q) + " as requested.");
-                continue;
-            }
-            Log("=== Query " + std::to_string(q) + " ===");
-            // Cold run (do not time) - pragma tpch(q);
-            {
-                string pragma = "PRAGMA tpch(" + std::to_string(q) + ");";
-                auto r_cold = con.Query(pragma);
-                if (r_cold && r_cold->HasError()) {
-                    Log(string("Cold PRAGMA tpch(") + std::to_string(q) + ") error: " + r_cold->GetError());
+    	// Discover all .sql files in the bitslice directory
+    	auto query_entries = DiscoverQueryFiles(bitslice_dir);
+    	if (query_entries.empty()) {
+    		throw std::runtime_error("No query files found in " + bitslice_dir);
+    	}
+    	Log("Discovered " + std::to_string(query_entries.size()) + " query files in " + bitslice_dir);
+    	for (auto &e : query_entries) {
+    		Log("  " + e.label + " (baseline Q" + std::to_string(e.query_number) + ")");
+    	}
+
+    	// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
+    	std::map<int, double> baseline_cache;
+
+        for (auto &entry : query_entries) {
+            Log("=== " + entry.label + " (Q" + std::to_string(entry.query_number) + ") ===");
+
+            // Run baseline (PRAGMA tpch) if not already cached for this query number
+            if (baseline_cache.find(entry.query_number) == baseline_cache.end()) {
+                string pragma = "PRAGMA tpch(" + std::to_string(entry.query_number) + ");";
+
+                // Cold run (do not time)
+                {
+                    auto r_cold = con.Query(pragma);
+                    if (r_cold && r_cold->HasError()) {
+                        Log(string("Cold PRAGMA tpch(") + std::to_string(entry.query_number) + ") error: " + r_cold->GetError());
+                    }
+                    Log("Cold run completed for TPCH query " + std::to_string(entry.query_number));
                 }
-                Log("Cold run completed for TPCH query " + std::to_string(q));
-            }
 
-            // 1st warm run (do not time) to warm caches
-            {
-                string pragma = "PRAGMA tpch(" + std::to_string(q) + ");";
-                auto r_warm_init = con.Query(pragma);
-                if (r_warm_init && r_warm_init->HasError()) {
-                    Log(string("Warm (init) PRAGMA tpch(") + std::to_string(q) + ") error: " + r_warm_init->GetError());
+                // 1st warm run (do not time) to warm caches
+                {
+                    auto r_warm_init = con.Query(pragma);
+                    if (r_warm_init && r_warm_init->HasError()) {
+                        Log(string("Warm (init) PRAGMA tpch(") + std::to_string(entry.query_number) + ") error: " + r_warm_init->GetError());
+                    }
+                    Log("Warm (init) run completed for TPCH query " + std::to_string(entry.query_number));
                 }
-                Log("Warm (init) run completed for TPCH query " + std::to_string(q));
+
+                // Wait 0.5s before timed hot runs
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                // Hot runs: 5 runs, take median
+                vector<double> tpch_times_ms;
+                for (int t = 1; t <= 5; ++t) {
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto r_warm = con.Query(pragma);
+                    auto t1 = std::chrono::steady_clock::now();
+                    double tpch_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    tpch_times_ms.push_back(tpch_time_ms);
+                    Log("TPCH query " + std::to_string(entry.query_number) + " hot run " + std::to_string(t) + " time (ms): " + FormatNumber(tpch_time_ms));
+                    if (r_warm && r_warm->HasError()) {
+                        Log(string("TPCH hot run error for query ") + std::to_string(entry.query_number) + ": " + r_warm->GetError());
+                    }
+                }
+                double baseline_median = Median(tpch_times_ms);
+                Log("TPCH query " + std::to_string(entry.query_number) + " median (ms): " + FormatNumber(baseline_median));
+                baseline_cache[entry.query_number] = baseline_median;
             }
 
-            // Wait 0.5s before timed warm runs
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Write baseline row for this entry (reuse cached median)
+            csv << entry.label << ",baseline," << FormatNumber(baseline_cache[entry.query_number]) << "\n";
 
-            // Warm runs (time it): do 3 runs and record each
-            vector<double> tpch_times_ms;
-            for (int t = 1; t <= 3; ++t) {
-                string pragma = "PRAGMA tpch(" + std::to_string(q) + ");";
-                auto t0 = std::chrono::steady_clock::now();
-                auto r_warm = con.Query(pragma);
-                auto t1 = std::chrono::steady_clock::now();
-                double tpch_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                tpch_times_ms.push_back(tpch_time_ms);
-                Log("TPCH query " + std::to_string(q) + " warm run " + std::to_string(t) + " time (ms): " + FormatNumber(tpch_time_ms));
-                if (r_warm && r_warm->HasError()) { Log(string("TPCH warm run error for query ") + std::to_string(q) + ": " + r_warm->GetError()); }
-            }
-            // Record baseline (TPCH warm) runs in the CSV. Baseline mode's time_ms is the TPCH warm-run time.
-            for (int run = 1; run <= 3; ++run) {
-                double tpch_time_ms = tpch_times_ms.at(run - 1);
-                csv << q << ",baseline," << run << "," << FormatNumber(tpch_time_ms) << "\n";
-            }
-
-            string bits_qfile = FindQueryFile(bitslice_dir, q);
-            if (!FileExists(bits_qfile)) {
-                throw std::runtime_error("Bitslice PAC query file not found for query " + std::to_string(q) + ": " + bits_qfile);
-            }
-            string pac_sql_bits = ReadFileToString(bits_qfile);
+            // Read the PAC query file
+            string pac_sql_bits = ReadFileToString(bitslice_dir + "/" + entry.filename);
             if (pac_sql_bits.empty()) {
-                throw std::runtime_error("Bitslice PAC query file " + bits_qfile + " is empty or unreadable");
+                throw std::runtime_error("PAC query file " + entry.filename + " is empty or unreadable");
             }
 
-            // naive query file (optional depending on run_naive)
-            string pac_sql_naive;
+            // Build variant list: bitslice always; naive and simple_hash if requested and file exists
+            vector<pair<string,string>> pac_variants;
+            pac_variants.emplace_back("SIMD PAC", pac_sql_bits);
             if (run_naive) {
-                string naive_qfile = FindQueryFile(naive_dir, q);
-                if (!FileExists(naive_qfile)) {
-                    throw std::runtime_error("Naive PAC query file not found for query " + std::to_string(q) + ": " + naive_qfile);
-                }
-                pac_sql_naive = ReadFileToString(naive_qfile);
-                if (pac_sql_naive.empty()) {
-                    throw std::runtime_error("Naive PAC query file " + naive_qfile + " is empty or unreadable");
+                string naive_qfile = FindQueryFile(naive_dir, entry.query_number);
+                if (FileExists(naive_qfile)) {
+                    string sql = ReadFileToString(naive_qfile);
+                    if (!sql.empty()) {
+                        pac_variants.emplace_back("naive PAC", sql);
+                    }
                 }
             }
-
-            // simple hash query file (optional depending on run_simple_hash)
-            string pac_sql_simple_hash;
             if (run_simple_hash) {
-                string simple_hash_qfile = FindQueryFile(simple_hash_dir, q);
-                if (!FileExists(simple_hash_qfile)) {
-                    throw std::runtime_error("Simple hash PAC query file not found for query " + std::to_string(q) + ": " + simple_hash_qfile);
-                }
-                pac_sql_simple_hash = ReadFileToString(simple_hash_qfile);
-                if (pac_sql_simple_hash.empty()) {
-                    throw std::runtime_error("Simple hash PAC query file " + simple_hash_qfile + " is empty or unreadable");
+                string sh_qfile = FindQueryFile(simple_hash_dir, entry.query_number);
+                if (FileExists(sh_qfile)) {
+                    string sql = ReadFileToString(sh_qfile);
+                    if (!sql.empty()) {
+                        pac_variants.emplace_back("simple hash PAC", sql);
+                    }
                 }
             }
-
-        	// Run PAC variants: baseline + bitslice always; naive and simple hash additionally when requested
-        	vector<pair<string,string>> pac_variants;
-        	pac_variants.emplace_back("bitslice", pac_sql_bits);
-        	if (run_naive) { pac_variants.emplace_back("naive", pac_sql_naive); }
-        	if (run_simple_hash) { pac_variants.emplace_back("simple_hash", pac_sql_simple_hash); }
 
             for (auto &pv : pac_variants) {
-                const string &variant = pv.first;
+                const string &mode_str = pv.first;
                 const string &pac_sql = pv.second;
-                string mode_str;
-                if (variant == "bitslice") {
-                    mode_str = "SIMD PAC"; // bitslice implementation
-                } else if (variant == "naive") {
-                    mode_str = "naive PAC";
-                } else if (variant == "simple_hash") {
-                    mode_str = "simple hash PAC";
-                } else {
-                    mode_str = variant;
+                // Run PAC query 5 times, take median
+                vector<double> pac_times_ms;
+                for (int run = 1; run <= 5; ++run) {
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto r_pac = con.Query(pac_sql);
+                    auto t1 = std::chrono::steady_clock::now();
+                    double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    if (r_pac && r_pac->HasError()) {
+                        throw std::runtime_error("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) + " error: " + r_pac->GetError());
+                    }
+                    pac_times_ms.push_back(pac_time_ms);
+                    Log("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) + " time (ms): " + FormatNumber(pac_time_ms));
                 }
-                 // Run PAC query 3 times for this variant
-                 for (int run = 1; run <= 3; ++run) {
-                     auto t0 = std::chrono::steady_clock::now();
-                     auto r_pac = con.Query(pac_sql);
-                     auto t1 = std::chrono::steady_clock::now();
-                     double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                     if (r_pac && r_pac->HasError()) {
-                         // On error, fail fast so failures are obvious.
-                         throw std::runtime_error("PAC (" + variant + ") query " + std::to_string(q) + " run " + std::to_string(run) + " error: " + r_pac->GetError());
-                     } else {
-                         Log("PAC (" + variant + ") query " + std::to_string(q) + " run " + std::to_string(run) + " time (ms): " + FormatNumber(pac_time_ms));
-                        // For PAC rows, time_ms is the PAC execution time.
-                         csv << q << "," << mode_str << "," << run << "," << FormatNumber(pac_time_ms) << "\n";
-                     }
-                 }
-             }
-         }
+                double pac_median = Median(pac_times_ms);
+                Log("PAC (" + mode_str + ") " + entry.label + " median (ms): " + FormatNumber(pac_median));
+                csv << entry.label << "," << mode_str << "," << FormatNumber(pac_median) << "\n";
+            }
+        }
 
          csv.close();
          Log(string("Benchmark finished. Results written to ") + actual_out);
@@ -519,7 +564,8 @@ static void PrintUsageMain() {
                << "               subdirectories expected: 'tpch_pac_queries' (bitslice), 'tpch_pac_naive_queries' (naive), 'tpch_pac_simple_hash_queries' (simple hash)\n"
                << "  out_csv: optional output CSV path (auto-named if omitted)\n"
                << "  --run-naive: optional flag to instruct the benchmark to run a naive PAC variant as well\n"
-               << "  --run-simple-hash: optional flag to instruct the benchmark to run a simple hash PAC variant as well\n";
+               << "  --run-simple-hash: optional flag to instruct the benchmark to run a simple hash PAC variant as well\n"
+               << "  --threads=N: number of DuckDB threads (default 8)\n";
 }
 
 // Add a small main so this file builds to an executable
@@ -538,9 +584,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Preprocess argv to detect the optional --run-naive and --run-simple-hash flags and remove them from positional parsing
+    // Preprocess argv to detect optional flags and remove them from positional parsing
     bool run_naive = false;
     bool run_simple_hash = false;
+    int threads = 8;
     std::vector<char*> filtered_argv;
     filtered_argv.reserve(argc);
     filtered_argv.push_back(argv[0]);
@@ -552,6 +599,10 @@ int main(int argc, char **argv) {
         }
         if (a == "--run-simple-hash") {
             run_simple_hash = true;
+            continue;
+        }
+        if (a.rfind("--threads=", 0) == 0) {
+            threads = std::stoi(a.substr(10));
             continue;
         }
         filtered_argv.push_back(argv[i]);
@@ -568,5 +619,5 @@ int main(int argc, char **argv) {
     if (filtered_argc > 3) queries_dir = filtered_argv[3];
     if (filtered_argc > 4) out_csv = filtered_argv[4];
 
-    return duckdb::RunTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_naive, run_simple_hash);
+    return duckdb::RunTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_naive, run_simple_hash, threads);
 }

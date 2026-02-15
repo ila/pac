@@ -1,0 +1,73 @@
+query,mode,median_ms
+q01,baseline,549.004625
+q01,SIMD PAC,3032.157917
+q01,simple hash PAC,2169.723709
+q04,baseline,239.8135
+q04,SIMD PAC,245.61
+q04,simple hash PAC,241.16525
+q05,baseline,262.34325
+q05,SIMD PAC,268.365792
+q05,simple hash PAC,267.153708
+q06,baseline,69.164292
+q06,SIMD PAC,205.932458
+q06,simple hash PAC,93.6485
+q07,baseline,245.553
+q07,SIMD PAC,248.352167
+q07,simple hash PAC,249.68975
+q08,baseline,301.3425
+q08,SIMD PAC,303.657625
+q08,simple hash PAC,304.676334
+q08-nolambda,baseline,301.3425
+q08-nolambda,SIMD PAC,305.174708
+q08-nolambda,simple hash PAC,305.956416
+q09,baseline,886.236791
+q09,SIMD PAC,944.1935
+q09,simple hash PAC,928.998791
+q12,baseline,236.556291
+q12,SIMD PAC,238.038541
+q12,simple hash PAC,238.01875
+q13,baseline,920.849917
+q13,SIMD PAC,922.250834
+q13,simple hash PAC,921.188875
+q14,baseline,144.660625
+q14,SIMD PAC,406.248542
+q14,simple hash PAC,173.564875
+q14-nolambda,baseline,144.660625
+q14-nolambda,SIMD PAC,398.548833
+q14-nolambda,simple hash PAC,172.10175
+q15,baseline,111.659125
+q15,SIMD PAC,476.35075
+q15,simple hash PAC,193.395792
+q17,baseline,464.327375
+q17,SIMD PAC,777.895833
+q17,simple hash PAC,486.453666
+q17-nofuse,baseline,464.327375
+q17-nofuse,SIMD PAC,797.686167
+q17-nofuse,simple hash PAC,486.554875
+q17-nolambda,baseline,464.327375
+q17-nolambda,SIMD PAC,774.799625
+q17-nolambda,simple hash PAC,484.333542
+q19,baseline,317.569792
+q19,SIMD PAC,364.503666
+q19,simple hash PAC,335.349
+q20,baseline,196.889708
+q20,SIMD PAC,288.691916
+q20,simple hash PAC,249.431542
+q20-nofuse,baseline,196.889708
+q20-nofuse,SIMD PAC,332.129208
+q20-nofuse,simple hash PAC,250.167667
+q20-nolambda,baseline,196.889708
+q20-nolambda,SIMD PAC,275.4205
+q20-nolambda,simple hash PAC,247.838375
+q21,baseline,811.95025
+q21,SIMD PAC,991.132292
+q21,simple hash PAC,808.267208
+q22,baseline,145.080917
+q22,SIMD PAC,150.151333
+q22,simple hash PAC,147.915375
+q22-nofuse,baseline,145.080917
+q22-nofuse,SIMD PAC,275.109834
+q22-nofuse,simple hash PAC,149.20225
+q22-nolambda,baseline,145.080917
+q22-nolambda,SIMD PAC,148.993083
+q22-nolambda,simple hash PAC,148.271375

@@ -20,7 +20,10 @@ namespace duckdb {
 int RunTPCHBenchmark(const string &db_path = "tpch.db",
                      const string &queries_dir = "benchmark/tpch_pac_queries",
                      double sf = 10.0,
-                     const string &out_csv = "");
+                     const string &out_csv = "",
+                     bool run_naive = false,
+                     bool run_simple_hash = false,
+                     int threads = 8);
 
 } // namespace duckdb
 
